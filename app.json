@@ -1,11 +1,11 @@
 {
   "name": "nb",
   "stack": "container",
-  "description": "The ultimate tool to automate telegram message forwarding. To learn more visit https://github.com/artai8/nb/wiki/Deploy-to-Heroku",
+  "description": "https://t.me/babasou",
   "keywords": ["telegram", "forwarding", "automation"],
-  "website": "https://artai8.dev",
+  "website": "https://t.me/babasou",
   "repository": "https://github.com/artai8/nb",
-  "logo": "https://user-images.githubusercontent.com/66209958/115183360-3fa4d500-a0f9-11eb-9c0f-c5ed03a9ae17.png",
+  "logo": "https://github.com/fluidicon.png",
   "env": {
     "PASSWORD": {
       "description": "The password to protect the web interface",
