@@ -1,0 +1,21 @@
+{
+  "name": "nb",
+  "stack": "container",
+  "description": "The ultimate tool to automate telegram message forwarding. To learn more visit https://github.com/artai8/nb/wiki/Deploy-to-Heroku",
+  "keywords": ["telegram", "forwarding", "automation"],
+  "website": "https://artai8.dev",
+  "repository": "https://github.com/artai8/nb",
+  "logo": "https://user-images.githubusercontent.com/66209958/115183360-3fa4d500-a0f9-11eb-9c0f-c5ed03a9ae17.png",
+  "env": {
+    "PASSWORD": {
+      "description": "The password to protect the web interface",
+      "value": "",
+      "required": true
+    },
+    "MONGO_CON_STR": {
+      "description": "The connection string to mongo db database",
+      "value": "",
+      "required": false
+    }
+  }
+}
