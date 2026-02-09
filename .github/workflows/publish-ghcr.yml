@@ -1,0 +1,51 @@
+name: Build and Publish Docker image to GHCR
+
+on:
+  push:
+    branches: [ "main", "master" ]  # 推送到这些分支时触发
+    tags: [ "v*" ]                  # 推送 v1.0.0 这样的 tag 时触发
+  workflow_dispatch:                # 允许在 Actions 页面手动触发
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # 等于 <用户名>/<仓库名>
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write                 # 必须有这个，才能推送到 GHCR
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch        # 分支名，如 :main
+            type=ref,event=tag           # tag，如 :v1.0.0
+            type=raw,value=latest,enable={{is_default_branch}}  # 默认分支打 latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .                     # Dockerfile 所在目录
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 如果只需要 amd64，可删掉 platforms 这一行；
+          # 多架构示例（可选）：
+          # platforms: linux/amd64,linux/arm64
