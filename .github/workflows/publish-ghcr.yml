@@ -2,13 +2,13 @@ name: Build and Publish Docker image to GHCR
 
 on:
   push:
-    branches: [ "main", "master" ]  # 推送到这些分支时触发
-    tags: [ "v*" ]                  # 推送 v1.0.0 这样的 tag 时触发
+    branches: [ "main", "master" ]  # 看你仓库默认分支是 main 还是 master，都写上
+    tags: [ "v*" ]                  # 推送 v1.0.0 这种 tag 时也会触发
   workflow_dispatch:                # 允许在 Actions 页面手动触发
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # 等于 <用户名>/<仓库名>
+  IMAGE_NAME: artai8/nb             # 这里写死为你的仓库名，也可以用 ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -16,7 +16,7 @@ jobs:
 
     permissions:
       contents: read
-      packages: write                 # 必须有这个，才能推送到 GHCR
+      packages: write               # 必须有，才能推送到 GHCR
 
     steps:
       - name: Checkout source
@@ -35,17 +35,16 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch        # 分支名，如 :main
-            type=ref,event=tag           # tag，如 :v1.0.0
-            type=raw,value=latest,enable={{is_default_branch}}  # 默认分支打 latest
+            type=ref,event=branch                      # 分支名，例 :main
+            type=ref,event=tag                         # tag，例 :v1.0.0
+            type=raw,value=latest,enable={{is_default_branch}}  # 默认分支打 latest 标签
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .                     # Dockerfile 所在目录
+          context: .                                   # Dockerfile 在仓库根目录
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # 如果只需要 amd64，可删掉 platforms 这一行；
-          # 多架构示例（可选）：
+          # 如果你要多架构（比如支持 arm64），可以加：
           # platforms: linux/amd64,linux/arm64
