@@ -1,9 +1,16 @@
 import os
 from typing import Dict, List
 
-from nb.web_ui.run import package_dir  # 修复：正确的导入路径
 from streamlit.components.v1 import html
 from nb.config import write_config
+
+
+def _get_package_dir() -> str:
+    """获取 web_ui 包的实际文件系统路径"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+package_dir = _get_package_dir()
 
 
 def get_list(string: str):
@@ -46,10 +53,17 @@ def apply_theme(st, CONFIG, hidden_container):
         theme = "Dark"
         CONFIG.theme = "dark"
     write_config(CONFIG)
-    script = f'<script>localStorage.setItem(\'stActiveTheme-/-v1\', \'{{"name":"{theme}"}}\');'
-    pages = os.listdir(os.path.join(package_dir, "pages"))
-    for page in pages:
-        script += f'localStorage.setItem(\'stActiveTheme-/{page[4:-3]}-v1\', \'{{"name":"{theme}"}}\');'
+
+    script = f"<script>localStorage.setItem('stActiveTheme-/-v1', '{{\"name\":\"{theme}\"}}');"
+
+    pages_dir = os.path.join(package_dir, "pages")
+    if os.path.isdir(pages_dir):
+        pages = os.listdir(pages_dir)
+        for page in pages:
+            if page.endswith(".py"):
+                page_name = page[4:-3]  # 去掉序号前缀和 .py 后缀
+                script += f"localStorage.setItem('stActiveTheme-/{page_name}-v1', '{{\"name\":\"{theme}\"}}');"
+
     script += "parent.location.reload()</script>"
     with hidden_container:
         html(script, height=0, width=0)
