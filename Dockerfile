@@ -12,33 +12,42 @@ RUN apt-get update && \
 # 复制项目
 COPY . .
 
-# 修复 __init__.py 的版本问题
-RUN sed -i 's/__version__ = version(__package__)/__version__ = "1.1.8"/' nb/__init__.py
+# 修复 __init__.py 版本问题
+RUN printf '"""Package nb."""\ntry:\n    from importlib.metadata import version\n    __version__ = version("nb")\nexcept Exception:\n    __version__ = "1.1.8"\n' > nb/__init__.py
 
-# 安装 Python 依赖
+# 修复目录名：page -> pages
+RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then \
+        mv nb/web_ui/page nb/web_ui/pages; \
+        echo "Renamed page -> pages"; \
+    fi
+
+# 验证目录结构
+RUN echo "=== Web UI Structure ===" && \
+    ls -la nb/web_ui/ && \
+    echo "=== Pages ===" && \
+    ls -la nb/web_ui/pages/
+
+# 安装依赖
 RUN pip install --no-cache-dir \
-    requests \
-    typer \
-    python-dotenv \
+    streamlit==1.15.2 \
+    pymongo==4.3.3 \
     pydantic==1.10.2 \
+    python-dotenv==0.21.0 \
+    PyYAML==6.0 \
+    requests==2.28.1 \
+    typer==0.7.0 \
     Telethon==1.26.0 \
-    cryptg \
-    Pillow \
-    hachoir \
-    aiohttp \
-    tg-login \
-    watermark.py \
-    pytesseract \
-    rich \
-    verlat \
-    streamlit \
-    PyYAML \
-    pymongo
+    cryptg==0.4.0 \
+    "Pillow>=9.3,<11.0" \
+    hachoir==3.1.3 \
+    aiohttp==3.8.3 \
+    tg-login==0.0.4 \
+    watermark.py==0.0.3 \
+    pytesseract==0.3.7 \
+    rich==12.6.0 \
+    verlat==0.1.0
 
-# 设置 Python 路径
 ENV PYTHONPATH=/app
-
 EXPOSE 8501
 
-# 直接运行
-CMD ["python", "-c", "from nb.web_ui.run import main; main()"]
+CMD ["python", "-m", "nb.web_ui.run"]
