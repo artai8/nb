@@ -18,22 +18,19 @@ RUN printf '"""Package nb."""\ntry:\n    from importlib.metadata import version\
 # 修复目录名：page -> pages
 RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then \
         mv nb/web_ui/page nb/web_ui/pages; \
-        echo "Renamed page -> pages"; \
     fi
 
-# 验证目录结构
-RUN echo "=== Web UI Structure ===" && \
-    ls -la nb/web_ui/ && \
-    echo "=== Pages ===" && \
-    ls -la nb/web_ui/pages/
+# 清理 pages 目录中的非 .py 文件/文件夹
+RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/null || true
 
-# 安装依赖
+# ✅ 关键修复：先安装兼容版本的 altair，再装 streamlit
 RUN pip install --no-cache-dir \
+    altair==4.2.2 \
     streamlit==1.15.2 \
     pymongo==4.3.3 \
     pydantic==1.10.2 \
     python-dotenv==0.21.0 \
-    PyYAML==6.0 \
+    "PyYAML>=6.0,<7.0" \
     requests==2.28.1 \
     typer==0.7.0 \
     Telethon==1.26.0 \
@@ -46,6 +43,10 @@ RUN pip install --no-cache-dir \
     pytesseract==0.3.7 \
     rich==12.6.0 \
     verlat==0.1.0
+
+# 验证安装
+RUN python -c "import streamlit; print(f'Streamlit {streamlit.__version__} OK')" && \
+    python -c "import altair; print(f'Altair {altair.__version__} OK')"
 
 ENV PYTHONPATH=/app
 EXPOSE 8501
