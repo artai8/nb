@@ -18,7 +18,7 @@ RUN apt-get update && \
 # 2. 创建虚拟环境，安装 poetry
 RUN python -m venv "$VENV_PATH" && \
     "$VENV_PATH/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel && \
-    "$VENV_PATH/bin/pip" install --no-cache-dir "poetry==1.8.3"
+    "$VENV_PATH/bin/pip" install --no-cache-dir "poetry==1.8.3" "poetry-core>=1.0.0"
 
 # 3. 先只复制依赖定义文件（利用 Docker 缓存）
 COPY pyproject.toml poetry.lock* ./
@@ -30,8 +30,8 @@ RUN poetry config virtualenvs.create false && \
 # 5. 复制全部源码
 COPY . .
 
-# 6. 用 /venv/bin/pip 安装项目本身，确保入口脚本生成在 /venv/bin/
-RUN "$VENV_PATH/bin/pip" install --no-cache-dir --no-deps .
+# 6. 安装项目本身，生成 nb-web 入口脚本到 /venv/bin/
+RUN "$VENV_PATH/bin/pip" install --no-cache-dir --no-deps --no-build-isolation .
 
 # 7. 构建时验证 nb-web 命令存在
 RUN which nb-web
