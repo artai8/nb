@@ -1,51 +1,39 @@
-FROM python:3.10
+FROM python:3.10-slim
 
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
-# 1. 安装系统依赖
+# 安装系统依赖
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ffmpeg \
-        tesseract-ocr && \
-    apt-get clean && \
+    apt-get install -y ffmpeg tesseract-ocr && \
     rm -rf /var/lib/apt/lists/*
 
-# 2. 升级 pip 并安装 poetry
-RUN pip install --upgrade pip && \
-    pip install poetry==1.8.3
-
-# 3. 复制项目配置文件
-COPY pyproject.toml poetry.lock* ./
-
-# 4. 配置 poetry 不创建虚拟环境（直接装到系统 Python）
-RUN poetry config virtualenvs.create false
-
-# 5. 安装依赖（不包含项目本身）
-RUN poetry install --no-interaction --no-ansi --only main --no-root
-
-# 6. 复制整个项目源码
+# 复制项目
 COPY . .
 
-# 7. 关键步骤：安装项目本身为 Python 包
-RUN pip install -e . || poetry install --no-interaction --no-ansi --only main
+# 手动安装所有依赖（从 pyproject.toml 提取）
+RUN pip install --no-cache-dir \
+    requests==2.28.1 \
+    typer==0.7.0 \
+    python-dotenv==0.21.0 \
+    pydantic==1.10.2 \
+    Telethon==1.26.0 \
+    cryptg==0.4.0 \
+    Pillow==9.3.0 \
+    hachoir==3.1.3 \
+    aiohttp==3.8.3 \
+    tg-login==0.0.4 \
+    watermark.py==0.0.3 \
+    pytesseract==0.3.7 \
+    rich==12.6.0 \
+    verlat==0.1.0 \
+    streamlit==1.15.2 \
+    PyYAML==6.0 \
+    pymongo==4.3.3
 
-# 8. 验证安装
-RUN python -c "import nb; print('nb module installed successfully')" && \
-    python -c "from nb.web_ui.run import main; print('nb.web_ui.run.main found')"
-
-# 9. 创建启动脚本（作为备份方案）
-RUN echo '#!/usr/bin/env python3\n\
-import sys\n\
-import os\n\
-sys.path.insert(0, "/app")\n\
-from nb.web_ui.run import main\n\
-if __name__ == "__main__":\n\
-    main()' > /usr/local/bin/nb-web-backup && \
-    chmod +x /usr/local/bin/nb-web-backup
+# 设置 Python 路径
+ENV PYTHONPATH=/app
 
 EXPOSE 8501
 
-# 10. 使用 Python 模块方式启动（最可靠）
-CMD ["python", "-m", "nb.web_ui.run"]
+# 直接调用 run.py 的 main 函数
+CMD ["python", "-c", "import sys; sys.path.insert(0,'/app'); from nb.web_ui.run import main; main()"]
