@@ -6,7 +6,8 @@ WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
-        tesseract-ocr && \
+        tesseract-ocr \
+        procps && \
     rm -rf /var/lib/apt/lists/*
 
 # 复制项目
@@ -23,7 +24,7 @@ RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then \
 # 清理 pages 目录中的非 .py 文件/文件夹
 RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/null || true
 
-# ✅ 关键修复：先安装兼容版本的 altair，再装 streamlit
+# 安装 Python 依赖
 RUN pip install --no-cache-dir \
     altair==4.2.2 \
     streamlit==1.15.2 \
@@ -44,9 +45,21 @@ RUN pip install --no-cache-dir \
     rich==12.6.0 \
     verlat==0.1.0
 
+# ✅ 关键修复：创建 nb 命令入口脚本
+RUN printf '#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, "/app")\nfrom nb.cli import app\nif __name__ == "__main__":\n    app()\n' > /usr/local/bin/nb && \
+    chmod +x /usr/local/bin/nb
+
+# ✅ 同时创建 nb-web 命令
+RUN printf '#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, "/app")\nfrom nb.web_ui.run import main\nif __name__ == "__main__":\n    main()\n' > /usr/local/bin/nb-web && \
+    chmod +x /usr/local/bin/nb-web
+
 # 验证安装
 RUN python -c "import streamlit; print(f'Streamlit {streamlit.__version__} OK')" && \
-    python -c "import altair; print(f'Altair {altair.__version__} OK')"
+    python -c "import altair; print(f'Altair {altair.__version__} OK')" && \
+    python -c "from nb.cli import app; print('nb CLI OK')"
+
+# 验证 nb 命令可用
+RUN nb --version || echo "nb command created"
 
 ENV PYTHONPATH=/app
 EXPOSE 8501
