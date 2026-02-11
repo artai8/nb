@@ -15,6 +15,17 @@ st.set_page_config(
 hide_st(st)
 switch_theme(st, CONFIG)
 
+# 添加兼容性处理
+def rerun():
+    """兼容不同版本的 Streamlit rerun 方法"""
+    if hasattr(st, 'rerun'):
+        st.rerun()
+    elif hasattr(st, 'experimental_rerun'):
+        st.experimental_rerun()
+    else:
+        # 对于非常旧的版本
+        raise st.script_runner.StopException
+
 
 def _parse_id(value: str):
     """尝试将字符串转为 int，失败则保持字符串。"""
@@ -132,8 +143,8 @@ if check_password(st):
                     if st.button(f"Remove connection **{label}**"):
                         del CONFIG.forwards[i]
                         write_config(CONFIG)
-                        st.rerun()
+                        rerun()  # 使用兼容性函数替代 st.rerun()
 
     if st.button("Save"):
         write_config(CONFIG)
-        st.rerun()
+        rerun()  # 使用兼容性函数替代 st.rerun()
