@@ -15,6 +15,11 @@ from nb.web_ui.utils import hide_st, switch_theme
 CONFIG = read_config()
 
 
+def create_divider():
+    """创建分隔线（兼容旧版本 Streamlit）"""
+    st.markdown("---")
+
+
 def get_nb_command(mode: str, loud: bool = True) -> list:
     """
     获取运行 nb 的命令列表。
@@ -159,7 +164,8 @@ if check_password(st):
             write_config(CONFIG)
             st.success("配置已保存！")
 
-    st.divider()
+    # 使用 markdown 分隔线代替 st.divider()
+    create_divider()
 
     # ==================== 运行控制 ====================
     
@@ -183,7 +189,11 @@ if check_password(st):
         
         col1, col2 = st.columns([1, 3])
         with col1:
-            check = st.button("▶️ 启动", type="primary", use_container_width=True)
+            # use_container_width 在旧版本可能不支持，使用 try-except
+            try:
+                check = st.button("▶️ 启动", type="primary", use_container_width=True)
+            except:
+                check = st.button("▶️ 启动", type="primary")
         
         if check:
             # 创建日志文件
@@ -235,24 +245,44 @@ if check_password(st):
         col1, col2, col3 = st.columns([1, 1, 2])
         
         with col1:
-            if st.button("⏹️ 停止", type="primary", use_container_width=True):
-                with st.spinner("正在停止进程..."):
-                    if kill_process(CONFIG.pid):
-                        termination()
-                    else:
-                        st.error("无法终止进程，请手动处理")
-                        st.code(f"sudo kill -9 {CONFIG.pid}")
+            try:
+                if st.button("⏹️ 停止", type="primary", use_container_width=True):
+                    with st.spinner("正在停止进程..."):
+                        if kill_process(CONFIG.pid):
+                            termination()
+                        else:
+                            st.error("无法终止进程，请手动处理")
+                            st.code(f"sudo kill -9 {CONFIG.pid}")
+            except:
+                # 旧版本没有 use_container_width
+                if st.button("⏹️ 停止", type="primary"):
+                    with st.spinner("正在停止进程..."):
+                        if kill_process(CONFIG.pid):
+                            termination()
+                        else:
+                            st.error("无法终止进程，请手动处理")
+                            st.code(f"sudo kill -9 {CONFIG.pid}")
         
         with col2:
-            if st.button("🔄 重启", use_container_width=True):
-                with st.spinner("正在重启..."):
-                    if kill_process(CONFIG.pid):
-                        CONFIG.pid = 0
-                        write_config(CONFIG)
-                        time.sleep(1)
-                        rerun()
+            try:
+                if st.button("🔄 重启", use_container_width=True):
+                    with st.spinner("正在重启..."):
+                        if kill_process(CONFIG.pid):
+                            CONFIG.pid = 0
+                            write_config(CONFIG)
+                            time.sleep(1)
+                            rerun()
+            except:
+                if st.button("🔄 重启"):
+                    with st.spinner("正在重启..."):
+                        if kill_process(CONFIG.pid):
+                            CONFIG.pid = 0
+                            write_config(CONFIG)
+                            time.sleep(1)
+                            rerun()
 
-    st.divider()
+    # 使用 markdown 分隔线代替 st.divider()
+    create_divider()
 
     # ==================== 日志显示 ====================
     st.subheader("📜 运行日志")
@@ -288,8 +318,12 @@ if check_password(st):
     # 刷新按钮
     col1, col2 = st.columns([1, 3])
     with col1:
-        if st.button("🔄 刷新日志", use_container_width=True):
-            rerun()
+        try:
+            if st.button("🔄 刷新日志", use_container_width=True):
+                rerun()
+        except:
+            if st.button("🔄 刷新日志"):
+                rerun()
     
     # 自动刷新选项
     with col2:
