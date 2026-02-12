@@ -1,5 +1,3 @@
-"""Declare all global constants."""
-
 COMMANDS = {
     "start": "Check whether I am alive",
     "forward": "Set a new forward",
@@ -8,8 +6,6 @@ COMMANDS = {
 }
 
 REGISTER_COMMANDS = True
-
 KEEP_LAST_MANY = 10000
-
 CONFIG_FILE_NAME = "nb.config.json"
 CONFIG_ENV_VAR_NAME = "NB_CONFIG"
