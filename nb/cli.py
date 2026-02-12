@@ -81,6 +81,70 @@ def version_check():
         con.print(f"Running nb version {__version__}", style="bold green")
 
 
+def _pre_check_config(mode: Mode):
+    """在启动异步任务之前做基本配置检查。"""
+    from nb.config import CONFIG
+
+    # 检查 API 凭证
+    if CONFIG.login.API_ID == 0 or CONFIG.login.API_HASH == "":
+        con.print(
+            "❌ [bold red]API_ID 或 API_HASH 未设置！[/bold red]\n"
+            "请在 Web UI → Telegram Login 页面中设置，\n"
+            "或在 .env 文件中设置 API_ID 和 API_HASH。\n"
+            "获取方法: https://my.telegram.org",
+        )
+        sys.exit(1)
+
+    # past 模式必须用用户账号
+    if mode == Mode.PAST:
+        if CONFIG.login.user_type != 1:
+            con.print(
+                "❌ [bold red]past 模式仅支持用户账号（User Account）！[/bold red]\n\n"
+                "Telegram 禁止 Bot 账号遍历聊天历史记录（GetHistoryRequest）。\n\n"
+                "[bold yellow]解决方法：[/bold yellow]\n"
+                "  1. 打开 Web UI → Telegram Login\n"
+                "  2. 将账号类型切换为 [bold]User[/bold]\n"
+                "  3. 填入 Session String\n"
+                "  4. 保存配置后重新运行\n\n"
+                "[dim]获取 Session String: https://replit.com/@artai8/tg-login?v=1[/dim]",
+            )
+            sys.exit(1)
+
+        if not CONFIG.login.SESSION_STRING:
+            con.print(
+                "❌ [bold red]用户账号未设置 Session String！[/bold red]\n\n"
+                "请在 Web UI → Telegram Login 页面中填入 Session String。\n\n"
+                "[dim]获取方法: https://replit.com/@artai8/tg-login?v=1[/dim]",
+            )
+            sys.exit(1)
+
+    # live 模式检查
+    if mode == Mode.LIVE:
+        if CONFIG.login.user_type == 0 and not CONFIG.login.BOT_TOKEN:
+            con.print(
+                "❌ [bold red]Bot 账号未设置 BOT_TOKEN！[/bold red]\n"
+                "请在 Web UI → Telegram Login 页面中填入 Bot Token。",
+            )
+            sys.exit(1)
+
+        if CONFIG.login.user_type == 1 and not CONFIG.login.SESSION_STRING:
+            con.print(
+                "❌ [bold red]用户账号未设置 Session String！[/bold red]\n"
+                "请在 Web UI → Telegram Login 页面中填入 Session String。",
+            )
+            sys.exit(1)
+
+    # 检查是否有转发连接
+    if not CONFIG.forwards or not any(f.use_this for f in CONFIG.forwards):
+        con.print(
+            "⚠️ [bold yellow]没有启用的转发连接！[/bold yellow]\n"
+            "请在 Web UI → Connections 页面中添加并启用至少一个连接。",
+        )
+        sys.exit(1)
+
+    con.print("✅ 配置预检查通过", style="bold green")
+
+
 @app.command()
 def main(
     mode: Mode = typer.Argument(
@@ -113,6 +177,9 @@ def main(
     if FAKE:
         logging.critical(f"You are running fake with {mode} mode")
         sys.exit(1)
+
+    # ★ 启动前预检查配置
+    _pre_check_config(mode)
 
     if mode == Mode.PAST:
         from nb.past import forward_job
