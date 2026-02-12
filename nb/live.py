@@ -1,5 +1,3 @@
-# nb/live.py
-
 import asyncio
 import logging
 from typing import Union, List, Optional, Dict
@@ -37,17 +35,12 @@ def _extract_msg_id(fwded) -> Optional[int]:
     return None
 
 
-# =====================================================================
-#  评论区媒体组缓存（独立于主消息的媒体组缓存）
-# =====================================================================
-
 COMMENT_GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 COMMENT_GROUPED_TIMEOUT = 2.0
 
 
 async def _flush_comment_group(grouped_id: int) -> None:
-    """发送缓存的评论媒体组"""
     if grouped_id not in COMMENT_GROUPED_CACHE:
         return
 
@@ -62,7 +55,6 @@ async def _flush_comment_group(grouped_id: int) -> None:
             if forward is None or not forward.comments.enabled:
                 continue
 
-            # 应用插件到整个媒体组
             tms = await apply_plugins_to_group(messages)
             if not tms:
                 continue
@@ -71,7 +63,6 @@ async def _flush_comment_group(grouped_id: int) -> None:
             if tm_template is None:
                 continue
 
-            # 解析目标
             dest_map = await _resolve_comment_dest(
                 messages[0].client, messages[0], forward
             )
@@ -79,7 +70,6 @@ async def _flush_comment_group(grouped_id: int) -> None:
                 logging.debug(f"💬 评论媒体组 {grouped_id} 无法找到目标帖子")
                 continue
 
-            # 发送到每个目标（作为媒体组）
             for dest_discussion_id, dest_top_id in dest_map.items():
                 try:
                     fwded_msg = await send_message(
@@ -114,14 +104,12 @@ async def _flush_comment_group(grouped_id: int) -> None:
 def _add_comment_to_group_cache(
     chat_id: int, grouped_id: int, message: Message
 ) -> None:
-    """将评论消息加入媒体组缓存"""
     if grouped_id not in COMMENT_GROUPED_CACHE:
         COMMENT_GROUPED_CACHE[grouped_id] = {}
     if chat_id not in COMMENT_GROUPED_CACHE[grouped_id]:
         COMMENT_GROUPED_CACHE[grouped_id][chat_id] = []
     COMMENT_GROUPED_CACHE[grouped_id][chat_id].append(message)
 
-    # 重置定时器
     if grouped_id in COMMENT_GROUPED_TIMERS:
         COMMENT_GROUPED_TIMERS[grouped_id].cancel()
 
@@ -132,21 +120,48 @@ def _add_comment_to_group_cache(
     )
 
 
-# =====================================================================
-#  评论区：解析讨论组消息并找到对应的目标帖子
-# =====================================================================
-
-
 async def _resolve_comment_dest(
     client: TelegramClient,
     message: Message,
     forward: config.Forward,
 ) -> Optional[Dict[int, int]]:
+    """★ 修复：根据评论消息找到应该转发到的目标讨论组和帖子。
+
+    关键逻辑：
+    1. 从评论消息的 reply_to_top_id 获取讨论组中的帖子副本 ID
+    2. 通过 discussion_to_channel_post 映射找到源频道的原始帖子 ID
+    3. 通过 post_id_mapping 找到目标频道对应的帖子 ID
+    4. 通过 GetDiscussionMessage 找到目标讨论组中的帖子副本
+    """
     chat_id = message.chat_id
 
+    # ★ 修复1: 同时检查 reply_to_top_id 和 reply_to_msg_id
     top_id = _get_reply_to_top_id(message)
     if top_id is None:
-        logging.debug(f"消息 {message.id} 没有 reply_to_top_id")
+        # 有些评论直接回复帖子副本，此时 top_id 为空但 reply_to_msg_id 有值
+        reply_msg_id = _get_reply_to_msg_id(message)
+        if reply_msg_id is not None:
+            # 检查这个 reply_to_msg_id 是否就是帖子副本
+            if (chat_id, reply_msg_id) in st.discussion_to_channel_post:
+                top_id = reply_msg_id
+            else:
+                # 尝试获取被回复的消息来确认
+                try:
+                    replied_msg = await client.get_messages(chat_id, ids=reply_msg_id)
+                    if replied_msg and hasattr(replied_msg, 'fwd_from') and replied_msg.fwd_from:
+                        cp = getattr(replied_msg.fwd_from, 'channel_post', None)
+                        if cp:
+                            st.discussion_to_channel_post[(chat_id, reply_msg_id)] = cp
+                            top_id = reply_msg_id
+                            logging.info(
+                                f"💬 通过 reply_to_msg_id 反查到帖子副本: "
+                                f"({chat_id}, {reply_msg_id}) → channel_post {cp}"
+                            )
+                except Exception as e:
+                    logging.debug(f"反查 reply_to_msg_id 失败: {e}")
+
+    if top_id is None:
+        logging.debug(f"消息 {message.id} 没有可用的 top_id")
         return None
 
     src_channel_id = config.comment_sources.get(chat_id)
@@ -155,6 +170,7 @@ async def _resolve_comment_dest(
 
     channel_post_id = st.discussion_to_channel_post.get((chat_id, top_id))
 
+    # ★ 修复2: 如果映射不存在，主动获取帖子副本消息来建立映射
     if channel_post_id is None:
         try:
             top_msg = await client.get_messages(chat_id, ids=top_id)
@@ -162,10 +178,16 @@ async def _resolve_comment_dest(
                 channel_post_id = getattr(top_msg.fwd_from, 'channel_post', None)
                 if channel_post_id:
                     st.discussion_to_channel_post[(chat_id, top_id)] = channel_post_id
+                    logging.info(
+                        f"💬 反查帖子映射成功: ({chat_id}, {top_id}) → channel_post {channel_post_id}"
+                    )
         except Exception as e:
             logging.warning(f"⚠️ 反查帖子失败: {e}")
 
     if channel_post_id is None:
+        logging.debug(
+            f"💬 无法确定评论所属的频道帖子: chat={chat_id}, top={top_id}"
+        )
         return None
 
     result = {}
@@ -181,6 +203,9 @@ async def _resolve_comment_dest(
             src_channel_id, channel_post_id, dest_channel_resolved
         )
         if dest_post_id is None:
+            logging.debug(
+                f"💬 帖子映射不存在: src({src_channel_id}, {channel_post_id}) → dest {dest_channel_resolved}"
+            )
             continue
 
         if forward.comments.dest_mode == "comments":
@@ -189,6 +214,16 @@ async def _resolve_comment_dest(
             )
             if disc_msg:
                 result[disc_msg.chat_id] = disc_msg.id
+                logging.info(
+                    f"💬 评论目标: dest_channel={dest_channel_resolved}, "
+                    f"disc_chat={disc_msg.chat_id}, disc_top={disc_msg.id}"
+                )
+            else:
+                # ★ 修复3: 回退到直接回复频道帖子
+                result[dest_channel_resolved] = dest_post_id
+                logging.info(
+                    f"💬 评论目标(回退): 直接回复 {dest_channel_resolved}/{dest_post_id}"
+                )
         elif forward.comments.dest_mode == "discussion":
             for dg in forward.comments.dest_discussion_groups:
                 dg_id = dg
@@ -200,11 +235,6 @@ async def _resolve_comment_dest(
                 result[dg_id] = None
 
     return result if result else None
-
-
-# =====================================================================
-#  媒体组发送（主消息）
-# =====================================================================
 
 
 async def _send_grouped_messages(grouped_id: int) -> None:
@@ -242,17 +272,22 @@ async def _send_grouped_messages(grouped_id: int) -> None:
                     elif not isinstance(fwded_msgs, list):
                         st.stored[event_uid][d] = fwded_msgs
 
+                    # ★ 修复: 媒体组也建立帖子映射
+                    fwded_id = None
+                    if isinstance(fwded_msgs, list) and i < len(fwded_msgs):
+                        fwded_id = _extract_msg_id(fwded_msgs[i])
+                    elif not isinstance(fwded_msgs, list) and i == 0:
+                        fwded_id = _extract_msg_id(fwded_msgs)
+
+                    if fwded_id is not None and i == 0:
+                        st.add_post_mapping(chat_id, original_msg.id, d, fwded_id)
+
             except Exception as e:
                 logging.critical(f"🚨 live 模式组播失败: {e}")
 
     st.GROUPED_CACHE.pop(grouped_id, None)
     st.GROUPED_TIMERS.pop(grouped_id, None)
     st.GROUPED_MAPPING.pop(grouped_id, None)
-
-
-# =====================================================================
-#  主消息处理
-# =====================================================================
 
 
 async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
@@ -294,21 +329,13 @@ async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
                 fwded_id = _extract_msg_id(fwded_msg)
                 if fwded_id is not None:
                     st.add_post_mapping(chat_id, message.id, d, fwded_id)
-            else:
-                logging.warning(f"⚠️ 发送返回 None, dest={d}, msg={message.id}")
         except Exception as e:
             logging.error(f"❌ live 单条发送失败: {e}")
 
     tm.clear()
 
 
-# =====================================================================
-#  评论区消息处理器（★ 支持媒体组）
-# =====================================================================
-
-
 async def comment_message_handler(event: Union[Message, events.NewMessage]) -> None:
-    """处理讨论组（评论区）中的新消息。支持媒体组。"""
     chat_id = event.chat_id
     message = event.message
 
@@ -319,7 +346,6 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
     if forward is None or not forward.comments.enabled:
         return
 
-    # 过滤
     if forward.comments.only_media and not message.media:
         return
 
@@ -334,7 +360,7 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
         except Exception:
             pass
 
-    # 检查是否是频道帖子副本（不是用户评论）
+    # ★ 修复: 检测频道帖子副本并记录映射，但不 return 整个消息
     if hasattr(message, 'fwd_from') and message.fwd_from:
         channel_post = getattr(message.fwd_from, 'channel_post', None)
         if channel_post:
@@ -343,9 +369,9 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
                 f"📎 记录帖子副本: discussion({chat_id}, {message.id}) "
                 f"→ channel_post {channel_post}"
             )
+            # ★ 帖子副本本身不是用户评论，不需要转发
             return
 
-    # ★★★ 媒体组：加入缓存，等待超时后整组发送 ★★★
     if message.grouped_id is not None:
         logging.info(
             f"💬 评论媒体组消息: chat={chat_id}, "
@@ -354,7 +380,6 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
         _add_comment_to_group_cache(chat_id, message.grouped_id, message)
         return
 
-    # ★★★ 单条消息：直接发送 ★★★
     tm = await apply_plugins(message)
     if not tm:
         return
@@ -384,11 +409,6 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
             logging.error(f"❌ 评论转发失败: {e}")
 
     tm.clear()
-
-
-# =====================================================================
-#  编辑和删除处理器
-# =====================================================================
 
 
 async def edited_message_handler(event) -> None:
@@ -452,11 +472,6 @@ async def deleted_message_handler(event) -> None:
             del st.stored[event_uid]
 
 
-# =====================================================================
-#  事件注册
-# =====================================================================
-
-
 ALL_EVENTS = {
     "new": (new_message_handler, events.NewMessage()),
     "edited": (edited_message_handler, events.MessageEdited()),
@@ -492,7 +507,6 @@ async def _setup_comment_listeners(client: TelegramClient):
             comment_sources[dg] = src
             comment_forward_map[dg] = forward
             logging.info(f"💬 监听讨论组 {dg} (手动, 源频道 {src})")
-
         else:
             dg_id = await get_discussion_group_id(client, src)
             if dg_id is None:
@@ -503,6 +517,30 @@ async def _setup_comment_listeners(client: TelegramClient):
             logging.info(f"💬 监听讨论组 {dg_id} (自动, 源频道 {src})")
 
     return comment_sources, comment_forward_map
+
+
+async def _preload_recent_post_mappings(client: TelegramClient) -> None:
+    """★ 新增：预加载讨论组中最近的帖子副本映射。
+
+    live 模式启动时，讨论组中已有的帖子副本需要预先建立
+    discussion_to_channel_post 映射，否则启动后收到的第一批评论
+    会因为找不到映射而无法转发。
+    """
+    for discussion_id, src_channel_id in config.comment_sources.items():
+        try:
+            count = 0
+            async for msg in client.iter_messages(discussion_id, limit=200):
+                if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                    cp = getattr(msg.fwd_from, 'channel_post', None)
+                    if cp:
+                        st.discussion_to_channel_post[(discussion_id, msg.id)] = cp
+                        count += 1
+            if count > 0:
+                logging.info(
+                    f"💬 预加载 {count} 个帖子副本映射: 讨论组 {discussion_id}"
+                )
+        except Exception as e:
+            logging.warning(f"⚠️ 预加载帖子副本失败 (讨论组={discussion_id}): {e}")
 
 
 async def start_sync() -> None:
@@ -536,7 +574,6 @@ async def start_sync() -> None:
         logging.error("❌ 没有有效的转发连接")
         return
 
-    # 评论区监听
     has_comments = any(
         f.use_this and f.comments.enabled for f in CONFIG.forwards
     )
@@ -546,6 +583,9 @@ async def start_sync() -> None:
         config.comment_forward_map = comment_fwd
 
         if comment_src:
+            # ★ 修复: 预加载帖子副本映射
+            await _preload_recent_post_mappings(client)
+
             discussion_group_ids = list(comment_src.keys())
             logging.info(f"💬 评论区监听: {discussion_group_ids}")
 
@@ -553,7 +593,7 @@ async def start_sync() -> None:
                 comment_message_handler,
                 events.NewMessage(chats=discussion_group_ids),
             )
-            logging.info("✅ 注册评论区事件处理器（支持媒体组）")
+            logging.info("✅ 注册评论区事件处理器")
         else:
             logging.warning("⚠️ 启用了评论区功能但没有找到讨论组")
 
