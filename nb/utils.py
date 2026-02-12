@@ -24,8 +24,9 @@ if TYPE_CHECKING:
     from nb.plugins import NbMessage
 
 MAX_RETRIES = 3
-COMMENT_MAX_RETRIES = 5
+COMMENT_MAX_RETRIES = 6
 COMMENT_RETRY_BASE_DELAY = 3
+DISCUSSION_CACHE = {}
 
 
 def extract_msg_id(fwded) -> Optional[int]:
@@ -63,31 +64,63 @@ async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
-                wait = min(10 * (attempt + 1), 60)
-                logging.warning(f"获取讨论消息遇到FloodWait, 等待{wait}秒")
+                wait_match = re.search(r'\d+', str(e))
+                wait = int(wait_match.group()) + 5 if wait_match else min(15 * (attempt + 1), 120)
+                logging.warning(f"获取讨论消息FloodWait, 等待{wait}秒 (attempt={attempt+1})")
                 await asyncio.sleep(wait)
                 continue
-            if any(k in err_str for k in ("MSG_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED")):
+            if any(k in err_str for k in ("MSG_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED", "PEER_ID_INVALID")):
+                return None
+            if "DISCUSSION" in err_str and "DISABLED" in err_str:
                 return None
             if attempt < COMMENT_MAX_RETRIES - 1:
                 await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+            else:
+                logging.error(f"获取讨论消息最终失败 channel={channel_id} msg={msg_id}: {e}")
     return None
 
 
 async def get_discussion_group_id(client, channel_id) -> Optional[int]:
-    for attempt in range(3):
+    cache_key = channel_id
+    if cache_key in DISCUSSION_CACHE:
+        return DISCUSSION_CACHE[cache_key]
+    for attempt in range(COMMENT_MAX_RETRIES):
         try:
             input_channel = await client.get_input_entity(channel_id)
             full_result = await client(GetFullChannelRequest(input_channel))
-            return getattr(full_result.full_chat, 'linked_chat_id', None)
+            linked = getattr(full_result.full_chat, 'linked_chat_id', None)
+            if linked:
+                DISCUSSION_CACHE[cache_key] = linked
+            return linked
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
-                await asyncio.sleep(10 * (attempt + 1))
+                wait_match = re.search(r'\d+', str(e))
+                wait = int(wait_match.group()) + 5 if wait_match else 15 * (attempt + 1)
+                await asyncio.sleep(wait)
                 continue
-            if attempt < 2:
-                await asyncio.sleep(2)
+            if any(k in err_str for k in ("CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED")):
+                return None
+            if attempt < COMMENT_MAX_RETRIES - 1:
+                await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+            else:
+                logging.error(f"获取讨论组ID最终失败 channel={channel_id}: {e}")
     return None
+
+
+async def get_discussion_group_id_reverse(client, discussion_id) -> Optional[int]:
+    cache_key = f"rev_{discussion_id}"
+    if cache_key in DISCUSSION_CACHE:
+        return DISCUSSION_CACHE[cache_key]
+    try:
+        input_entity = await client.get_input_entity(discussion_id)
+        full_result = await client(GetFullChannelRequest(input_entity))
+        linked = getattr(full_result.full_chat, 'linked_chat_id', None)
+        if linked:
+            DISCUSSION_CACHE[cache_key] = linked
+        return linked
+    except Exception:
+        return None
 
 
 def _has_spoiler(message) -> bool:
