@@ -1,6 +1,3 @@
-import logging
-from typing import List
-from nb.plugin_models import TextFilter
 from nb.plugins import NbMessage, NbPlugin
 from nb.utils import match
 
