@@ -1,10 +1,8 @@
 import asyncio
 import logging
 from typing import Dict, List, Optional, Union
-
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
-
 from nb import config, const
 from nb import storage as st
 from nb.bot import get_events
@@ -14,11 +12,12 @@ from nb.utils import (
     clean_session_files, extract_msg_id, send_message,
     _get_reply_to_msg_id, _get_reply_to_top_id,
     get_discussion_message, get_discussion_group_id,
+    COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY,
 )
 
 COMMENT_GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
-COMMENT_GROUPED_TIMEOUT = 2.0
+COMMENT_GROUPED_TIMEOUT = 2.5
 
 
 async def _flush_comment_group(grouped_id):
@@ -35,16 +34,27 @@ async def _flush_comment_group(grouped_id):
             tms = await apply_plugins_to_group(messages)
             if not tms or tms[0] is None:
                 continue
-            dest_map = await _resolve_comment_dest(messages[0].client, messages[0], forward)
-            if dest_map is None:
-                continue
-            for dest_id, dest_top_id in dest_map.items():
+            for attempt in range(COMMENT_MAX_RETRIES):
                 try:
-                    fwded = await send_message(dest_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_top_id)
-                    if fwded is not None:
-                        st.add_comment_mapping(chat_id, messages[0].id, dest_id, extract_msg_id(fwded))
+                    dest_map = await _resolve_comment_dest(messages[0].client, messages[0], forward)
+                    if dest_map is None:
+                        if attempt < COMMENT_MAX_RETRIES - 1:
+                            await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                            continue
+                        break
+                    for dest_id, dest_top_id in dest_map.items():
+                        try:
+                            fwded = await send_message(dest_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_top_id)
+                            if fwded is not None:
+                                st.add_comment_mapping(chat_id, messages[0].id, dest_id, extract_msg_id(fwded))
+                        except Exception as e:
+                            logging.error(f"评论媒体组转发失败: {e}")
+                    break
                 except Exception as e:
-                    logging.error(f"评论媒体组转发失败: {e}")
+                    if attempt < COMMENT_MAX_RETRIES - 1:
+                        await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                    else:
+                        logging.error(f"评论媒体组重试耗尽: {e}")
             for tm in tms:
                 tm.clear()
     except Exception as e:
@@ -70,15 +80,18 @@ def _add_comment_to_group_cache(chat_id, grouped_id, message):
 
 
 async def _try_resolve_top_id(client, chat_id, msg_id):
-    try:
-        msg = await client.get_messages(chat_id, ids=msg_id)
-        if msg and hasattr(msg, 'fwd_from') and msg.fwd_from:
-            cp = getattr(msg.fwd_from, 'channel_post', None)
-            if cp:
-                st.discussion_to_channel_post[(chat_id, msg_id)] = cp
-                return msg_id
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            msg = await client.get_messages(chat_id, ids=msg_id)
+            if msg and hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.discussion_to_channel_post[(chat_id, msg_id)] = cp
+                    return msg_id
+            return None
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
     return None
 
 
@@ -96,24 +109,24 @@ async def _resolve_comment_dest(client, message, forward) -> Optional[Dict[int, 
                     top_id = resolved
     if top_id is None:
         return None
-
     src_channel_id = config.comment_sources.get(chat_id)
     if src_channel_id is None:
         return None
-
     channel_post_id = st.discussion_to_channel_post.get((chat_id, top_id))
     if channel_post_id is None:
-        try:
-            top_msg = await client.get_messages(chat_id, ids=top_id)
-            if top_msg and hasattr(top_msg, 'fwd_from') and top_msg.fwd_from:
-                channel_post_id = getattr(top_msg.fwd_from, 'channel_post', None)
-                if channel_post_id:
-                    st.discussion_to_channel_post[(chat_id, top_id)] = channel_post_id
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                top_msg = await client.get_messages(chat_id, ids=top_id)
+                if top_msg and hasattr(top_msg, 'fwd_from') and top_msg.fwd_from:
+                    channel_post_id = getattr(top_msg.fwd_from, 'channel_post', None)
+                    if channel_post_id:
+                        st.discussion_to_channel_post[(chat_id, top_id)] = channel_post_id
+                        break
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
     if channel_post_id is None:
         return None
-
     result = {}
     for dest_channel_id in forward.dest:
         dest_resolved = dest_channel_id
@@ -170,7 +183,7 @@ async def _send_grouped_messages(grouped_id):
                         if fid is not None:
                             st.add_post_mapping(chat_id, msg.id, d, fid)
             except Exception as e:
-                logging.critical(f"live 组播失败: {e}")
+                logging.critical(f"live组播失败: {e}")
     st.GROUPED_CACHE.pop(grouped_id, None)
     st.GROUPED_TIMERS.pop(grouped_id, None)
     st.GROUPED_MAPPING.pop(grouped_id, None)
@@ -209,7 +222,7 @@ async def new_message_handler(event):
                 if fid is not None:
                     st.add_post_mapping(chat_id, message.id, d, fid)
         except Exception as e:
-            logging.error(f"live 发送失败: {e}")
+            logging.error(f"live发送失败: {e}")
     tm.clear()
 
 
@@ -243,16 +256,27 @@ async def comment_message_handler(event):
     tm = await apply_plugins(message)
     if not tm:
         return
-    dest_map = await _resolve_comment_dest(event.client, message, forward)
-    if dest_map is None:
-        return
-    for dest_id, dest_top_id in dest_map.items():
+    for attempt in range(COMMENT_MAX_RETRIES):
         try:
-            fwded = await send_message(dest_id, tm, comment_to_post=dest_top_id)
-            if fwded is not None:
-                st.add_comment_mapping(chat_id, message.id, dest_id, extract_msg_id(fwded))
+            dest_map = await _resolve_comment_dest(event.client, message, forward)
+            if dest_map is None:
+                if attempt < COMMENT_MAX_RETRIES - 1:
+                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                    continue
+                break
+            for dest_id, dest_top_id in dest_map.items():
+                try:
+                    fwded = await send_message(dest_id, tm, comment_to_post=dest_top_id)
+                    if fwded is not None:
+                        st.add_comment_mapping(chat_id, message.id, dest_id, extract_msg_id(fwded))
+                except Exception as e:
+                    logging.error(f"评论转发失败: {e}")
+            break
         except Exception as e:
-            logging.error(f"评论转发失败: {e}")
+            if attempt < COMMENT_MAX_RETRIES - 1:
+                await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+            else:
+                logging.error(f"评论转发重试耗尽: {e}")
     tm.clear()
 
 
@@ -389,5 +413,5 @@ async def start_sync():
         if not CONFIG.live.delete_sync and key == "deleted":
             continue
         client.add_event_handler(*val)
-    logging.info("live 模式启动完成")
+    logging.info("live模式启动完成")
     await client.run_until_disconnected()
