@@ -1,4 +1,3 @@
-from typing import List
 from nb.plugins import NbMessage, NbPlugin
 
 
