@@ -259,21 +259,55 @@ async def forward_job() -> None:
     clean_session_files()
     await load_async_plugins()
 
+    # ★★★ 核心检查：past 模式必须使用用户账号 ★★★
     if CONFIG.login.user_type != 1:
-        logging.warning("⚠️ past 模式仅支持用户账号")
+        logging.error(
+            "❌ past 模式仅支持用户账号（User Account）！\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Telegram 不允许 Bot 账号遍历聊天历史记录。\n"
+            "请在 Web UI → Telegram Login 页面中：\n"
+            "  1. 将账号类型切换为 'User'\n"
+            "  2. 填入 Session String\n"
+            "  3. 保存配置后重新运行\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "如何获取 Session String：\n"
+            "  https://replit.com/@artai8/tg-login?v=1\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        return
+
+    if not CONFIG.login.SESSION_STRING:
+        logging.error(
+            "❌ 用户账号未设置 Session String！\n"
+            "请在 Web UI → Telegram Login 页面中填入 Session String。\n"
+            "获取方法: https://replit.com/@artai8/tg-login?v=1"
+        )
         return
 
     SESSION = get_SESSION()
     async with TelegramClient(SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
+
+        # ★ 二次验证：连接后确认不是 Bot
+        is_bot = await client.is_bot()
+        if is_bot:
+            logging.error(
+                "❌ 当前登录的是 Bot 账号，无法使用 past 模式！\n"
+                "Telegram 禁止 Bot 使用 GetHistoryRequest（遍历历史消息）。\n"
+                "请切换为用户账号（User Account）。"
+            )
+            return
+
+        logging.info("✅ 用户账号验证通过，开始 past 模式")
+
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
 
-        # ★ 新增：检查是否有有效连接
+        # ★ 检查是否有有效连接
         if not config.from_to:
             logging.error(
                 "❌ 没有有效的转发连接，无法启动 past 模式。\n"
                 "请检查:\n"
                 "  1. 账号是否已加入所有源/目标频道\n"
-                "  2. 频道 ID 或用户名是否正确\n"
+                "  2. 频道 ID 或用户名是否正确（建议使用 @用户名 格式）\n"
                 "  3. Web UI → Connections 页面的配置"
             )
             return
