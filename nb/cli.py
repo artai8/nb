@@ -82,67 +82,86 @@ def version_check():
 
 
 def _pre_check_config(mode: Mode):
-    """在启动异步任务之前做基本配置检查。"""
-    from nb.config import CONFIG
+    """在启动异步任务之前做基本配置检查。
+
+    注意: 此时 config.py 已经执行了 _sync_env_to_config()，
+    所以 CONFIG 中的值已经是环境变量覆盖后的最新值。
+    """
+    from nb.config import CONFIG, _looks_like_bot_token
+
+    errors = []
+    login = CONFIG.login
+    login_type = "User" if login.user_type == 1 else "Bot"
+
+    con.print(
+        f"\n📋 [dim]当前登录配置:[/dim]\n"
+        f"   [dim]类型: {login_type}[/dim]\n"
+        f"   [dim]API_ID: {'已设置' if login.API_ID else '未设置'}[/dim]\n"
+        f"   [dim]API_HASH: {'已设置' if login.API_HASH else '未设置'}[/dim]\n"
+        f"   [dim]Session String: {'已设置 (长度={})'.format(len(login.SESSION_STRING)) if login.SESSION_STRING else '未设置'}[/dim]\n"
+        f"   [dim]Bot Token: {'已设置' if login.BOT_TOKEN else '未设置'}[/dim]\n"
+    )
 
     # 检查 API 凭证
-    if CONFIG.login.API_ID == 0 or CONFIG.login.API_HASH == "":
-        con.print(
-            "❌ [bold red]API_ID 或 API_HASH 未设置！[/bold red]\n"
-            "请在 Web UI → Telegram Login 页面中设置，\n"
-            "或在 .env 文件中设置 API_ID 和 API_HASH。\n"
-            "获取方法: https://my.telegram.org",
-        )
-        sys.exit(1)
+    if login.API_ID == 0:
+        errors.append("API_ID 未设置（请在 .env 或 Web UI 中设置）")
+    if not login.API_HASH:
+        errors.append("API_HASH 未设置（请在 .env 或 Web UI 中设置）")
 
-    # past 模式必须用用户账号
+    # past 模式必须用 User
     if mode == Mode.PAST:
-        if CONFIG.login.user_type != 1:
-            con.print(
-                "❌ [bold red]past 模式仅支持用户账号（User Account）！[/bold red]\n\n"
-                "Telegram 禁止 Bot 账号遍历聊天历史记录（GetHistoryRequest）。\n\n"
-                "[bold yellow]解决方法：[/bold yellow]\n"
-                "  1. 打开 Web UI → Telegram Login\n"
-                "  2. 将账号类型切换为 [bold]User[/bold]\n"
-                "  3. 填入 Session String\n"
-                "  4. 保存配置后重新运行\n\n"
-                "[dim]获取 Session String: https://replit.com/@artai8/tg-login?v=1[/dim]",
-            )
-            sys.exit(1)
+        if login.user_type == 0:
+            # Bot 模式但可能有 SESSION_STRING（环境变量设置了但 user_type 没同步）
+            if login.SESSION_STRING and not _looks_like_bot_token(login.SESSION_STRING):
+                con.print(
+                    "⚠️ [yellow]user_type=Bot 但检测到有效的 Session String，"
+                    "past 模式将尝试使用 Session String[/yellow]"
+                )
+                # 不报错，get_SESSION 中会自动 fallback
+            else:
+                errors.append(
+                    "past 模式不支持 Bot 账号！\n"
+                    "  Telegram 禁止 Bot 使用 GetHistoryRequest。\n"
+                    "  请设置环境变量 SESSION_STRING 或在 Web UI 中切换为 User。"
+                )
 
-        if not CONFIG.login.SESSION_STRING:
-            con.print(
-                "❌ [bold red]用户账号未设置 Session String！[/bold red]\n\n"
-                "请在 Web UI → Telegram Login 页面中填入 Session String。\n\n"
-                "[dim]获取方法: https://replit.com/@artai8/tg-login?v=1[/dim]",
-            )
-            sys.exit(1)
+        if login.user_type == 1:
+            if not login.SESSION_STRING:
+                errors.append(
+                    "Session String 未设置！\n"
+                    "  请设置环境变量 SESSION_STRING 或在 Web UI 中填入。\n"
+                    "  获取: https://replit.com/@artai8/tg-login?v=1"
+                )
+            elif _looks_like_bot_token(login.SESSION_STRING):
+                errors.append(
+                    "SESSION_STRING 字段中的值是 Bot Token，不是 Session String！\n"
+                    "  Bot Token 格式: 123456789:ABCdef... (短)\n"
+                    "  Session String:  1BQANOTEuMT...     (长, 200+字符)\n"
+                    "  请检查环境变量 SESSION_STRING 的值。"
+                )
 
     # live 模式检查
     if mode == Mode.LIVE:
-        if CONFIG.login.user_type == 0 and not CONFIG.login.BOT_TOKEN:
-            con.print(
-                "❌ [bold red]Bot 账号未设置 BOT_TOKEN！[/bold red]\n"
-                "请在 Web UI → Telegram Login 页面中填入 Bot Token。",
-            )
-            sys.exit(1)
+        if login.user_type == 0 and not login.BOT_TOKEN:
+            errors.append("Bot Token 未设置")
+        if login.user_type == 1 and not login.SESSION_STRING:
+            errors.append("Session String 未设置")
 
-        if CONFIG.login.user_type == 1 and not CONFIG.login.SESSION_STRING:
-            con.print(
-                "❌ [bold red]用户账号未设置 Session String！[/bold red]\n"
-                "请在 Web UI → Telegram Login 页面中填入 Session String。",
-            )
-            sys.exit(1)
+    # 检查连接
+    active = [f for f in CONFIG.forwards if f.use_this]
+    if not active:
+        errors.append("没有启用的转发连接（请在 Connections 页面添加）")
 
-    # 检查是否有转发连接
-    if not CONFIG.forwards or not any(f.use_this for f in CONFIG.forwards):
-        con.print(
-            "⚠️ [bold yellow]没有启用的转发连接！[/bold yellow]\n"
-            "请在 Web UI → Connections 页面中添加并启用至少一个连接。",
-        )
+    if errors:
+        con.print("\n❌ [bold red]配置预检查失败！[/bold red]\n")
+        for i, err in enumerate(errors, 1):
+            con.print(f"  {i}. {err}\n", style="red")
         sys.exit(1)
 
     con.print("✅ 配置预检查通过", style="bold green")
+    con.print(f"   模式: {mode.value}", style="dim")
+    con.print(f"   登录: {login_type}", style="dim")
+    con.print(f"   连接: {len(active)} 个启用\n", style="dim")
 
 
 @app.command()
@@ -178,7 +197,6 @@ def main(
         logging.critical(f"You are running fake with {mode} mode")
         sys.exit(1)
 
-    # ★ 启动前预检查配置
     _pre_check_config(mode)
 
     if mode == Mode.PAST:
@@ -191,6 +209,5 @@ def main(
         asyncio.run(start_sync())
 
 
-# ★ 关键：允许 python -m nb.cli live --loud 直接运行
 if __name__ == "__main__":
     app()
