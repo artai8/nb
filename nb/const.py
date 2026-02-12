@@ -1,10 +1,4 @@
-COMMANDS = {
-    "start": "Check whether I am alive",
-    "forward": "Set a new forward",
-    "remove": "Remove an existing forward",
-    "help": "Learn usage",
-}
-
+COMMANDS = {"start": "检查是否在线", "forward": "设置新转发", "remove": "移除转发", "help": "使用帮助"}
 REGISTER_COMMANDS = True
 KEEP_LAST_MANY = 10000
 CONFIG_FILE_NAME = "nb.config.json"
