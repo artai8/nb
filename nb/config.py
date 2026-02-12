@@ -195,33 +195,115 @@ def get_env_var(name: str, optional: bool = False) -> str:
 
 
 async def get_id(client: TelegramClient, peer):
-    return await client.get_peer_id(peer)
+    """解析 peer 并确保实体被缓存（含 access_hash）。
+
+    支持的输入格式：
+    - 数字 ID（int）：如 -1001234567890
+    - 用户名（str）：如 "@channel_name" 或 "channel_name"
+    - t.me 链接（str）：如 "https://t.me/channel_name"
+    """
+    try:
+        # ★ 关键：用 get_entity 而不是 get_peer_id
+        # get_entity 会完整解析并缓存实体（包含 access_hash）
+        entity = await client.get_entity(peer)
+        logging.info(f"✅ 解析实体成功: {peer} → {entity.id}")
+        return entity.id
+    except ValueError:
+        # 如果是纯数字 ID 且 get_entity 失败，尝试不同的格式
+        if isinstance(peer, int):
+            # Telegram 频道 ID 通常以 -100 开头
+            # 但配置中可能存储的是不带 -100 前缀的 channel_id
+            for candidate in [peer, int(f"-100{peer}"), -peer]:
+                try:
+                    entity = await client.get_entity(candidate)
+                    logging.info(f"✅ 通过候选 ID {candidate} 解析成功: {entity.id}")
+                    return entity.id
+                except Exception:
+                    continue
+        raise
+    except Exception as e:
+        logging.error(f"❌ 无法解析实体 {peer}: {e}")
+        raise
 
 
 async def load_from_to(
     client: TelegramClient, forwards: List[Forward]
 ) -> Dict[int, List[int]]:
-    """Convert a list of Forward objects to a mapping."""
-    from_to_dict = {}
+    """Convert a list of Forward objects to a mapping.
 
-    async def _(peer):
-        return await get_id(client, peer)
+    关键改进：
+    1. 使用 get_entity 确保实体完整缓存
+    2. 跳过无法解析的源/目标，而不是整体崩溃
+    3. 详细的错误日志
+    """
+    from_to_dict = {}
 
     for forward in forwards:
         if not forward.use_this:
             continue
+
         source = forward.source
-        if not isinstance(source, int) and source.strip() == "":
+        if not isinstance(source, int) and str(source).strip() == "":
+            logging.warning(f"⚠️ 连接 '{forward.con_name}' 源为空，跳过")
             continue
-        src = await _(forward.source)
-        from_to_dict[src] = [await _(dest) for dest in forward.dest]
-    logging.info(f"From to dict is {from_to_dict}")
+
+        # ——— 解析源 ———
+        try:
+            src = await get_id(client, forward.source)
+        except Exception as e:
+            logging.error(
+                f"❌ 无法解析源 '{forward.source}' "
+                f"(连接: {forward.con_name}): {e}\n"
+                f"💡 请确认账号已加入该频道/群组，或使用正确的用户名/链接"
+            )
+            continue  # ★ 跳过这个连接，不崩溃
+
+        # ——— 解析目标 ———
+        dest_ids = []
+        for dest in forward.dest:
+            try:
+                d = await get_id(client, dest)
+                dest_ids.append(d)
+            except Exception as e:
+                logging.error(
+                    f"❌ 无法解析目标 '{dest}' "
+                    f"(连接: {forward.con_name}): {e}\n"
+                    f"💡 请确认账号已加入该频道/群组，或使用正确的用户名/链接"
+                )
+                continue  # ★ 跳过这个目标，不崩溃
+
+        if dest_ids:
+            from_to_dict[src] = dest_ids
+            logging.info(
+                f"✅ 连接 '{forward.con_name}': {src} → {dest_ids}"
+            )
+        else:
+            logging.warning(
+                f"⚠️ 连接 '{forward.con_name}' 没有有效的目标，跳过"
+            )
+
+    logging.info(f"📋 最终转发映射: {from_to_dict}")
+
+    if not from_to_dict:
+        logging.warning(
+            "⚠️ 没有任何有效的转发连接！\n"
+            "💡 常见原因:\n"
+            "   1. 账号未加入源/目标频道或群组\n"
+            "   2. 频道/群组 ID 不正确\n"
+            "   3. 使用 Bot 账号但 Bot 未被添加到群组\n"
+            "   4. 私有频道需要先手动加入"
+        )
+
     return from_to_dict
 
 
 async def load_admins(client: TelegramClient):
     for admin in CONFIG.admins:
-        ADMINS.append(await get_id(client, admin))
+        try:
+            admin_id = await get_id(client, admin)
+            ADMINS.append(admin_id)
+        except Exception as e:
+            logging.error(f"❌ 无法解析管理员 '{admin}': {e}")
     logging.info(f"Loaded admins are {ADMINS}")
     return ADMINS
 
