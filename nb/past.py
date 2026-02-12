@@ -34,7 +34,7 @@ async def _get_comments_method_b(client, channel_id, msg_id):
         disc_msg = await get_discussion_message(client, channel_id, msg_id)
         if disc_msg is None:
             return []
-        st.discussion_to_channel_post[(disc_msg.chat_id, disc_msg.id)] = msg_id
+        st.add_discussion_mapping(disc_msg.chat_id, disc_msg.id, msg_id)
         comments = []
         async for msg in client.iter_messages(disc_msg.chat_id, reply_to=disc_msg.id, reverse=True):
             comments.append(msg)
@@ -50,7 +50,7 @@ async def _get_comments_method_c(client, channel_id, msg_id):
             return []
         discussion_id = disc_msg.chat_id
         top_id = disc_msg.id
-        st.discussion_to_channel_post[(discussion_id, top_id)] = msg_id
+        st.add_discussion_mapping(discussion_id, top_id, msg_id)
         comments = []
         async for msg in client.iter_messages(discussion_id, min_id=top_id, reverse=True, limit=500):
             if msg.id == top_id:
@@ -65,17 +65,44 @@ async def _get_comments_method_c(client, channel_id, msg_id):
         return []
 
 
+async def _get_comments_method_d(client, channel_id, msg_id):
+    try:
+        dg_id = await get_discussion_group_id(client, channel_id)
+        if dg_id is None:
+            return []
+        async for msg in client.iter_messages(dg_id, limit=200):
+            if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(dg_id, msg.id, cp)
+                    if cp == msg_id:
+                        comments = []
+                        async for reply in client.iter_messages(dg_id, reply_to=msg.id, reverse=True):
+                            comments.append(reply)
+                        return comments
+        return []
+    except Exception:
+        return []
+
+
 async def _get_all_comments(client, channel_id, msg_id, retry_delay=3):
+    methods = [
+        ("method_a", lambda: _get_comments_method_a(client, channel_id, msg_id)),
+        ("method_b", lambda: _get_comments_method_b(client, channel_id, msg_id)),
+        ("method_c", lambda: _get_comments_method_c(client, channel_id, msg_id)),
+        ("method_d", lambda: _get_comments_method_d(client, channel_id, msg_id)),
+    ]
     for attempt in range(COMMENT_MAX_RETRIES):
-        comments = await _get_comments_method_a(client, channel_id, msg_id)
-        if comments:
-            return comments
-        comments = await _get_comments_method_b(client, channel_id, msg_id)
-        if comments:
-            return comments
+        for name, method in methods:
+            try:
+                comments = await method()
+                if comments:
+                    return comments
+            except Exception:
+                pass
         if attempt < COMMENT_MAX_RETRIES - 1:
             await asyncio.sleep(retry_delay * (attempt + 1))
-    return await _get_comments_method_c(client, channel_id, msg_id)
+    return []
 
 
 def _group_comments(comments):
@@ -127,7 +154,7 @@ async def _flush_grouped_buffer(client, src, dest, grouped_buffer, forward):
 
 async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_list, forward):
     cfg = forward.comments
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     comments = await _get_all_comments(client, src_channel_id, src_post_id, retry_delay=5)
     if not comments:
         return
@@ -261,6 +288,20 @@ async def forward_job():
             forward = resolved_forwards.get(src)
             if forward is None:
                 continue
+            if forward.comments.enabled:
+                try:
+                    dg_id = await get_discussion_group_id(client, src)
+                    if dg_id:
+                        count = 0
+                        async for msg in client.iter_messages(dg_id, limit=1000):
+                            if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                                cp = getattr(msg.fwd_from, 'channel_post', None)
+                                if cp:
+                                    st.add_discussion_mapping(dg_id, msg.id, cp)
+                                    count += 1
+                        logging.info(f"past模式预加载 {count} 个帖子映射: 讨论组={dg_id}")
+                except Exception as e:
+                    logging.warning(f"past模式预加载映射失败: {e}")
             grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
             async for message in client.iter_messages(src, reverse=True, offset_id=forward.offset):
                 if isinstance(message, MessageService):
