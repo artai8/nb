@@ -26,37 +26,19 @@ class CommentsConfig(BaseModel):
 
     enabled: bool = False
 
-    # 源：从哪里获取评论
     source_mode: str = "comments"
-    # "comments"  — 从源频道帖子的评论区获取媒体
-    # "discussion" — 直接监听源讨论组（需手动指定 discussion group id）
-
     source_discussion_group: Optional[Union[int, str]] = None
-    # 当 source_mode="discussion" 时，手动指定源讨论组 ID
-    # 当 source_mode="comments" 时，自动通过 API 获取
 
-    # 目标：转发到哪里
     dest_mode: str = "comments"
-    # "comments" — 转发到目标频道帖子的评论区（需要帖子映射）
-    # "discussion" — 直接发送到目标讨论组（需手动指定）
-
     dest_discussion_groups: List[Union[int, str]] = []
-    # 当 dest_mode="discussion" 时使用
 
-    # 过滤选项
-    only_media: bool = False          # 仅转发包含媒体的评论
-    include_text_comments: bool = True  # 是否也转发纯文本评论
-    skip_bot_comments: bool = False     # 跳过机器人发的评论
-    skip_admin_comments: bool = False   # 跳过管理员发的评论
+    only_media: bool = False
+    include_text_comments: bool = True
+    skip_bot_comments: bool = False
+    skip_admin_comments: bool = False
 
-    # 帖子映射模式
     post_mapping_mode: str = "auto"
-    # "auto"   — 自动映射（当主消息转发时自动记录 src_post_id → dest_post_id）
-    # "by_order" — 按顺序映射（源第N条帖子 → 目标第N条帖子）
-    # "manual" — 手动指定映射关系
-
     manual_post_mapping: Dict[str, str] = {}
-    # 手动映射: {"src_post_id": "dest_post_id"}
     manual_post_mapping_raw: str = ""
 
 
@@ -202,27 +184,70 @@ async def get_id(client: TelegramClient, peer):
     - 用户名（str）：如 "@channel_name" 或 "channel_name"
     - t.me 链接（str）：如 "https://t.me/channel_name"
     """
+    # ★ 预处理：如果是字符串，清理格式
+    if isinstance(peer, str):
+        peer = peer.strip()
+        if not peer:
+            raise ValueError("peer 为空字符串")
+
+        # t.me 链接转为用户名
+        if "t.me/" in peer:
+            parts = peer.split("t.me/")
+            if len(parts) == 2:
+                name = parts[1].strip().rstrip("/")
+                if name and not name.startswith("+"):
+                    peer = f"@{name}" if not name.startswith("@") else name
+
+        # 尝试将纯数字字符串转为 int
+        try:
+            peer = int(peer)
+        except ValueError:
+            pass
+
     try:
         # ★ 关键：用 get_entity 而不是 get_peer_id
         # get_entity 会完整解析并缓存实体（包含 access_hash）
         entity = await client.get_entity(peer)
-        logging.info(f"✅ 解析实体成功: {peer} → {entity.id}")
+        logging.info(f"✅ 解析实体成功: {peer} → id={entity.id}")
         return entity.id
     except ValueError:
         # 如果是纯数字 ID 且 get_entity 失败，尝试不同的格式
         if isinstance(peer, int):
-            # Telegram 频道 ID 通常以 -100 开头
-            # 但配置中可能存储的是不带 -100 前缀的 channel_id
-            for candidate in [peer, int(f"-100{peer}"), -peer]:
+            candidates = set()
+            candidates.add(peer)
+            # 可能缺少 -100 前缀
+            if peer > 0:
+                candidates.add(int(f"-100{peer}"))
+                candidates.add(-peer)
+            # 可能多了 -100 前缀
+            peer_str = str(abs(peer))
+            if peer_str.startswith("100") and len(peer_str) > 3:
+                candidates.add(int(peer_str[3:]))
+                candidates.add(-int(peer_str[3:]))
+
+            for candidate in candidates:
+                if candidate == peer:
+                    continue  # 已经试过了
                 try:
                     entity = await client.get_entity(candidate)
-                    logging.info(f"✅ 通过候选 ID {candidate} 解析成功: {entity.id}")
+                    logging.info(
+                        f"✅ 通过候选 ID {candidate} 解析成功: "
+                        f"{peer} → id={entity.id}"
+                    )
                     return entity.id
                 except Exception:
                     continue
+
+        logging.error(
+            f"❌ 无法解析实体 '{peer}'\n"
+            f"💡 建议:\n"
+            f"   - 使用 @用户名 格式（如 @mychannel）\n"
+            f"   - 或使用 https://t.me/mychannel 链接\n"
+            f"   - 确保账号已加入该频道/群组"
+        )
         raise
     except Exception as e:
-        logging.error(f"❌ 无法解析实体 {peer}: {e}")
+        logging.error(f"❌ 无法解析实体 '{peer}': {e}")
         raise
 
 
@@ -254,9 +279,9 @@ async def load_from_to(
             logging.error(
                 f"❌ 无法解析源 '{forward.source}' "
                 f"(连接: {forward.con_name}): {e}\n"
-                f"💡 请确认账号已加入该频道/群组，或使用正确的用户名/链接"
+                f"💡 请确认账号已加入该频道/群组，或使用 @用户名 格式"
             )
-            continue  # ★ 跳过这个连接，不崩溃
+            continue
 
         # ——— 解析目标 ———
         dest_ids = []
@@ -268,9 +293,9 @@ async def load_from_to(
                 logging.error(
                     f"❌ 无法解析目标 '{dest}' "
                     f"(连接: {forward.con_name}): {e}\n"
-                    f"💡 请确认账号已加入该频道/群组，或使用正确的用户名/链接"
+                    f"💡 请确认账号已加入该频道/群组，或使用 @用户名 格式"
                 )
-                continue  # ★ 跳过这个目标，不崩溃
+                continue
 
         if dest_ids:
             from_to_dict[src] = dest_ids
@@ -289,7 +314,7 @@ async def load_from_to(
             "⚠️ 没有任何有效的转发连接！\n"
             "💡 常见原因:\n"
             "   1. 账号未加入源/目标频道或群组\n"
-            "   2. 频道/群组 ID 不正确\n"
+            "   2. 频道/群组 ID 不正确（建议使用 @用户名）\n"
             "   3. 使用 Bot 账号但 Bot 未被添加到群组\n"
             "   4. 私有频道需要先手动加入"
         )
@@ -343,13 +368,8 @@ if PASSWORD == "nb":
     )
 
 from_to = {}
-# 评论区相关的映射
 comment_sources: Dict[int, int] = {}
-# discussion_group_id → source_channel_id 的反向映射
-
 comment_forward_map: Dict[int, "Forward"] = {}
-# discussion_group_id → Forward 对象的映射
-
 is_bot: Optional[bool] = None
 logging.info("config.py got executed")
 
