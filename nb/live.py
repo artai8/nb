@@ -12,12 +12,42 @@ from nb.utils import (
     clean_session_files, extract_msg_id, send_message,
     _get_reply_to_msg_id, _get_reply_to_top_id,
     get_discussion_message, get_discussion_group_id,
+    get_discussion_group_id_reverse,
     COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY,
 )
 
 COMMENT_GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
-COMMENT_GROUPED_TIMEOUT = 2.5
+COMMENT_GROUPED_TIMEOUT = 3.0
+
+
+async def _ensure_discussion_mapping(client, discussion_id, top_id):
+    if (discussion_id, top_id) in st.discussion_to_channel_post:
+        return st.discussion_to_channel_post[(discussion_id, top_id)]
+    for attempt in range(3):
+        try:
+            msg = await client.get_messages(discussion_id, ids=top_id)
+            if msg and hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(discussion_id, top_id, cp)
+                    return cp
+            return None
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+    return None
+
+
+async def _scan_nearby_for_mapping(client, discussion_id, around_id, limit=20):
+    try:
+        async for msg in client.iter_messages(discussion_id, limit=limit, offset_id=around_id, add_offset=-limit//2):
+            if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(discussion_id, msg.id, cp)
+    except Exception:
+        pass
 
 
 async def _flush_comment_group(grouped_id):
@@ -34,27 +64,31 @@ async def _flush_comment_group(grouped_id):
             tms = await apply_plugins_to_group(messages)
             if not tms or tms[0] is None:
                 continue
+            dest_map = None
             for attempt in range(COMMENT_MAX_RETRIES):
                 try:
                     dest_map = await _resolve_comment_dest(messages[0].client, messages[0], forward)
-                    if dest_map is None:
+                    if dest_map:
+                        break
+                    await _scan_nearby_for_mapping(messages[0].client, chat_id, messages[0].id)
+                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                except Exception:
+                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+            if not dest_map:
+                logging.warning(f"评论媒体组无法解析目标 chat={chat_id} msg={messages[0].id}")
+                continue
+            for dest_id, dest_top_id in dest_map.items():
+                for attempt in range(COMMENT_MAX_RETRIES):
+                    try:
+                        fwded = await send_message(dest_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_top_id)
+                        if fwded is not None:
+                            st.add_comment_mapping(chat_id, messages[0].id, dest_id, extract_msg_id(fwded))
+                        break
+                    except Exception as e:
                         if attempt < COMMENT_MAX_RETRIES - 1:
                             await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                            continue
-                        break
-                    for dest_id, dest_top_id in dest_map.items():
-                        try:
-                            fwded = await send_message(dest_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_top_id)
-                            if fwded is not None:
-                                st.add_comment_mapping(chat_id, messages[0].id, dest_id, extract_msg_id(fwded))
-                        except Exception as e:
-                            logging.error(f"评论媒体组转发失败: {e}")
-                    break
-                except Exception as e:
-                    if attempt < COMMENT_MAX_RETRIES - 1:
-                        await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                    else:
-                        logging.error(f"评论媒体组重试耗尽: {e}")
+                        else:
+                            logging.error(f"评论媒体组转发最终失败: {e}")
             for tm in tms:
                 tm.clear()
     except Exception as e:
@@ -79,22 +113,6 @@ def _add_comment_to_group_cache(chat_id, grouped_id, message):
     )
 
 
-async def _try_resolve_top_id(client, chat_id, msg_id):
-    for attempt in range(3):
-        try:
-            msg = await client.get_messages(chat_id, ids=msg_id)
-            if msg and hasattr(msg, 'fwd_from') and msg.fwd_from:
-                cp = getattr(msg.fwd_from, 'channel_post', None)
-                if cp:
-                    st.discussion_to_channel_post[(chat_id, msg_id)] = cp
-                    return msg_id
-            return None
-        except Exception:
-            if attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
-    return None
-
-
 async def _resolve_comment_dest(client, message, forward) -> Optional[Dict[int, int]]:
     chat_id = message.chat_id
     top_id = _get_reply_to_top_id(message)
@@ -104,9 +122,13 @@ async def _resolve_comment_dest(client, message, forward) -> Optional[Dict[int, 
             if (chat_id, reply_msg_id) in st.discussion_to_channel_post:
                 top_id = reply_msg_id
             else:
-                resolved = await _try_resolve_top_id(client, chat_id, reply_msg_id)
-                if resolved:
-                    top_id = resolved
+                cp = await _ensure_discussion_mapping(client, chat_id, reply_msg_id)
+                if cp:
+                    top_id = reply_msg_id
+                else:
+                    await _scan_nearby_for_mapping(client, chat_id, reply_msg_id)
+                    if (chat_id, reply_msg_id) in st.discussion_to_channel_post:
+                        top_id = reply_msg_id
     if top_id is None:
         return None
     src_channel_id = config.comment_sources.get(chat_id)
@@ -114,17 +136,7 @@ async def _resolve_comment_dest(client, message, forward) -> Optional[Dict[int, 
         return None
     channel_post_id = st.discussion_to_channel_post.get((chat_id, top_id))
     if channel_post_id is None:
-        for attempt in range(3):
-            try:
-                top_msg = await client.get_messages(chat_id, ids=top_id)
-                if top_msg and hasattr(top_msg, 'fwd_from') and top_msg.fwd_from:
-                    channel_post_id = getattr(top_msg.fwd_from, 'channel_post', None)
-                    if channel_post_id:
-                        st.discussion_to_channel_post[(chat_id, top_id)] = channel_post_id
-                        break
-            except Exception:
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
+        channel_post_id = await _ensure_discussion_mapping(client, chat_id, top_id)
     if channel_post_id is None:
         return None
     result = {}
@@ -248,7 +260,7 @@ async def comment_message_handler(event):
     if hasattr(message, 'fwd_from') and message.fwd_from:
         cp = getattr(message.fwd_from, 'channel_post', None)
         if cp:
-            st.discussion_to_channel_post[(chat_id, message.id)] = cp
+            st.add_discussion_mapping(chat_id, message.id, cp)
             return
     if message.grouped_id is not None:
         _add_comment_to_group_cache(chat_id, message.grouped_id, message)
@@ -256,27 +268,34 @@ async def comment_message_handler(event):
     tm = await apply_plugins(message)
     if not tm:
         return
+    dest_map = None
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
             dest_map = await _resolve_comment_dest(event.client, message, forward)
-            if dest_map is None:
-                if attempt < COMMENT_MAX_RETRIES - 1:
-                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                    continue
+            if dest_map:
                 break
-            for dest_id, dest_top_id in dest_map.items():
-                try:
-                    fwded = await send_message(dest_id, tm, comment_to_post=dest_top_id)
-                    if fwded is not None:
-                        st.add_comment_mapping(chat_id, message.id, dest_id, extract_msg_id(fwded))
-                except Exception as e:
-                    logging.error(f"评论转发失败: {e}")
-            break
-        except Exception as e:
+            if attempt < COMMENT_MAX_RETRIES - 1:
+                await _scan_nearby_for_mapping(event.client, chat_id, message.id)
+                await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+        except Exception:
             if attempt < COMMENT_MAX_RETRIES - 1:
                 await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-            else:
-                logging.error(f"评论转发重试耗尽: {e}")
+    if not dest_map:
+        logging.warning(f"评论无法解析目标 chat={chat_id} msg={message.id}")
+        tm.clear()
+        return
+    for dest_id, dest_top_id in dest_map.items():
+        for attempt in range(COMMENT_MAX_RETRIES):
+            try:
+                fwded = await send_message(dest_id, tm, comment_to_post=dest_top_id)
+                if fwded is not None:
+                    st.add_comment_mapping(chat_id, message.id, dest_id, extract_msg_id(fwded))
+                break
+            except Exception as e:
+                if attempt < COMMENT_MAX_RETRIES - 1:
+                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                else:
+                    logging.error(f"评论转发最终失败: {e}")
     tm.clear()
 
 
@@ -363,9 +382,11 @@ async def _setup_comment_listeners(client):
         else:
             dg_id = await get_discussion_group_id(client, src)
             if dg_id is None:
+                logging.warning(f"无法获取频道 {src} 的讨论组, 尝试反向查找")
                 continue
             comment_sources[dg_id] = src
             comment_forward_map[dg_id] = forward
+            logging.info(f"评论监听: 讨论组={dg_id} -> 源频道={src}")
     return comment_sources, comment_forward_map
 
 
@@ -373,13 +394,13 @@ async def _preload_recent_post_mappings(client):
     for discussion_id, src_channel_id in config.comment_sources.items():
         try:
             count = 0
-            async for msg in client.iter_messages(discussion_id, limit=500):
+            async for msg in client.iter_messages(discussion_id, limit=1000):
                 if hasattr(msg, 'fwd_from') and msg.fwd_from:
                     cp = getattr(msg.fwd_from, 'channel_post', None)
                     if cp:
-                        st.discussion_to_channel_post[(discussion_id, msg.id)] = cp
+                        st.add_discussion_mapping(discussion_id, msg.id, cp)
                         count += 1
-            logging.info(f"预加载 {count} 个帖子映射: 讨论组 {discussion_id}")
+            logging.info(f"预加载 {count} 个帖子映射: 讨论组={discussion_id}")
         except Exception as e:
             logging.warning(f"预加载帖子映射失败 (讨论组={discussion_id}): {e}")
 
@@ -409,6 +430,9 @@ async def start_sync():
         if cs:
             await _preload_recent_post_mappings(client)
             client.add_event_handler(comment_message_handler, events.NewMessage(chats=list(cs.keys())))
+            logging.info(f"评论监听已启动, 监听讨论组: {list(cs.keys())}")
+        else:
+            logging.warning("未找到任何可用的讨论组, 评论转发将不会工作")
     for key, val in ALL_EVENTS.items():
         if not CONFIG.live.delete_sync and key == "deleted":
             continue
