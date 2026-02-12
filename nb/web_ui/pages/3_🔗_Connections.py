@@ -28,11 +28,54 @@ def rerun():
 
 
 def _parse_id(value: str):
+    """解析用户输入的 ID。
+
+    支持格式:
+    - 纯数字: 123456 → int
+    - 负数: -100123456 → int
+    - 用户名: @channel_name → str (保留 @)
+    - 用户名无@: channel_name → str (自动加 @)
+    - t.me 链接: https://t.me/channel_name → str (提取用户名)
+    """
     value = value.strip()
+    if not value:
+        return ""
+
+    # 纯数字或负数 → int
     try:
         return int(value)
     except ValueError:
+        pass
+
+    # t.me 链接 → 提取用户名
+    if "t.me/" in value:
+        # https://t.me/channel_name → @channel_name
+        # https://t.me/+invite_hash → 保持原样（私有频道邀请链接）
+        parts = value.split("t.me/")
+        if len(parts) == 2:
+            name = parts[1].strip().rstrip("/")
+            if name.startswith("+"):
+                # 私有频道邀请链接，保持原样
+                return value
+            if name:
+                return f"@{name}" if not name.startswith("@") else name
+
+    # 已有 @ 前缀 → 保持
+    if value.startswith("@"):
         return value
+
+    # 纯文本且不是数字 → 当作用户名，加 @
+    if value.isascii() and not value.startswith("-"):
+        return f"@{value}"
+
+    return value
+
+
+def _display_id(value) -> str:
+    """将存储的 ID 转为显示字符串"""
+    if value is None or value == "":
+        return ""
+    return str(value)
 
 
 def _safe_int(value, default=0):
@@ -45,6 +88,16 @@ def _safe_int(value, default=0):
 
 
 if check_password(st):
+
+    # ★ 使用提示
+    st.info(
+        "💡 **推荐使用用户名格式** 填写源和目标，例如：\n"
+        "- `@channel_name` （公开频道/群组用户名）\n"
+        "- `https://t.me/channel_name` （t.me 链接）\n"
+        "- `-1001234567890` （数字 ID，需要账号已加入该频道）\n\n"
+        "使用用户名可以避免实体解析失败的问题。"
+    )
+
     add_new = st.button("Add new connection")
     if add_new:
         CONFIG.forwards.append(Forward())
@@ -106,10 +159,22 @@ if check_password(st):
 
                     source_input = st.text_input(
                         "Source",
-                        value=str(CONFIG.forwards[i].source),
+                        value=_display_id(CONFIG.forwards[i].source),
                         key=f"source {con}",
+                        help="输入 @用户名、t.me 链接 或 数字 ID",
                     ).strip()
                     CONFIG.forwards[i].source = _parse_id(source_input)
+
+                    # ★ 实时显示解析结果
+                    parsed_source = CONFIG.forwards[i].source
+                    if parsed_source:
+                        if isinstance(parsed_source, int):
+                            st.caption(f"📌 解析为数字 ID: `{parsed_source}`")
+                        elif isinstance(parsed_source, str) and parsed_source.startswith("@"):
+                            st.caption(f"📌 解析为用户名: `{parsed_source}`")
+                        else:
+                            st.caption(f"📌 解析为: `{parsed_source}`")
+
                     st.write("only one source is allowed in a connection")
 
                     raw_dest = get_list(
@@ -117,9 +182,18 @@ if check_password(st):
                             "Destinations",
                             value=get_string(CONFIG.forwards[i].dest),
                             key=f"dest {con}",
+                            help="每行一个，支持 @用户名、t.me 链接 或 数字 ID",
                         )
                     )
                     CONFIG.forwards[i].dest = [_parse_id(item) for item in raw_dest]
+
+                    # ★ 显示解析结果
+                    if CONFIG.forwards[i].dest:
+                        parsed_list = ", ".join(
+                            [f"`{d}`" for d in CONFIG.forwards[i].dest if d]
+                        )
+                        st.caption(f"📌 目标解析为: {parsed_list}")
+
                     st.write("Write destinations one item per line")
 
                 # ==================== 评论区配置 ====================
@@ -159,8 +233,9 @@ if check_password(st):
                         if comments.source_mode == "discussion":
                             dg_input = st.text_input(
                                 "源讨论组 ID",
-                                value=str(comments.source_discussion_group or ""),
+                                value=_display_id(comments.source_discussion_group),
                                 key=f"comments_src_dg {con}",
+                                help="输入 @用户名 或 数字 ID",
                             ).strip()
                             comments.source_discussion_group = _parse_id(dg_input) if dg_input else None
 
@@ -184,6 +259,7 @@ if check_password(st):
                                     "目标讨论组 ID（每行一个）",
                                     value=get_string(comments.dest_discussion_groups),
                                     key=f"comments_dest_dgs {con}",
+                                    help="每行一个，支持 @用户名 或 数字 ID",
                                 )
                             )
                             comments.dest_discussion_groups = [
