@@ -86,7 +86,7 @@ if check_password(st):
 
     with st.expander("发送者"):
         st.write("使用其他账号发送转发的消息")
-        st.warning("必须禁用"显示转发来源"选项，否则消息将无法发送", icon="⚠️")
+        st.warning('必须禁用"显示转发来源"选项，否则消息将无法发送', icon="⚠️")
         CONFIG.plugins.sender.check = st.checkbox("设置发送者:", value=CONFIG.plugins.sender.check)
         leftpad, content, rightpad = st.columns([0.05, 0.9, 0.05])
         with content:
