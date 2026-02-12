@@ -26,37 +26,19 @@ class CommentsConfig(BaseModel):
 
     enabled: bool = False
 
-    # 源：从哪里获取评论
     source_mode: str = "comments"
-    # "comments"  — 从源频道帖子的评论区获取媒体
-    # "discussion" — 直接监听源讨论组（需手动指定 discussion group id）
-
     source_discussion_group: Optional[Union[int, str]] = None
-    # 当 source_mode="discussion" 时，手动指定源讨论组 ID
-    # 当 source_mode="comments" 时，自动通过 API 获取
 
-    # 目标：转发到哪里
     dest_mode: str = "comments"
-    # "comments" — 转发到目标频道帖子的评论区（需要帖子映射）
-    # "discussion" — 直接发送到目标讨论组（需手动指定）
-
     dest_discussion_groups: List[Union[int, str]] = []
-    # 当 dest_mode="discussion" 时使用
 
-    # 过滤选项
-    only_media: bool = False          # 仅转发包含媒体的评论
-    include_text_comments: bool = True  # 是否也转发纯文本评论
-    skip_bot_comments: bool = False     # 跳过机器人发的评论
-    skip_admin_comments: bool = False   # 跳过管理员发的评论
+    only_media: bool = False
+    include_text_comments: bool = True
+    skip_bot_comments: bool = False
+    skip_admin_comments: bool = False
 
-    # 帖子映射模式
     post_mapping_mode: str = "auto"
-    # "auto"   — 自动映射（当主消息转发时自动记录 src_post_id → dest_post_id）
-    # "by_order" — 按顺序映射（源第N条帖子 → 目标第N条帖子）
-    # "manual" — 手动指定映射关系
-
     manual_post_mapping: Dict[str, str] = {}
-    # 手动映射: {"src_post_id": "dest_post_id"}
     manual_post_mapping_raw: str = ""
 
 
@@ -261,27 +243,172 @@ if PASSWORD == "nb":
     )
 
 from_to = {}
-# 评论区相关的映射
 comment_sources: Dict[int, int] = {}
-# discussion_group_id → source_channel_id 的反向映射
-
 comment_forward_map: Dict[int, "Forward"] = {}
-# discussion_group_id → Forward 对象的映射
-
 is_bot: Optional[bool] = None
 logging.info("config.py got executed")
 
 
+def _clean_session_string(raw: str) -> str:
+    """清理 session string，去除可能导致问题的字符。"""
+    if not raw:
+        return ""
+
+    cleaned = raw.strip()
+
+    # 去除首尾引号（单引号或双引号）
+    for q in ('"', "'", '\u201c', '\u201d', '\u2018', '\u2019'):
+        if cleaned.startswith(q) and cleaned.endswith(q):
+            cleaned = cleaned[1:-1].strip()
+
+    # 去除所有换行和多余空格
+    cleaned = cleaned.replace("\n", "").replace("\r", "").replace(" ", "")
+
+    return cleaned
+
+
+def _validate_session_string(session_str: str) -> bool:
+    """验证 session string 是否合法。"""
+    if not session_str:
+        return False
+
+    # Telethon v1 session string 以 '1' 开头
+    # 长度应该是 353 (IPv4) 或 369 (IPv6)（含版本前缀）
+    if session_str[0] != '1':
+        logging.error(
+            f"Session string 版本不匹配: 首字符='{session_str[0]}' (期望 '1')\n"
+            f"字符串长度={len(session_str)}\n"
+            f"前10字符: '{session_str[:10]}...'"
+        )
+        return False
+
+    expected_lengths = [353, 369]
+    if len(session_str) not in expected_lengths:
+        logging.warning(
+            f"Session string 长度异常: {len(session_str)} "
+            f"(期望 {expected_lengths})"
+        )
+        # 不直接 return False，让 Telethon 自己判断
+
+    # 检查是否只包含 base64 字符
+    import re
+    if not re.match(r'^[A-Za-z0-9+/=]+$', session_str):
+        invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', session_str))
+        logging.error(
+            f"Session string 包含非法字符: {invalid_chars}\n"
+            f"前20字符: '{session_str[:20]}...'"
+        )
+        return False
+
+    return True
+
+
 def get_SESSION(section: Any = None, default: str = "nb_bot"):
+    """获取 Telethon session 对象。
+
+    支持:
+    - 用户账号: 使用 SESSION_STRING（StringSession）
+    - Bot 账号: 使用 BOT_TOKEN（文件 session）
+    """
     if section is None:
         section = CONFIG.login
+
     if section.SESSION_STRING and section.user_type == 1:
-        logging.info("using session string")
-        SESSION = StringSession(section.SESSION_STRING)
+        # ★ 用户账号模式
+        raw_string = section.SESSION_STRING
+
+        # 也检查环境变量（可能比配置文件中的更新）
+        env_session = os.getenv("SESSION_STRING", "")
+        if env_session:
+            raw_string = env_session
+            logging.info("使用环境变量中的 SESSION_STRING")
+
+        # 清理
+        cleaned = _clean_session_string(raw_string)
+
+        if not cleaned:
+            logging.error(
+                "❌ SESSION_STRING 为空！\n"
+                "请在 Telegram Login 页面设置，或设置环境变量 SESSION_STRING"
+            )
+            sys.exit(1)
+
+        # 验证
+        if not _validate_session_string(cleaned):
+            logging.error(
+                "❌ SESSION_STRING 格式无效！\n"
+                f"清理后长度: {len(cleaned)}\n"
+                f"首字符: '{cleaned[0] if cleaned else '?'}'\n"
+                f"前20字符: '{cleaned[:20]}...'\n"
+                "\n请重新生成 session string:\n"
+                "  方法1: https://replit.com/@artai8/tg-login\n"
+                "  方法2: pip install tg-login && tg-login"
+            )
+            sys.exit(1)
+
+        try:
+            SESSION = StringSession(cleaned)
+            logging.info(
+                f"✅ Session string 验证通过 (长度={len(cleaned)})"
+            )
+        except ValueError as e:
+            logging.error(
+                f"❌ Telethon 拒绝 session string: {e}\n"
+                f"清理后长度: {len(cleaned)}\n"
+                f"首字符: '{cleaned[0]}'\n"
+                "\n这通常意味着:\n"
+                "  1. Session string 被截断了（复制不完整）\n"
+                "  2. Session string 是用不兼容版本的 Telethon 生成的\n"
+                "  3. Session string 中混入了不可见字符\n"
+                "\n请重新生成 session string"
+            )
+            sys.exit(1)
+        except Exception as e:
+            logging.error(f"❌ 创建 StringSession 时发生未知错误: {e}")
+            sys.exit(1)
+
+        return SESSION
+
     elif section.BOT_TOKEN and section.user_type == 0:
+        # ★ Bot 模式
+        bot_token = section.BOT_TOKEN.strip()
+
+        # 也检查环境变量
+        env_token = os.getenv("BOT_TOKEN", "")
+        if env_token:
+            bot_token = env_token.strip()
+            logging.info("使用环境变量中的 BOT_TOKEN")
+
+        if not bot_token:
+            logging.error(
+                "❌ BOT_TOKEN 为空！\n"
+                "请在 Telegram Login 页面设置，或设置环境变量 BOT_TOKEN"
+            )
+            sys.exit(1)
+
+        # 简单验证 bot token 格式: 数字:字母数字
+        if ":" not in bot_token:
+            logging.error(
+                f"❌ BOT_TOKEN 格式无效: 缺少冒号\n"
+                f"正确格式: 123456789:ABCdefGHIjklMNOpqrSTUvwxyz\n"
+                f"当前值前20字符: '{bot_token[:20]}...'"
+            )
+            sys.exit(1)
+
         logging.info("using bot account")
         SESSION = default
+        return SESSION
+
     else:
-        logging.warning("Login information not set!")
-        sys.exit()
-    return SESSION
+        # ★ 未配置登录信息
+        login_type = "用户账号" if section.user_type == 1 else "Bot"
+        needed = "SESSION_STRING" if section.user_type == 1 else "BOT_TOKEN"
+
+        logging.error(
+            f"❌ 登录信息未设置！\n"
+            f"当前模式: {login_type}\n"
+            f"缺少: {needed}\n"
+            f"\n请在 Web UI → Telegram Login 页面配置，\n"
+            f"或设置环境变量 {needed}"
+        )
+        sys.exit(1)
