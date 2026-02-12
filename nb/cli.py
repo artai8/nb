@@ -4,13 +4,11 @@ import os
 import sys
 from enum import Enum
 from typing import Optional
-
 import typer
 from dotenv import load_dotenv
 from rich import console, traceback
 from rich.logging import RichHandler
 from verlat import latest_release
-
 from nb import __version__
 
 load_dotenv(".env")
@@ -30,9 +28,9 @@ def topper():
     try:
         latver = latest_release("nb").version
         if __version__ != latver:
-            con.print(f"nb 有新版本 {latver} 可用！\n访问 http://bit.ly/update-nb", style="bold yellow")
+            con.print(f"nb 有新版本 {latver} 可用", style="bold yellow")
         else:
-            con.print(f"当前已是最新版本 {__version__}", style="bold green")
+            con.print(f"当前版本 {__version__}", style="bold green")
     except Exception:
         con.print(f"当前版本 {__version__}", style="bold green")
     print("\n")
@@ -68,12 +66,12 @@ def _pre_check_config(mode):
             if login.SESSION_STRING and not _looks_like_bot_token(login.SESSION_STRING):
                 pass
             else:
-                errors.append("past 模式不支持 Bot 账号")
+                errors.append("past模式不支持Bot账号")
         if login.user_type == 1:
             if not login.SESSION_STRING:
                 errors.append("Session String 未设置")
             elif _looks_like_bot_token(login.SESSION_STRING):
-                errors.append("SESSION_STRING 中的值是 Bot Token")
+                errors.append("SESSION_STRING中的值是Bot Token")
     if mode == Mode.LIVE:
         if login.user_type == 0 and not login.BOT_TOKEN:
             errors.append("Bot Token 未设置")
