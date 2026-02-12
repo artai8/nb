@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-
 from nb.config import CONFIG
 
 package_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,7 +13,7 @@ def main():
         print(f"主页面不存在: {hello_file}")
         sys.exit(1)
     if not os.path.isdir(pages_dir):
-        print(f"pages 目录不存在: {pages_dir}")
+        print(f"pages目录不存在: {pages_dir}")
         sys.exit(1)
     os.environ["STREAMLIT_THEME_BASE"] = CONFIG.theme
     os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
