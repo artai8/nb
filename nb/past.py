@@ -13,8 +13,9 @@ from nb.config import CONFIG, get_SESSION, write_config
 from nb.plugins import apply_plugins, apply_plugins_to_group, load_async_plugins
 from nb.utils import (
     clean_session_files, extract_msg_id, send_message,
-    _get_reply_to_msg_id, _get_reply_to_top_id,
+    _get_reply_to_msg_id, _get_reply_to_top_id, _extract_channel_post,
     get_discussion_message, get_discussion_group_id,
+    walk_to_header, preload_discussion_mappings,
     COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY,
 )
 
@@ -70,16 +71,22 @@ async def _get_comments_method_d(client, channel_id, msg_id):
         dg_id = await get_discussion_group_id(client, channel_id)
         if dg_id is None:
             return []
-        async for msg in client.iter_messages(dg_id, limit=200):
-            if hasattr(msg, 'fwd_from') and msg.fwd_from:
-                cp = getattr(msg.fwd_from, 'channel_post', None)
-                if cp:
-                    st.add_discussion_mapping(dg_id, msg.id, cp)
-                    if cp == msg_id:
-                        comments = []
-                        async for reply in client.iter_messages(dg_id, reply_to=msg.id, reverse=True):
-                            comments.append(reply)
-                        return comments
+        disc_msg_id = st.get_discussion_msg_id(dg_id, msg_id)
+        if disc_msg_id:
+            comments = []
+            async for msg in client.iter_messages(dg_id, reply_to=disc_msg_id, reverse=True):
+                comments.append(msg)
+            if comments:
+                return comments
+        async for msg in client.iter_messages(dg_id, limit=300):
+            cp = _extract_channel_post(msg)
+            if cp:
+                st.add_discussion_mapping(dg_id, msg.id, cp)
+                if cp == msg_id:
+                    comments = []
+                    async for reply in client.iter_messages(dg_id, reply_to=msg.id, reverse=True):
+                        comments.append(reply)
+                    return comments
         return []
     except Exception:
         return []
@@ -87,13 +94,13 @@ async def _get_comments_method_d(client, channel_id, msg_id):
 
 async def _get_all_comments(client, channel_id, msg_id, retry_delay=3):
     methods = [
-        ("method_a", lambda: _get_comments_method_a(client, channel_id, msg_id)),
-        ("method_b", lambda: _get_comments_method_b(client, channel_id, msg_id)),
-        ("method_c", lambda: _get_comments_method_c(client, channel_id, msg_id)),
-        ("method_d", lambda: _get_comments_method_d(client, channel_id, msg_id)),
+        lambda: _get_comments_method_a(client, channel_id, msg_id),
+        lambda: _get_comments_method_b(client, channel_id, msg_id),
+        lambda: _get_comments_method_c(client, channel_id, msg_id),
+        lambda: _get_comments_method_d(client, channel_id, msg_id),
     ]
     for attempt in range(COMMENT_MAX_RETRIES):
-        for name, method in methods:
+        for method in methods:
             try:
                 comments = await method()
                 if comments:
@@ -152,33 +159,27 @@ async def _flush_grouped_buffer(client, src, dest, grouped_buffer, forward):
     return last_id
 
 
-async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_list, forward):
-    cfg = forward.comments
-    await asyncio.sleep(3)
-    comments = await _get_all_comments(client, src_channel_id, src_post_id, retry_delay=5)
-    if not comments:
-        return
-    filtered = []
-    for c in comments:
-        if isinstance(c, MessageService):
-            continue
-        if hasattr(c, 'fwd_from') and c.fwd_from and getattr(c.fwd_from, 'channel_post', None):
-            continue
-        if cfg.only_media and not c.media:
-            continue
-        if not cfg.include_text_comments and not c.media:
-            continue
-        if cfg.skip_bot_comments:
+async def _send_comment_with_retry(client, dest_targets, tm=None, tms=None, grouped_messages=None, src_id=0, src_chat=0):
+    for dest_chat_id, dest_reply_to in dest_targets.items():
+        for attempt in range(COMMENT_MAX_RETRIES):
             try:
-                s = await c.get_sender()
-                if s and getattr(s, 'bot', False):
-                    continue
-            except Exception:
-                pass
-        filtered.append(c)
-    if not filtered:
-        return
-    units = _group_comments(filtered)
+                if tms and grouped_messages:
+                    fwded = await send_message(dest_chat_id, tms[0], grouped_messages=grouped_messages, grouped_tms=tms, comment_to_post=dest_reply_to)
+                else:
+                    fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
+                if fwded:
+                    st.add_comment_mapping(src_chat, src_id, dest_chat_id, extract_msg_id(fwded))
+                break
+            except FloodWaitError as fwe:
+                await asyncio.sleep(fwe.seconds + 5)
+            except Exception as e:
+                if attempt < COMMENT_MAX_RETRIES - 1:
+                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                else:
+                    logging.error(f"评论发送最终失败 dest={dest_chat_id} src_msg={src_id}: {e}")
+
+
+async def _resolve_dest_targets(client, src_channel_id, src_post_id, dest_list, cfg):
     dest_targets = {}
     for dest_ch in dest_list:
         dest_resolved = dest_ch
@@ -213,28 +214,49 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
                     except Exception:
                         continue
                 dest_targets[dg_id] = None
+    return dest_targets
+
+
+async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_list, forward):
+    cfg = forward.comments
+    await asyncio.sleep(3)
+    comments = await _get_all_comments(client, src_channel_id, src_post_id, retry_delay=5)
+    if not comments:
+        return
+    filtered = []
+    for c in comments:
+        if isinstance(c, MessageService):
+            continue
+        if _extract_channel_post(c):
+            continue
+        if cfg.only_media and not c.media:
+            continue
+        if not cfg.include_text_comments and not c.media:
+            continue
+        if cfg.skip_bot_comments:
+            try:
+                s = await c.get_sender()
+                if s and getattr(s, 'bot', False):
+                    continue
+            except Exception:
+                pass
+        filtered.append(c)
+    if not filtered:
+        return
+    units = _group_comments(filtered)
+    dest_targets = await _resolve_dest_targets(client, src_channel_id, src_post_id, dest_list, cfg)
     if not dest_targets:
         return
     for unit_msgs in units:
-        is_group = len(unit_msgs) > 1
-        if is_group:
+        if len(unit_msgs) > 1:
             tms = await apply_plugins_to_group(unit_msgs)
             if not tms or tms[0] is None:
                 continue
-            for dest_chat_id, dest_reply_to in dest_targets.items():
-                for attempt in range(COMMENT_MAX_RETRIES):
-                    try:
-                        fwded = await send_message(dest_chat_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_reply_to)
-                        if fwded:
-                            st.add_comment_mapping(src_channel_id, unit_msgs[0].id, dest_chat_id, extract_msg_id(fwded))
-                        break
-                    except FloodWaitError as fwe:
-                        await asyncio.sleep(fwe.seconds + 5)
-                    except Exception as e:
-                        if attempt < COMMENT_MAX_RETRIES - 1:
-                            await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                        else:
-                            logging.error(f"评论媒体组失败: {e}")
+            await _send_comment_with_retry(
+                client, dest_targets,
+                tms=tms, grouped_messages=[tm.message for tm in tms],
+                src_id=unit_msgs[0].id, src_chat=src_channel_id,
+            )
             for tm in tms:
                 tm.clear()
         else:
@@ -242,20 +264,10 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
             tm = await apply_plugins(comment)
             if not tm:
                 continue
-            for dest_chat_id, dest_reply_to in dest_targets.items():
-                for attempt in range(COMMENT_MAX_RETRIES):
-                    try:
-                        fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
-                        if fwded:
-                            st.add_comment_mapping(src_channel_id, comment.id, dest_chat_id, extract_msg_id(fwded))
-                        break
-                    except FloodWaitError as fwe:
-                        await asyncio.sleep(fwe.seconds + 5)
-                    except Exception as e:
-                        if attempt < COMMENT_MAX_RETRIES - 1:
-                            await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                        else:
-                            logging.error(f"评论 #{comment.id} 失败: {e}")
+            await _send_comment_with_retry(
+                client, dest_targets,
+                tm=tm, src_id=comment.id, src_chat=src_channel_id,
+            )
             tm.clear()
         await asyncio.sleep(random.randint(5, 20))
 
@@ -292,13 +304,7 @@ async def forward_job():
                 try:
                     dg_id = await get_discussion_group_id(client, src)
                     if dg_id:
-                        count = 0
-                        async for msg in client.iter_messages(dg_id, limit=1000):
-                            if hasattr(msg, 'fwd_from') and msg.fwd_from:
-                                cp = getattr(msg.fwd_from, 'channel_post', None)
-                                if cp:
-                                    st.add_discussion_mapping(dg_id, msg.id, cp)
-                                    count += 1
+                        count = await preload_discussion_mappings(client, dg_id, limit=2000)
                         logging.info(f"past模式预加载 {count} 个帖子映射: 讨论组={dg_id}")
                 except Exception as e:
                     logging.warning(f"past模式预加载映射失败: {e}")
