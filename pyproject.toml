@@ -1,12 +1,11 @@
 [tool.poetry]
 name = "nb"
 version = "1.1.8"
-description = "The ultimate tool to automate custom telegram message forwarding."
+description = "Telegram message forwarding automation tool."
 authors = ["artai8 <daw@artai8.dev>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/artai8/nb"
-documentation = "https://github.com/artai8/nb/wiki"
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -33,7 +32,6 @@ black = {version = "^22.10.0", allow-prereleases = true}
 isort = "^5.10.1"
 pre-commit = "^2.20.0"
 
-
 [tool.poetry.scripts]
 nb = 'nb.cli:app'
 nb-web = 'nb.web_ui.run:main'
@@ -46,28 +44,9 @@ pylint = "^2.15.8"
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-
 [tool.isort]
 profile = "black"
 
 [tool.black]
 line-length = 88
 include = '\.pyi?$'
-exclude = '''
-(
-  /(
-      \.eggs         # exclude a few common directories in the
-    | \.git          # root of the project
-    | \.hg
-    | \.mypy_cache
-    | \.tox
-    | \.venv
-    | _build
-    | buck-out
-    | build
-    | dist
-  )/
-  | foo.py           # also separately exclude a file named foo.py in
-                     # the root of the project
-)
-'''
