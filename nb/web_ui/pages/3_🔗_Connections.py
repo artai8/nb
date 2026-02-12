@@ -1,6 +1,7 @@
 import time
 
 import streamlit as st
+import yaml
 
 from nb.config import CONFIG, Forward, read_config, write_config
 from nb.web_ui.password import check_password
@@ -15,7 +16,7 @@ st.set_page_config(
 hide_st(st)
 switch_theme(st, CONFIG)
 
-# 添加兼容性处理
+
 def rerun():
     """兼容不同版本的 Streamlit rerun 方法"""
     if hasattr(st, 'rerun'):
@@ -23,12 +24,10 @@ def rerun():
     elif hasattr(st, 'experimental_rerun'):
         st.experimental_rerun()
     else:
-        # 对于非常旧的版本
         raise st.script_runner.StopException
 
 
 def _parse_id(value: str):
-    """尝试将字符串转为 int，失败则保持字符串。"""
     value = value.strip()
     try:
         return int(value)
@@ -37,7 +36,6 @@ def _parse_id(value: str):
 
 
 def _safe_int(value, default=0):
-    """安全地将值转为 int，处理 None 和非数字字符串。"""
     if value is None:
         return default
     try:
@@ -70,6 +68,10 @@ if check_password(st):
             else:
                 status = "🟡"
 
+            # 评论区状态标识
+            if CONFIG.forwards[i].comments.enabled:
+                status += "💬"
+
             tab_strings.append(f"{status} {label}")
 
         tabs = st.tabs(list(tab_strings))
@@ -82,6 +84,7 @@ if check_password(st):
                     label = f"{con} [{name}]"
                 else:
                     label = con
+
                 with st.expander("Modify Metadata"):
                     st.write(f"Connection ID: **{con}**")
                     CONFIG.forwards[i].con_name = st.text_input(
@@ -89,7 +92,6 @@ if check_password(st):
                         value=CONFIG.forwards[i].con_name,
                         key=con,
                     )
-
                     st.info(
                         "You can untick the below checkbox to suspend this connection."
                     )
@@ -98,6 +100,7 @@ if check_password(st):
                         value=CONFIG.forwards[i].use_this,
                         key=f"use {con}",
                     )
+
                 with st.expander("Source and Destination"):
                     st.write(f"Configure connection {label}")
 
@@ -119,8 +122,146 @@ if check_password(st):
                     CONFIG.forwards[i].dest = [_parse_id(item) for item in raw_dest]
                     st.write("Write destinations one item per line")
 
+                # ==================== 评论区配置 ====================
+                with st.expander("💬 Comments / Discussion"):
+                    st.markdown("""
+                    **评论区转发**: 从源频道帖子的评论区获取消息，转发到目标频道帖子的评论区。
+
+                    **前提条件:**
+                    - 源频道和目标频道都需要开启评论功能（关联讨论组）
+                    - 主帖子需要先完成转发（评论区功能基于帖子映射）
+                    - 建议使用用户账号（bot 可能无法访问讨论组）
+                    """)
+
+                    comments = CONFIG.forwards[i].comments
+
+                    comments.enabled = st.checkbox(
+                        "启用评论区转发",
+                        value=comments.enabled,
+                        key=f"comments_enabled {con}",
+                    )
+
+                    if comments.enabled:
+                        st.markdown("---")
+                        st.markdown("##### 源设置")
+
+                        comments.source_mode = st.radio(
+                            "评论获取方式",
+                            ["comments", "discussion"],
+                            index=0 if comments.source_mode == "comments" else 1,
+                            key=f"comments_src_mode {con}",
+                            help=(
+                                "**comments**: 自动发现源频道的讨论组\n\n"
+                                "**discussion**: 手动指定源讨论组 ID"
+                            ),
+                        )
+
+                        if comments.source_mode == "discussion":
+                            dg_input = st.text_input(
+                                "源讨论组 ID",
+                                value=str(comments.source_discussion_group or ""),
+                                key=f"comments_src_dg {con}",
+                            ).strip()
+                            comments.source_discussion_group = _parse_id(dg_input) if dg_input else None
+
+                        st.markdown("---")
+                        st.markdown("##### 目标设置")
+
+                        comments.dest_mode = st.radio(
+                            "评论发送方式",
+                            ["comments", "discussion"],
+                            index=0 if comments.dest_mode == "comments" else 1,
+                            key=f"comments_dest_mode {con}",
+                            help=(
+                                "**comments**: 自动发送到目标频道帖子的评论区（推荐）\n\n"
+                                "**discussion**: 直接发送到指定讨论组"
+                            ),
+                        )
+
+                        if comments.dest_mode == "discussion":
+                            raw_dg = get_list(
+                                st.text_area(
+                                    "目标讨论组 ID（每行一个）",
+                                    value=get_string(comments.dest_discussion_groups),
+                                    key=f"comments_dest_dgs {con}",
+                                )
+                            )
+                            comments.dest_discussion_groups = [
+                                _parse_id(item) for item in raw_dg
+                            ]
+
+                        st.markdown("---")
+                        st.markdown("##### 过滤选项")
+
+                        comments.only_media = st.checkbox(
+                            "仅转发包含媒体的评论",
+                            value=comments.only_media,
+                            key=f"comments_only_media {con}",
+                        )
+
+                        comments.include_text_comments = st.checkbox(
+                            "包含纯文本评论",
+                            value=comments.include_text_comments,
+                            key=f"comments_text {con}",
+                        )
+
+                        comments.skip_bot_comments = st.checkbox(
+                            "跳过机器人发的评论",
+                            value=comments.skip_bot_comments,
+                            key=f"comments_skip_bot {con}",
+                        )
+
+                        comments.skip_admin_comments = st.checkbox(
+                            "跳过管理员发的评论",
+                            value=comments.skip_admin_comments,
+                            key=f"comments_skip_admin {con}",
+                        )
+
+                        st.markdown("---")
+                        st.markdown("##### 帖子映射")
+
+                        comments.post_mapping_mode = st.radio(
+                            "帖子映射模式",
+                            ["auto", "manual"],
+                            index=0 if comments.post_mapping_mode != "manual" else 1,
+                            key=f"comments_mapping_mode {con}",
+                            help=(
+                                "**auto**: 转发帖子时自动建立映射（推荐）\n\n"
+                                "**manual**: 手动指定源帖子ID到目标帖子ID的对应关系"
+                            ),
+                        )
+
+                        if comments.post_mapping_mode == "manual":
+                            comments.manual_post_mapping_raw = st.text_area(
+                                "手动帖子映射（YAML格式: 源帖子ID: 目标帖子ID）",
+                                value=comments.manual_post_mapping_raw,
+                                key=f"comments_manual_map {con}",
+                            )
+                            try:
+                                mapping = yaml.safe_load(
+                                    comments.manual_post_mapping_raw
+                                )
+                                if not mapping:
+                                    mapping = {}
+                                if not isinstance(mapping, dict):
+                                    raise ValueError("必须是 YAML 字典格式")
+                                comments.manual_post_mapping = {
+                                    str(k): str(v) for k, v in mapping.items()
+                                }
+                            except Exception as err:
+                                st.error(f"映射格式错误: {err}")
+                                comments.manual_post_mapping = {}
+
+                            st.caption("示例:")
+                            st.code(
+                                "123: 456\n789: 1011",
+                                language="yaml",
+                            )
+
+                    CONFIG.forwards[i].comments = comments
+
                 with st.expander("Past Mode Settings"):
-                    CONFIG.forwards[i].offset = _safe_int(  # 修复：安全转换
+                    CONFIG.forwards[i].offset = _safe_int(
                         st.text_input(
                             "Offset",
                             value=str(CONFIG.forwards[i].offset),
@@ -128,12 +269,13 @@ if check_password(st):
                         ),
                         default=0,
                     )
-                    end_input = st.text_input(  # 修复：安全处理 None
+                    end_input = st.text_input(
                         "End",
                         value=str(CONFIG.forwards[i].end) if CONFIG.forwards[i].end is not None else "",
                         key=f"end {con}",
                     )
                     CONFIG.forwards[i].end = _safe_int(end_input, default=None) if end_input.strip() else None
+
                 with st.expander("Delete this connection"):
                     st.warning(
                         f"Clicking the 'Remove' button will **delete** connection **{label}**. This action cannot be reversed once done.",
@@ -143,8 +285,8 @@ if check_password(st):
                     if st.button(f"Remove connection **{label}**"):
                         del CONFIG.forwards[i]
                         write_config(CONFIG)
-                        rerun()  # 使用兼容性函数替代 st.rerun()
+                        rerun()
 
     if st.button("Save"):
         write_config(CONFIG)
-        rerun()  # 使用兼容性函数替代 st.rerun()
+        rerun()
