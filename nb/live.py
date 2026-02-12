@@ -500,6 +500,17 @@ async def start_sync() -> None:
     await config.load_admins(client)
     config.from_to = await config.load_from_to(client, CONFIG.forwards)
 
+    # ★ 新增：检查是否有有效连接
+    if not config.from_to:
+        logging.error(
+            "❌ 没有有效的转发连接，无法启动 live 模式。\n"
+            "请检查:\n"
+            "  1. 账号是否已加入所有源/目标频道\n"
+            "  2. 频道 ID 或用户名是否正确\n"
+            "  3. Web UI → Connections 页面的配置"
+        )
+        return
+
     # ★ 设置评论区监听
     has_comments = any(
         f.use_this and f.comments.enabled for f in CONFIG.forwards
