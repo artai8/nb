@@ -1,5 +1,3 @@
-# nb/past.py
-
 import asyncio
 import logging
 import random
@@ -39,21 +37,11 @@ def _extract_msg_id(fwded) -> Optional[int]:
     return None
 
 
-# =====================================================================
-#  评论区获取（多种方法 + 重试）
-# =====================================================================
-
-
 async def _get_comments_method_a(
     client: TelegramClient,
     channel_id,
     msg_id: int,
 ) -> List[Message]:
-    """方法A: 直接 iter_messages(channel, reply_to=msg_id)。
-
-    Telethon 会自动用 GetRepliesRequest。
-    ★ 某些情况下可能返回空（帖子太新/评论未索引）。
-    """
     comments = []
     try:
         async for msg in client.iter_messages(
@@ -80,26 +68,16 @@ async def _get_comments_method_b(
     channel_id,
     msg_id: int,
 ) -> List[Message]:
-    """方法B: 通过 GetDiscussionMessage 找到讨论组，
-    然后在讨论组中 iter_messages(reply_to=top_id)。
-    """
     comments = []
     try:
         disc_msg = await get_discussion_message(client, channel_id, msg_id)
         if disc_msg is None:
-            logging.info(f"💬 方法B: 帖子 {msg_id} 没有讨论消息")
             return comments
 
         discussion_id = disc_msg.chat_id
         top_id = disc_msg.id
 
-        # 记录映射
         st.discussion_to_channel_post[(discussion_id, top_id)] = msg_id
-
-        logging.info(
-            f"💬 方法B: 讨论组={discussion_id}, top_id={top_id}, "
-            f"正在遍历评论..."
-        )
 
         async for msg in client.iter_messages(
             discussion_id,
@@ -109,9 +87,7 @@ async def _get_comments_method_b(
             comments.append(msg)
 
         if comments:
-            logging.info(
-                f"💬 方法B: 获取到 {len(comments)} 条评论"
-            )
+            logging.info(f"💬 方法B: 获取到 {len(comments)} 条评论")
     except Exception as e:
         logging.warning(f"⚠️ 方法B失败: {e}")
     return comments
@@ -122,11 +98,6 @@ async def _get_comments_method_c(
     channel_id,
     msg_id: int,
 ) -> List[Message]:
-    """方法C: 获取讨论组后，遍历讨论组的全部近期消息，
-    手动过滤出属于这个帖子的评论。
-
-    ★ 这是最暴力但最可靠的方法，用于前两种方法都失败时。
-    """
     comments = []
     try:
         disc_msg = await get_discussion_message(client, channel_id, msg_id)
@@ -138,12 +109,6 @@ async def _get_comments_method_c(
 
         st.discussion_to_channel_post[(discussion_id, top_id)] = msg_id
 
-        logging.info(
-            f"💬 方法C: 暴力扫描讨论组 {discussion_id} "
-            f"(top_id={top_id})..."
-        )
-
-        # 从 top_id 之后开始遍历，获取之后的消息
         async for msg in client.iter_messages(
             discussion_id,
             min_id=top_id,
@@ -153,7 +118,6 @@ async def _get_comments_method_c(
             if msg.id == top_id:
                 continue
 
-            # 检查是否属于这个帖子的评论
             reply_to = getattr(msg, 'reply_to', None)
             if reply_to is None:
                 continue
@@ -165,9 +129,7 @@ async def _get_comments_method_c(
                 comments.append(msg)
 
         if comments:
-            logging.info(
-                f"💬 方法C: 获取到 {len(comments)} 条评论"
-            )
+            logging.info(f"💬 方法C: 获取到 {len(comments)} 条评论")
     except Exception as e:
         logging.warning(f"⚠️ 方法C失败: {e}")
     return comments
@@ -179,42 +141,26 @@ async def _get_all_comments(
     msg_id: int,
     retry_delay: int = 3,
 ) -> List[Message]:
-    """尝试多种方法获取帖子评论，保证最大可靠性。
-
-    顺序: A → B → 等待后重试A → C
-    """
-    # 第一轮: 方法A
     comments = await _get_comments_method_a(client, channel_id, msg_id)
     if comments:
         return comments
 
-    # 第二轮: 方法B
     comments = await _get_comments_method_b(client, channel_id, msg_id)
     if comments:
         return comments
 
-    # 第三轮: 等待后重试方法A（评论索引可能延迟）
     if retry_delay > 0:
-        logging.info(
-            f"💬 方法A/B均未获取到评论，等待 {retry_delay}s 后重试..."
-        )
+        logging.info(f"💬 方法A/B均未获取到评论，等待 {retry_delay}s 后重试...")
         await asyncio.sleep(retry_delay)
         comments = await _get_comments_method_a(client, channel_id, msg_id)
         if comments:
             return comments
 
-    # 第四轮: 方法C（暴力扫描）
     comments = await _get_comments_method_c(client, channel_id, msg_id)
     return comments
 
 
-# =====================================================================
-#  评论区整理
-# =====================================================================
-
-
 def _group_comments(comments: List[Message]) -> List[List[Message]]:
-    """将评论按 grouped_id 整理为发送单元。"""
     units: List[List[Message]] = []
     group_index: Dict[int, int] = {}
 
@@ -230,11 +176,6 @@ def _group_comments(comments: List[Message]) -> List[List[Message]]:
                 units.append([msg])
 
     return units
-
-
-# =====================================================================
-#  主帖子媒体组
-# =====================================================================
 
 
 async def _send_past_grouped(
@@ -301,11 +242,6 @@ async def _flush_grouped_buffer(
     return last_id
 
 
-# =====================================================================
-#  评论区转发（★ 全面修复版）
-# =====================================================================
-
-
 async def _forward_comments_for_post(
     client: TelegramClient,
     src_channel_id: int,
@@ -313,24 +249,12 @@ async def _forward_comments_for_post(
     dest_list: List[int],
     forward: config.Forward,
 ) -> None:
-    """获取源帖子评论并转发到目标帖子评论区。
-
-    修复点:
-    1. 三种方法获取评论，确保可靠性
-    2. 获取前短暂延迟，等待 Telegram 索引评论
-    3. 媒体组整组发送
-    4. 每步都有详细日志
-    """
     comments_cfg = forward.comments
 
-    logging.info(
-        f"💬 ═══ 开始处理帖子 {src_post_id} 的评论 ═══"
-    )
+    logging.info(f"💬 ═══ 开始处理帖子 {src_post_id} 的评论 ═══")
 
-    # ★ 短暂延迟：让 Telegram 有时间索引评论
     await asyncio.sleep(2)
 
-    # ========== 获取评论 ==========
     comments = await _get_all_comments(
         client, src_channel_id, src_post_id, retry_delay=5
     )
@@ -341,13 +265,11 @@ async def _forward_comments_for_post(
 
     logging.info(f"💬 帖子 {src_post_id}: 原始评论 {len(comments)} 条")
 
-    # ========== 预过滤 ==========
     filtered = []
     for comment in comments:
         if isinstance(comment, MessageService):
             continue
 
-        # 跳过频道帖子副本
         if hasattr(comment, 'fwd_from') and comment.fwd_from:
             if getattr(comment.fwd_from, 'channel_post', None):
                 continue
@@ -369,12 +291,9 @@ async def _forward_comments_for_post(
         filtered.append(comment)
 
     if not filtered:
-        logging.info(
-            f"💬 帖子 {src_post_id}: {len(comments)} 条评论全被过滤"
-        )
+        logging.info(f"💬 帖子 {src_post_id}: 全部被过滤")
         return
 
-    # ========== 分组 ==========
     send_units = _group_comments(filtered)
     single_count = sum(1 for u in send_units if len(u) == 1)
     group_count = sum(1 for u in send_units if len(u) > 1)
@@ -383,8 +302,7 @@ async def _forward_comments_for_post(
         f"{len(send_units)} 单元 ({single_count} 单条 + {group_count} 组)"
     )
 
-    # ========== 确定目标 ==========
-    dest_targets = {}  # { chat_id: reply_to_id }
+    dest_targets = {}
 
     for dest_ch in dest_list:
         dest_resolved = dest_ch
@@ -399,8 +317,7 @@ async def _forward_comments_for_post(
         )
         if dest_post_id is None:
             logging.warning(
-                f"⚠️ 帖子 {src_post_id} → 目标 {dest_resolved}: "
-                f"没有帖子映射（主帖子可能转发失败）"
+                f"⚠️ 帖子 {src_post_id} → 目标 {dest_resolved}: 没有帖子映射"
             )
             continue
 
@@ -413,11 +330,9 @@ async def _forward_comments_for_post(
                     dest_targets[dest_disc.chat_id] = dest_disc.id
                     logging.info(
                         f"💬 目标: dest_ch={dest_resolved}, "
-                        f"disc_chat={dest_disc.chat_id}, "
-                        f"disc_msg={dest_disc.id}"
+                        f"disc_chat={dest_disc.chat_id}, disc_msg={dest_disc.id}"
                     )
                 else:
-                    # 回退：直接回复到频道帖子
                     dest_targets[dest_resolved] = dest_post_id
                     logging.info(
                         f"💬 目标(回退): 直接回复 {dest_resolved}/{dest_post_id}"
@@ -439,7 +354,6 @@ async def _forward_comments_for_post(
         logging.warning(f"⚠️ 帖子 {src_post_id} 没有有效的评论目标")
         return
 
-    # ========== 逐单元发送 ==========
     sent_count = 0
     fail_count = 0
 
@@ -447,12 +361,6 @@ async def _forward_comments_for_post(
         is_group = len(unit_msgs) > 1
 
         if is_group:
-            gid = unit_msgs[0].grouped_id
-            logging.info(
-                f"💬 [{unit_idx+1}/{len(send_units)}] "
-                f"媒体组 gid={gid} ({len(unit_msgs)} 条)"
-            )
-
             tms = await apply_plugins_to_group(unit_msgs)
             if not tms:
                 continue
@@ -477,7 +385,6 @@ async def _forward_comments_for_post(
                                 src_channel_id, unit_msgs[0].id,
                                 dest_chat_id, fwded_id,
                             )
-                        logging.info(f"✅ 评论媒体组 → {dest_chat_id}")
                     else:
                         fail_count += 1
                 except FloodWaitError as fwe:
@@ -500,21 +407,8 @@ async def _forward_comments_for_post(
 
             for tm in tms:
                 tm.clear()
-
         else:
             comment = unit_msgs[0]
-            media_info = ""
-            if comment.photo:
-                media_info = "📷"
-            elif comment.video:
-                media_info = "🎬"
-            elif comment.document:
-                media_info = "📄"
-
-            logging.info(
-                f"💬 [{unit_idx+1}/{len(send_units)}] "
-                f"单条 #{comment.id} {media_info}"
-            )
 
             tm = await apply_plugins(comment)
             if not tm:
@@ -534,7 +428,6 @@ async def _forward_comments_for_post(
                                 src_channel_id, comment.id,
                                 dest_chat_id, fwded_id,
                             )
-                        logging.info(f"✅ 评论 #{comment.id} → {dest_chat_id}")
                     else:
                         fail_count += 1
                 except FloodWaitError as fwe:
@@ -555,7 +448,6 @@ async def _forward_comments_for_post(
 
             tm.clear()
 
-        # 单元间延迟
         delay = random.randint(5, 20)
         await asyncio.sleep(delay)
 
@@ -563,11 +455,6 @@ async def _forward_comments_for_post(
         f"💬 ═══ 帖子 {src_post_id} 评论完成: "
         f"成功={sent_count} 失败={fail_count} ═══"
     )
-
-
-# =====================================================================
-#  主 forward_job
-# =====================================================================
 
 
 async def forward_job() -> None:
@@ -592,10 +479,7 @@ async def forward_job() -> None:
         me = await client.get_me()
 
         if is_bot:
-            logging.error(
-                "❌ Bot 账号 (%s @%s) 无法用 past 模式",
-                me.first_name or "Bot", me.username or "N/A",
-            )
+            logging.error("❌ Bot 账号无法用 past 模式")
             return
 
         logging.info(
@@ -610,8 +494,26 @@ async def forward_job() -> None:
             logging.error("❌ 没有有效的转发连接")
             return
 
-        for from_to, forward in zip(config.from_to.items(), CONFIG.forwards):
-            src, dest = from_to
+        # ★ 修复: 建立 源频道ID → Forward 对象 的映射，避免 zip 错位问题
+        resolved_forwards: Dict[int, config.Forward] = {}
+        for forward in CONFIG.forwards:
+            if not forward.use_this:
+                continue
+            src = forward.source
+            if not isinstance(src, int) and str(src).strip() == "":
+                continue
+            try:
+                src_id = await config.get_id(client, forward.source)
+                resolved_forwards[src_id] = forward
+            except Exception:
+                continue
+
+        for src, dest in config.from_to.items():
+            forward = resolved_forwards.get(src)
+            if forward is None:
+                logging.warning(f"⚠️ 找不到 src={src} 对应的 Forward 配置，跳过")
+                continue
+
             last_id = 0
             grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
 
@@ -634,7 +536,6 @@ async def forward_job() -> None:
                 try:
                     current_gid = message.grouped_id
 
-                    # 刷新之前的媒体组
                     if grouped_buffer and (
                         current_gid is None
                         or (current_gid is not None
@@ -658,7 +559,6 @@ async def forward_job() -> None:
                         grouped_buffer[current_gid].append(message)
                         continue
 
-                    # 单条消息
                     tm = await apply_plugins(message)
                     if not tm:
                         continue
@@ -702,11 +602,9 @@ async def forward_job() -> None:
                     forward.offset = last_id
                     write_config(CONFIG, persist=False)
 
-                    # ★★★ 转发评论区 ★★★
+                    # ★ 修复: 评论区转发
                     if forward.comments.enabled:
-                        logging.info(
-                            f"💬 准备转发帖子 {message.id} 的评论..."
-                        )
+                        logging.info(f"💬 准备转发帖子 {message.id} 的评论...")
                         try:
                             await _forward_comments_for_post(
                                 client, src, message.id, dest, forward
