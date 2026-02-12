@@ -227,7 +227,7 @@ switch_theme(st, CONFIG)
 
 if check_password(st):
     with st.expander("运行配置"):
-        CONFIG.show_forwarded_from = st.checkbox("显示"转发自"", value=CONFIG.show_forwarded_from)
+        CONFIG.show_forwarded_from = st.checkbox('显示"转发自"', value=CONFIG.show_forwarded_from)
         mode = st.radio("选择模式", ["live", "past"], index=CONFIG.mode)
         if mode == "past":
             CONFIG.mode = 1
