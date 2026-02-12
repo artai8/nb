@@ -1,4 +1,3 @@
-from typing import List
 from nb.utils import replace as utils_replace
 from nb.plugins import NbMessage, NbPlugin
 
