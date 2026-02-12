@@ -41,6 +41,7 @@ GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 GROUPED_TIMEOUT = 1.5
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
+PENDING_COMMENTS: Dict[int, List] = {}
 
 
 def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id):
@@ -56,9 +57,25 @@ def get_dest_post_id(src_channel_id, src_post_id, dest_channel_id):
     return post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
 
 
+def find_dest_post_id_fuzzy(src_channel_id, src_post_id, dest_channel_id, tolerance=5):
+    direct = get_dest_post_id(src_channel_id, src_post_id, dest_channel_id)
+    if direct is not None:
+        return direct
+    for offset in range(1, tolerance + 1):
+        for delta in [offset, -offset]:
+            candidate = get_dest_post_id(src_channel_id, src_post_id + delta, dest_channel_id)
+            if candidate is not None:
+                return candidate
+    return None
+
+
 def add_discussion_mapping(discussion_id, discussion_msg_id, channel_post_id):
     discussion_to_channel_post[(discussion_id, discussion_msg_id)] = channel_post_id
     channel_post_to_discussion[(discussion_id, channel_post_id)] = discussion_msg_id
+    if len(discussion_to_channel_post) > KEEP_LAST_MANY_POSTS:
+        oldest = next(iter(discussion_to_channel_post))
+        old_cp = discussion_to_channel_post.pop(oldest)
+        channel_post_to_discussion.pop((oldest[0], old_cp), None)
 
 
 def get_channel_post_id(discussion_id, discussion_msg_id):
