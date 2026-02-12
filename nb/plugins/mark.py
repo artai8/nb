@@ -1,11 +1,7 @@
-import logging
 import os
 import shutil
-from typing import List
-
 import requests
 from watermark import File, Watermark, apply_watermark
-
 from nb.plugins import NbMessage, NbPlugin
 from nb.utils import cleanup
 
