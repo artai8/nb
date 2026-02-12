@@ -3,12 +3,10 @@ import logging
 import random
 from collections import defaultdict
 from typing import Dict, List, Optional
-
 from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError
 from telethon.tl.custom.message import Message
 from telethon.tl.patched import MessageService
-
 from nb import config
 from nb import storage as st
 from nb.config import CONFIG, get_SESSION, write_config
@@ -17,6 +15,7 @@ from nb.utils import (
     clean_session_files, extract_msg_id, send_message,
     _get_reply_to_msg_id, _get_reply_to_top_id,
     get_discussion_message, get_discussion_group_id,
+    COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY,
 )
 
 
@@ -67,17 +66,15 @@ async def _get_comments_method_c(client, channel_id, msg_id):
 
 
 async def _get_all_comments(client, channel_id, msg_id, retry_delay=3):
-    comments = await _get_comments_method_a(client, channel_id, msg_id)
-    if comments:
-        return comments
-    comments = await _get_comments_method_b(client, channel_id, msg_id)
-    if comments:
-        return comments
-    if retry_delay > 0:
-        await asyncio.sleep(retry_delay)
+    for attempt in range(COMMENT_MAX_RETRIES):
         comments = await _get_comments_method_a(client, channel_id, msg_id)
         if comments:
             return comments
+        comments = await _get_comments_method_b(client, channel_id, msg_id)
+        if comments:
+            return comments
+        if attempt < COMMENT_MAX_RETRIES - 1:
+            await asyncio.sleep(retry_delay * (attempt + 1))
     return await _get_comments_method_c(client, channel_id, msg_id)
 
 
@@ -154,7 +151,6 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
         filtered.append(c)
     if not filtered:
         return
-
     units = _group_comments(filtered)
     dest_targets = {}
     for dest_ch in dest_list:
@@ -168,14 +164,19 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
         if dest_post_id is None:
             continue
         if cfg.dest_mode == "comments":
-            try:
-                disc = await get_discussion_message(client, dest_resolved, dest_post_id)
-                if disc:
-                    dest_targets[disc.chat_id] = disc.id
-                else:
-                    dest_targets[dest_resolved] = dest_post_id
-            except Exception:
-                dest_targets[dest_resolved] = dest_post_id
+            for attempt in range(COMMENT_MAX_RETRIES):
+                try:
+                    disc = await get_discussion_message(client, dest_resolved, dest_post_id)
+                    if disc:
+                        dest_targets[disc.chat_id] = disc.id
+                    else:
+                        dest_targets[dest_resolved] = dest_post_id
+                    break
+                except Exception:
+                    if attempt < COMMENT_MAX_RETRIES - 1:
+                        await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                    else:
+                        dest_targets[dest_resolved] = dest_post_id
         elif cfg.dest_mode == "discussion":
             for dg in cfg.dest_discussion_groups:
                 dg_id = dg
@@ -187,7 +188,6 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
                 dest_targets[dg_id] = None
     if not dest_targets:
         return
-
     for unit_msgs in units:
         is_group = len(unit_msgs) > 1
         if is_group:
@@ -195,18 +195,19 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
             if not tms or tms[0] is None:
                 continue
             for dest_chat_id, dest_reply_to in dest_targets.items():
-                try:
-                    fwded = await send_message(dest_chat_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_reply_to)
-                    if fwded:
-                        st.add_comment_mapping(src_channel_id, unit_msgs[0].id, dest_chat_id, extract_msg_id(fwded))
-                except FloodWaitError as fwe:
-                    await asyncio.sleep(fwe.seconds)
+                for attempt in range(COMMENT_MAX_RETRIES):
                     try:
-                        await send_message(dest_chat_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_reply_to)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logging.error(f"评论媒体组失败: {e}")
+                        fwded = await send_message(dest_chat_id, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms, comment_to_post=dest_reply_to)
+                        if fwded:
+                            st.add_comment_mapping(src_channel_id, unit_msgs[0].id, dest_chat_id, extract_msg_id(fwded))
+                        break
+                    except FloodWaitError as fwe:
+                        await asyncio.sleep(fwe.seconds + 5)
+                    except Exception as e:
+                        if attempt < COMMENT_MAX_RETRIES - 1:
+                            await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                        else:
+                            logging.error(f"评论媒体组失败: {e}")
             for tm in tms:
                 tm.clear()
         else:
@@ -215,18 +216,19 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
             if not tm:
                 continue
             for dest_chat_id, dest_reply_to in dest_targets.items():
-                try:
-                    fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
-                    if fwded:
-                        st.add_comment_mapping(src_channel_id, comment.id, dest_chat_id, extract_msg_id(fwded))
-                except FloodWaitError as fwe:
-                    await asyncio.sleep(fwe.seconds)
+                for attempt in range(COMMENT_MAX_RETRIES):
                     try:
-                        await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logging.error(f"评论 #{comment.id} 失败: {e}")
+                        fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
+                        if fwded:
+                            st.add_comment_mapping(src_channel_id, comment.id, dest_chat_id, extract_msg_id(fwded))
+                        break
+                    except FloodWaitError as fwe:
+                        await asyncio.sleep(fwe.seconds + 5)
+                    except Exception as e:
+                        if attempt < COMMENT_MAX_RETRIES - 1:
+                            await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
+                        else:
+                            logging.error(f"评论 #{comment.id} 失败: {e}")
             tm.clear()
         await asyncio.sleep(random.randint(5, 20))
 
@@ -245,7 +247,6 @@ async def forward_job():
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
         if not config.from_to:
             return
-
         resolved_forwards: Dict[int, config.Forward] = {}
         for forward in CONFIG.forwards:
             if not forward.use_this:
@@ -256,7 +257,6 @@ async def forward_job():
                 resolved_forwards[await config.get_id(client, forward.source)] = forward
             except Exception:
                 continue
-
         for src, dest in config.from_to.items():
             forward = resolved_forwards.get(src)
             if forward is None:
@@ -278,7 +278,6 @@ async def forward_job():
                     if current_gid is not None:
                         grouped_buffer[current_gid].append(message)
                         continue
-
                     tm = await apply_plugins(message)
                     if not tm:
                         continue
@@ -306,22 +305,19 @@ async def forward_job():
                     tm.clear()
                     forward.offset = message.id
                     write_config(CONFIG, persist=False)
-
                     if forward.comments.enabled:
                         try:
                             await _forward_comments_for_post(client, src, message.id, dest, forward)
                         except Exception as e:
                             logging.error(f"帖子 {message.id} 评论失败: {e}")
-
                     await asyncio.sleep(random.randint(60, 300))
                 except FloodWaitError as fwe:
                     await asyncio.sleep(fwe.seconds)
                 except Exception as err:
                     logging.exception(err)
-
             if grouped_buffer:
                 try:
                     await _flush_grouped_buffer(client, src, dest, grouped_buffer, forward)
                 except Exception as e:
                     logging.exception(f"刷新剩余组失败: {e}")
-        logging.info("past 模式完成")
+        logging.info("past模式完成")
