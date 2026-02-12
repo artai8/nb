@@ -1,5 +1,3 @@
-# nb/utils.py
-
 import logging
 import asyncio
 import re
@@ -44,12 +42,7 @@ if TYPE_CHECKING:
 MAX_RETRIES = 3
 
 
-# =====================================================================
-#  reply_to 兼容辅助函数
-# =====================================================================
-
 def _get_reply_to_msg_id(message) -> Optional[int]:
-    """兼容新旧版 Telethon 获取 reply_to_msg_id。"""
     if hasattr(message, 'reply_to_msg_id') and message.reply_to_msg_id is not None:
         return message.reply_to_msg_id
     if hasattr(message, 'reply_to') and message.reply_to is not None:
@@ -59,28 +52,17 @@ def _get_reply_to_msg_id(message) -> Optional[int]:
 
 
 def _get_reply_to_top_id(message) -> Optional[int]:
-    """获取评论所属的顶层帖子 ID（讨论组中的帖子副本 ID）。"""
     reply_to = getattr(message, 'reply_to', None)
     if reply_to is None:
         return None
     return getattr(reply_to, 'reply_to_top_id', None)
 
 
-# =====================================================================
-#  讨论组 / 评论区 API
-# =====================================================================
-
 async def get_discussion_message(
     client: TelegramClient,
     channel_id: Union[int, str],
     msg_id: int,
 ) -> Optional[Message]:
-    """获取频道帖子在讨论组中的副本消息。
-
-    返回讨论组中的消息对象：
-    - chat_id 是讨论组 ID
-    - id 是评论需要 reply_to 的 top_id
-    """
     for attempt in range(3):
         try:
             result = await client(GetDiscussionMessageRequest(
@@ -95,10 +77,6 @@ async def get_discussion_message(
                 )
                 return disc_msg
             else:
-                logging.warning(
-                    f"⚠️ GetDiscussionMessage 返回空: "
-                    f"channel={channel_id}, msg={msg_id}"
-                )
                 return None
         except Exception as e:
             err_str = str(e).upper()
@@ -108,14 +86,8 @@ async def get_discussion_message(
                 await asyncio.sleep(wait)
                 continue
             if "MSG_ID_INVALID" in err_str:
-                logging.debug(
-                    f"帖子 {msg_id} 没有讨论消息（MSG_ID_INVALID）"
-                )
                 return None
             if "CHANNEL_PRIVATE" in err_str or "CHAT_ADMIN_REQUIRED" in err_str:
-                logging.warning(
-                    f"⚠️ 无权限获取讨论消息: channel={channel_id}, msg={msg_id}"
-                )
                 return None
             logging.warning(
                 f"⚠️ 获取讨论消息失败 (attempt {attempt+1}/3, "
@@ -130,17 +102,11 @@ async def get_discussion_group_id(
     client: TelegramClient,
     channel_id: Union[int, str],
 ) -> Optional[int]:
-    """获取频道关联的讨论组 ID。
-
-    ★ 必须用 GetFullChannelRequest，普通 get_entity 没有 linked_chat_id。
-    """
     try:
         input_channel = await client.get_input_entity(channel_id)
         full_result = await client(GetFullChannelRequest(input_channel))
         full_chat = full_result.full_chat
-
         linked_chat_id = getattr(full_chat, 'linked_chat_id', None)
-
         if linked_chat_id:
             logging.info(f"💬 频道 {channel_id} 的讨论组: {linked_chat_id}")
             return linked_chat_id
@@ -151,10 +117,6 @@ async def get_discussion_group_id(
         logging.warning(f"⚠️ 获取讨论组失败 (channel={channel_id}): {e}")
     return None
 
-
-# =====================================================================
-#  Spoiler 检测与发送
-# =====================================================================
 
 def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
@@ -279,10 +241,6 @@ async def _send_album_with_spoiler(
     return sent_messages if sent_messages else result
 
 
-# =====================================================================
-#  主发送函数
-# =====================================================================
-
 def platform_info():
     nl = "\n"
     return f"""Running nb {__version__}\
@@ -299,12 +257,10 @@ async def send_message(
     grouped_tms: Optional[List["NbMessage"]] = None,
     comment_to_post: Optional[int] = None,
 ) -> Union[Message, List[Message], None]:
-    """发送消息的统一入口。"""
     client: TelegramClient = tm.client
 
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
-    # === 情况 1: 直接转发 ===
     if CONFIG.show_forwarded_from and grouped_messages:
         attempt = 0
         delay = 5
@@ -324,7 +280,6 @@ async def send_message(
                 await asyncio.sleep(delay)
         return None
 
-    # === 情况 2: 媒体组复制发送 ===
     if grouped_messages and grouped_tms:
         combined_caption = "\n\n".join([
             gtm.text.strip() for gtm in grouped_tms
@@ -363,11 +318,6 @@ async def send_message(
                         allow_cache=False,
                         parse_mode="md",
                     )
-
-                logging.info(
-                    f"✅ 媒体组发送成功"
-                    f"{'（评论区）' if comment_to_post else ''}"
-                )
                 return result
 
             except Exception as e:
@@ -381,8 +331,6 @@ async def send_message(
                 delay = min(delay * 2, 300)
                 await asyncio.sleep(delay)
         return None
-
-    # === 情况 3: 单条消息 ===
 
     processed_markup = getattr(tm, 'reply_markup', None)
 
@@ -460,10 +408,6 @@ async def send_message(
         logging.error(f"❌ 消息发送失败: {e}")
         return None
 
-
-# =====================================================================
-#  工具函数
-# =====================================================================
 
 def cleanup(*files: str) -> None:
     for file in files:
