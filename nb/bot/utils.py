@@ -1,5 +1,3 @@
-import logging
-from typing import List
 from telethon import events
 from nb import config
 from nb.config import Forward
