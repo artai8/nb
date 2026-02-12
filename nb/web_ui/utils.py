@@ -1,5 +1,4 @@
 import os
-from typing import Dict, List
 from streamlit.components.v1 import html
 from nb.config import write_config
 
