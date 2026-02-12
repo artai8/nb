@@ -8,12 +8,12 @@
   "logo": "https://github.com/fluidicon.png",
   "env": {
     "PASSWORD": {
-      "description": "The password to protect the web interface",
+      "description": "Web界面密码",
       "value": "",
       "required": true
     },
     "MONGO_CON_STR": {
-      "description": "The connection string to mongo db database",
+      "description": "MongoDB连接字符串",
       "value": "",
       "required": false
     }
