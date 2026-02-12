@@ -7,26 +7,15 @@ import re
 import sys
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional, Union
-
 from telethon.client import TelegramClient
 from telethon.hints import EntityLike
 from telethon.tl.custom.message import Message
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.functions.messages import (
-    GetDiscussionMessageRequest,
-    SendMediaRequest,
-    SendMultiMediaRequest,
-)
+from telethon.tl.functions.messages import GetDiscussionMessageRequest, SendMediaRequest, SendMultiMediaRequest
 from telethon.tl.types import (
-    InputDocument,
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputPhoto,
-    InputSingleMedia,
-    MessageMediaDocument,
-    MessageMediaPhoto,
+    InputDocument, InputMediaDocument, InputMediaPhoto, InputPhoto,
+    InputSingleMedia, MessageMediaDocument, MessageMediaPhoto,
 )
-
 from nb import __version__
 from nb.config import CONFIG
 from nb.plugin_models import STYLE_CODES
@@ -35,6 +24,8 @@ if TYPE_CHECKING:
     from nb.plugins import NbMessage
 
 MAX_RETRIES = 3
+COMMENT_MAX_RETRIES = 5
+COMMENT_RETRY_BASE_DELAY = 3
 
 
 def extract_msg_id(fwded) -> Optional[int]:
@@ -63,7 +54,7 @@ def _get_reply_to_top_id(message) -> Optional[int]:
 
 
 async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message]:
-    for attempt in range(3):
+    for attempt in range(COMMENT_MAX_RETRIES):
         try:
             result = await client(GetDiscussionMessageRequest(peer=channel_id, msg_id=msg_id))
             if result and result.messages:
@@ -72,22 +63,31 @@ async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
-                await asyncio.sleep(10 * (attempt + 1))
+                wait = min(10 * (attempt + 1), 60)
+                logging.warning(f"获取讨论消息遇到FloodWait, 等待{wait}秒")
+                await asyncio.sleep(wait)
                 continue
             if any(k in err_str for k in ("MSG_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED")):
                 return None
-            if attempt < 2:
-                await asyncio.sleep(2)
+            if attempt < COMMENT_MAX_RETRIES - 1:
+                await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
     return None
 
 
 async def get_discussion_group_id(client, channel_id) -> Optional[int]:
-    try:
-        input_channel = await client.get_input_entity(channel_id)
-        full_result = await client(GetFullChannelRequest(input_channel))
-        return getattr(full_result.full_chat, 'linked_chat_id', None)
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            input_channel = await client.get_input_entity(channel_id)
+            full_result = await client(GetFullChannelRequest(input_channel))
+            return getattr(full_result.full_chat, 'linked_chat_id', None)
+        except Exception as e:
+            err_str = str(e).upper()
+            if "FLOOD" in err_str:
+                await asyncio.sleep(10 * (attempt + 1))
+                continue
+            if attempt < 2:
+                await asyncio.sleep(2)
+    return None
 
 
 def _has_spoiler(message) -> bool:
@@ -154,7 +154,6 @@ def platform_info():
 async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, comment_to_post=None):
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
-
     if CONFIG.show_forwarded_from and grouped_messages:
         for attempt in range(MAX_RETRIES):
             try:
@@ -167,7 +166,6 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                     logging.error(f"转发失败 ({attempt+1}/{MAX_RETRIES}): {e}")
                 await asyncio.sleep(min(5 * 2 ** attempt, 300))
         return None
-
     if grouped_messages and grouped_tms:
         combined_caption = "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
         any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
@@ -188,9 +186,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                     logging.error(f"媒体组发送失败 ({attempt+1}/{MAX_RETRIES}): {e}")
                 await asyncio.sleep(min(5 * 2 ** attempt, 300))
         return None
-
     processed_markup = getattr(tm, 'reply_markup', None)
-
     if tm.new_file:
         try:
             return await client.send_file(recipient, tm.new_file, caption=tm.text, reply_to=effective_reply_to, supports_streaming=True, buttons=processed_markup)
@@ -200,13 +196,11 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
             except Exception as e:
                 logging.error(f"文件发送失败: {e}")
                 return None
-
     if _has_spoiler(tm.message):
         try:
             return await _send_single_with_spoiler(client, recipient, tm.message, caption=tm.text, reply_to=effective_reply_to)
         except Exception:
             pass
-
     try:
         if processed_markup is not None:
             try:
