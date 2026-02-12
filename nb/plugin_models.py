@@ -44,9 +44,6 @@ class Style(str, Enum):
 STYLE_CODES = {"bold": "**", "italics": "__", "code": "`", "strike": "~~", "plain": ""}
 
 
-# define plugin configs
-
-
 class Filters(BaseModel):
     check: bool = False
     users: FilterList = FilterList()
@@ -85,28 +82,24 @@ class Caption(BaseModel):
 
 class Sender(BaseModel):
     check: bool = False
-    user_type: int = 0  # 0:bot, 1:user
+    user_type: int = 0
     BOT_TOKEN: str = ""
     SESSION_STRING: str = ""
 
 
-# ===================== Inline Button 配置 =====================
-
-
 class InlineButtonMode(str, Enum):
-    """Inline Button 处理模式"""
-    REMOVE = "remove"             # 完全移除所有按钮
-    REPLACE_URL = "replace_url"   # 保留按钮结构，只替换 URL
-    REPLACE_ALL = "replace_all"   # 替换按钮文字 + 替换 URL
+    REMOVE = "remove"
+    REPLACE_URL = "replace_url"
+    REPLACE_ALL = "replace_all"
 
 
 class InlineButtonConfig(BaseModel):
     check: bool = False
     mode: InlineButtonMode = InlineButtonMode.REMOVE
-    url_replacements: Dict[str, str] = {}       # 旧URL片段 -> 新URL片段
-    url_replacements_raw: str = ""               # Web UI 用的原始文本
-    text_replacements: Dict[str, str] = {}       # 旧按钮文字 -> 新按钮文字
-    text_replacements_raw: str = ""              # Web UI 用的原始文本
+    url_replacements: Dict[str, str] = {}
+    url_replacements_raw: str = ""
+    text_replacements: Dict[str, str] = {}
+    text_replacements_raw: str = ""
 
 
 class PluginConfig(BaseModel):
@@ -120,5 +113,4 @@ class PluginConfig(BaseModel):
     inline: InlineButtonConfig = InlineButtonConfig()
 
 
-# List of plugins that need to load asynchronously
 ASYNC_PLUGIN_IDS = ['sender']
