@@ -3,8 +3,8 @@
 import asyncio
 import logging
 import random
-from collections import defaultdict, OrderedDict
-from typing import List, Dict, Optional, Tuple
+from collections import defaultdict
+from typing import List, Dict, Optional
 
 from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError
@@ -22,7 +22,6 @@ from nb.utils import (
     _get_reply_to_top_id,
     get_discussion_message,
     get_discussion_group_id,
-    get_comments_for_post,
 )
 
 
@@ -38,6 +37,59 @@ def _extract_msg_id(fwded) -> Optional[int]:
     if hasattr(fwded, 'id'):
         return fwded.id
     return None
+
+
+async def _get_comments_for_post(
+    client: TelegramClient,
+    channel_id,
+    msg_id: int,
+) -> List[Message]:
+    """获取频道帖子的所有评论。
+
+    直接用 iter_messages(channel, reply_to=msg_id) 获取。
+    """
+    comments = []
+    try:
+        async for msg in client.iter_messages(
+            channel_id,
+            reply_to=msg_id,
+            reverse=True,
+        ):
+            comments.append(msg)
+        logging.info(
+            f"💬 获取到 {len(comments)} 条评论 "
+            f"(channel={channel_id}, post={msg_id})"
+        )
+    except Exception as e:
+        logging.warning(
+            f"⚠️ 获取评论失败 (channel={channel_id}, post={msg_id}): {e}"
+        )
+    return comments
+
+
+def _group_comments(comments: List[Message]) -> List[List[Message]]:
+    """将评论按 grouped_id 整理为发送单元。
+
+    返回列表，每个元素是:
+    - [single_msg]           — 单条消息
+    - [msg1, msg2, msg3...]  — 同一 grouped_id 的媒体组
+    """
+    units: List[List[Message]] = []
+    group_index: Dict[int, int] = {}
+
+    for msg in comments:
+        gid = getattr(msg, 'grouped_id', None)
+
+        if gid is None:
+            units.append([msg])
+        else:
+            if gid in group_index:
+                units[group_index[gid]].append(msg)
+            else:
+                group_index[gid] = len(units)
+                units.append([msg])
+
+    return units
 
 
 async def _send_past_grouped(
@@ -107,45 +159,6 @@ async def _flush_grouped_buffer(
 
 
 # =====================================================================
-#  评论区：将评论列表整理为有序的发送单元
-#  每个单元是 (单条消息) 或 (媒体组消息列表)
-# =====================================================================
-
-
-def _group_comments(
-    comments: List[Message],
-) -> List[List[Message]]:
-    """将评论列表按 grouped_id 整理为发送单元。
-
-    返回一个列表，每个元素是:
-    - [single_msg]           — 单条消息（无 grouped_id 或独立消息）
-    - [msg1, msg2, msg3...]  — 同一 grouped_id 的媒体组
-
-    顺序保持与原始评论顺序一致（按第一条消息出现的顺序）。
-    """
-    units: List[List[Message]] = []
-    # grouped_id → 在 units 中的索引
-    group_index: Dict[int, int] = {}
-
-    for msg in comments:
-        gid = getattr(msg, 'grouped_id', None)
-
-        if gid is None:
-            # 单条消息
-            units.append([msg])
-        else:
-            if gid in group_index:
-                # 已有这个组，追加
-                units[group_index[gid]].append(msg)
-            else:
-                # 新组
-                group_index[gid] = len(units)
-                units.append([msg])
-
-    return units
-
-
-# =====================================================================
 #  评论区 past 模式
 # =====================================================================
 
@@ -173,7 +186,7 @@ async def _forward_comments_for_post(
 
     # 方法 A: 直接从频道获取
     try:
-        comments = await get_comments_for_post(
+        comments = await _get_comments_for_post(
             client, src_channel_id, src_post_id
         )
     except Exception as e:
@@ -215,7 +228,6 @@ async def _forward_comments_for_post(
         if isinstance(comment, MessageService):
             continue
 
-        # 跳过频道帖子副本
         if hasattr(comment, 'fwd_from') and comment.fwd_from:
             if getattr(comment.fwd_from, 'channel_post', None):
                 continue
@@ -255,7 +267,7 @@ async def _forward_comments_for_post(
     )
 
     # ========== 确定目标 ==========
-    dest_targets = {}  # { dest_chat_id: dest_reply_to_id }
+    dest_targets = {}
 
     for dest_channel_id in dest_list:
         dest_resolved = dest_channel_id
@@ -299,6 +311,8 @@ async def _forward_comments_for_post(
     if not dest_targets:
         logging.warning(f"⚠️ 帖子 {src_post_id} 没有有效的评论目标")
         return
+
+    logging.info(f"💬 评论目标: {dest_targets}")
 
     # ========== 逐单元发送 ==========
     sent_count = 0
@@ -366,7 +380,6 @@ async def _forward_comments_for_post(
                     fail_count += 1
                     logging.error(f"❌ 评论媒体组转发失败: {e}")
 
-            # 清理
             for tm in tms:
                 tm.clear()
 
@@ -412,8 +425,7 @@ async def _forward_comments_for_post(
                                 dest_chat_id, fwded_id,
                             )
                         logging.info(
-                            f"✅ 评论转发成功 #{comment.id} → "
-                            f"chat={dest_chat_id}"
+                            f"✅ 评论转发成功 #{comment.id} → chat={dest_chat_id}"
                         )
                     else:
                         fail_count += 1
