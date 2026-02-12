@@ -160,8 +160,8 @@ if check_password(st):
                     end_input = st.text_input("结束位置", value=str(CONFIG.forwards[i].end) if CONFIG.forwards[i].end is not None else "", key=f"end {con}")
                     CONFIG.forwards[i].end = _safe_int(end_input, default=None) if end_input.strip() else None
                 with st.expander("删除此连接"):
-                    st.warning(f"点击"删除"将**永久删除**连接 **{label}**，此操作不可撤销。", icon="⚠️")
-                    if st.button(f"删除连接 **{label}**"):
+                    st.warning(f'点击"删除"将永久删除连接 {label}，此操作不可撤销。', icon="⚠️")
+                    if st.button(f"删除连接 {label}"):
                         del CONFIG.forwards[i]
                         write_config(CONFIG)
                         rerun()
