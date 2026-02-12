@@ -13,7 +13,7 @@ class EventUid:
         self.chat_id = event.chat_id
         try:
             self.msg_id = event.id
-        except:  # pylint: disable=bare-except
+        except Exception:
             self.msg_id = event.deleted_id
 
     def __str__(self) -> str:
@@ -36,11 +36,88 @@ stored: Dict[EventUid, Dict[int, Message]] = {}
 CONFIG_TYPE: int = 0
 mycol: Collection = None
 
-# 媒体组临时缓存与超时管理
-GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}  # grouped_id -> {chat_id: [messages]}
-GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}  # 修复：正确的类型标注
-GROUPED_TIMEOUT = 1.5  # 秒，等待同组其他消息的超时时间
-GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}  # grouped_id -> {chat_id: [msg_ids]}
+# =====================================================================
+#  帖子 ID 映射（评论区功能核心）
+# =====================================================================
+
+# 源频道帖子 → 目标频道帖子的映射
+# 结构: { (src_channel_id, src_post_id): { dest_channel_id: dest_post_id } }
+post_id_mapping: Dict[tuple, Dict[int, int]] = {}
+
+# 讨论组消息 → 对应的频道帖子 ID
+# 结构: { (discussion_group_id, reply_to_top_id): src_channel_post_id }
+# Telegram 评论区消息的 reply_to.reply_to_top_id 指向讨论组中的"频道帖子副本"
+discussion_to_channel_post: Dict[tuple, int] = {}
+
+# 评论消息的映射（用于编辑/删除同步）
+# 结构: { (src_discussion_group_id, comment_msg_id): { dest_chat_id: dest_msg_id } }
+comment_msg_mapping: Dict[tuple, Dict[int, int]] = {}
+
+KEEP_LAST_MANY_POSTS = 50000  # 帖子映射保留数量
+
+
+def add_post_mapping(
+    src_channel_id: int,
+    src_post_id: int,
+    dest_channel_id: int,
+    dest_post_id: int,
+) -> None:
+    """记录帖子映射: 源频道帖子 → 目标频道帖子"""
+    key = (src_channel_id, src_post_id)
+    if key not in post_id_mapping:
+        post_id_mapping[key] = {}
+    post_id_mapping[key][dest_channel_id] = dest_post_id
+    logging.info(
+        f"📌 帖子映射: src({src_channel_id}, {src_post_id}) "
+        f"→ dest({dest_channel_id}, {dest_post_id})"
+    )
+
+    # 自动清理过旧的映射
+    if len(post_id_mapping) > KEEP_LAST_MANY_POSTS:
+        oldest_key = next(iter(post_id_mapping))
+        del post_id_mapping[oldest_key]
+
+
+def get_dest_post_id(
+    src_channel_id: int,
+    src_post_id: int,
+    dest_channel_id: int,
+) -> Optional[int]:
+    """查询目标频道中对应的帖子 ID"""
+    key = (src_channel_id, src_post_id)
+    mapping = post_id_mapping.get(key, {})
+    return mapping.get(dest_channel_id)
+
+
+def add_comment_mapping(
+    src_discussion_id: int,
+    src_comment_id: int,
+    dest_chat_id: int,
+    dest_msg_id: int,
+) -> None:
+    """记录评论消息的映射"""
+    key = (src_discussion_id, src_comment_id)
+    if key not in comment_msg_mapping:
+        comment_msg_mapping[key] = {}
+    comment_msg_mapping[key][dest_chat_id] = dest_msg_id
+
+
+def get_comment_dest(
+    src_discussion_id: int,
+    src_comment_id: int,
+) -> Optional[Dict[int, int]]:
+    """查询评论在目标的映射"""
+    key = (src_discussion_id, src_comment_id)
+    return comment_msg_mapping.get(key)
+
+
+# =====================================================================
+#  媒体组临时缓存与超时管理（保持不变）
+# =====================================================================
+GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
+GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
+GROUPED_TIMEOUT = 1.5
+GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
 
 
 async def _flush_group(grouped_id: int) -> None:
@@ -48,7 +125,7 @@ async def _flush_group(grouped_id: int) -> None:
     if grouped_id not in GROUPED_CACHE:
         return
     try:
-        from nb.live import _send_grouped_messages  # 避免循环导入
+        from nb.live import _send_grouped_messages
         await _send_grouped_messages(grouped_id)
     except Exception as e:
         logging.exception(
@@ -70,12 +147,10 @@ def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
     GROUPED_CACHE[grouped_id][chat_id].append(message)
     GROUPED_MAPPING[grouped_id][chat_id].append(message.id)
 
-    # 重置定时器
     if grouped_id in GROUPED_TIMERS:
         GROUPED_TIMERS[grouped_id].cancel()
 
     loop = asyncio.get_running_loop()
-    # 修复：用默认参数捕获当前 grouped_id，避免闭包晚绑定
     GROUPED_TIMERS[grouped_id] = loop.call_later(
         GROUPED_TIMEOUT,
         lambda gid=grouped_id: asyncio.ensure_future(_flush_group(gid)),
