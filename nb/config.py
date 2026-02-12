@@ -2,13 +2,11 @@ import logging
 import os
 import sys
 from typing import Any, Dict, List, Optional, Union
-
 from dotenv import load_dotenv
 from pydantic import BaseModel, validator
 from pymongo import MongoClient
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-
 from nb import storage as stg
 from nb.const import CONFIG_FILE_NAME
 from nb.plugin_models import PluginConfig
@@ -183,7 +181,7 @@ async def get_id(client, peer):
     if isinstance(peer, str):
         peer = peer.strip()
         if not peer:
-            raise ValueError("peer 为空")
+            raise ValueError("peer为空")
         if "t.me/" in peer:
             parts = peer.split("t.me/")
             if len(parts) == 2:
