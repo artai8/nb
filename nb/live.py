@@ -42,9 +42,8 @@ def _extract_msg_id(fwded) -> Optional[int]:
 # =====================================================================
 
 COMMENT_GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
-# { grouped_id: { chat_id: [messages] } }
 COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
-COMMENT_GROUPED_TIMEOUT = 2.0  # 秒
+COMMENT_GROUPED_TIMEOUT = 2.0
 
 
 async def _flush_comment_group(grouped_id: int) -> None:
@@ -80,7 +79,7 @@ async def _flush_comment_group(grouped_id: int) -> None:
                 logging.debug(f"💬 评论媒体组 {grouped_id} 无法找到目标帖子")
                 continue
 
-            # 发送到每个目标
+            # 发送到每个目标（作为媒体组）
             for dest_discussion_id, dest_top_id in dest_map.items():
                 try:
                     fwded_msg = await send_message(
@@ -335,7 +334,7 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
         except Exception:
             pass
 
-    # 检查是否是频道帖子副本
+    # 检查是否是频道帖子副本（不是用户评论）
     if hasattr(message, 'fwd_from') and message.fwd_from:
         channel_post = getattr(message.fwd_from, 'channel_post', None)
         if channel_post:
@@ -465,7 +464,7 @@ ALL_EVENTS = {
 }
 
 
-async def _setup_comment_listeners(client: TelegramClient) -> Dict[int, int]:
+async def _setup_comment_listeners(client: TelegramClient):
     comment_sources = {}
     comment_forward_map = {}
 
@@ -492,6 +491,7 @@ async def _setup_comment_listeners(client: TelegramClient) -> Dict[int, int]:
                     continue
             comment_sources[dg] = src
             comment_forward_map[dg] = forward
+            logging.info(f"💬 监听讨论组 {dg} (手动, 源频道 {src})")
 
         else:
             dg_id = await get_discussion_group_id(client, src)
@@ -500,7 +500,7 @@ async def _setup_comment_listeners(client: TelegramClient) -> Dict[int, int]:
                 continue
             comment_sources[dg_id] = src
             comment_forward_map[dg_id] = forward
-            logging.info(f"💬 监听讨论组 {dg_id} (源频道 {src})")
+            logging.info(f"💬 监听讨论组 {dg_id} (自动, 源频道 {src})")
 
     return comment_sources, comment_forward_map
 
@@ -554,6 +554,8 @@ async def start_sync() -> None:
                 events.NewMessage(chats=discussion_group_ids),
             )
             logging.info("✅ 注册评论区事件处理器（支持媒体组）")
+        else:
+            logging.warning("⚠️ 启用了评论区功能但没有找到讨论组")
 
     for key, val in ALL_EVENTS.items():
         if not CONFIG.live.delete_sync and key == "deleted":
