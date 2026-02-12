@@ -34,6 +34,7 @@ CONFIG_TYPE: int = 0
 mycol: Collection = None
 post_id_mapping: Dict[tuple, Dict[int, int]] = {}
 discussion_to_channel_post: Dict[tuple, int] = {}
+channel_post_to_discussion: Dict[tuple, int] = {}
 comment_msg_mapping: Dict[tuple, Dict[int, int]] = {}
 KEEP_LAST_MANY_POSTS = 50000
 GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
@@ -53,6 +54,19 @@ def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id)
 
 def get_dest_post_id(src_channel_id, src_post_id, dest_channel_id):
     return post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
+
+
+def add_discussion_mapping(discussion_id, discussion_msg_id, channel_post_id):
+    discussion_to_channel_post[(discussion_id, discussion_msg_id)] = channel_post_id
+    channel_post_to_discussion[(discussion_id, channel_post_id)] = discussion_msg_id
+
+
+def get_channel_post_id(discussion_id, discussion_msg_id):
+    return discussion_to_channel_post.get((discussion_id, discussion_msg_id))
+
+
+def get_discussion_msg_id(discussion_id, channel_post_id):
+    return channel_post_to_discussion.get((discussion_id, channel_post_id))
 
 
 def add_comment_mapping(src_discussion_id, src_comment_id, dest_chat_id, dest_msg_id):
