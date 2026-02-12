@@ -267,6 +267,17 @@ async def forward_job() -> None:
     async with TelegramClient(SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
 
+        # ★ 新增：检查是否有有效连接
+        if not config.from_to:
+            logging.error(
+                "❌ 没有有效的转发连接，无法启动 past 模式。\n"
+                "请检查:\n"
+                "  1. 账号是否已加入所有源/目标频道\n"
+                "  2. 频道 ID 或用户名是否正确\n"
+                "  3. Web UI → Connections 页面的配置"
+            )
+            return
+
         for from_to, forward in zip(config.from_to.items(), CONFIG.forwards):
             src, dest = from_to
             last_id = 0
