@@ -1,4 +1,4 @@
-# nb/utils.py —— 升级 Telethon 后的简化版本
+# nb/utils.py —— 支持评论区转发
 
 import logging
 import asyncio
@@ -26,7 +26,11 @@ from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
 )
-from telethon.tl.functions.messages import SendMediaRequest, SendMultiMediaRequest
+from telethon.tl.functions.messages import (
+    SendMediaRequest,
+    SendMultiMediaRequest,
+    GetDiscussionMessageRequest,
+)
 
 from nb import __version__
 from nb.config import CONFIG
@@ -53,8 +57,61 @@ def _get_reply_to_msg_id(message) -> Optional[int]:
     return None
 
 
+def _get_reply_to_top_id(message) -> Optional[int]:
+    """获取评论所属的顶层帖子 ID（讨论组中的帖子副本 ID）。
+
+    Telegram 评论区中，每条评论的 reply_to.reply_to_top_id
+    指向讨论组中自动复制的频道帖子消息。
+    """
+    reply_to = getattr(message, 'reply_to', None)
+    if reply_to is None:
+        return None
+    return getattr(reply_to, 'reply_to_top_id', None)
+
+
+async def get_discussion_message(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+    msg_id: int,
+) -> Optional[Message]:
+    """获取频道帖子在讨论组中的副本消息。
+
+    返回讨论组中的消息对象，其 chat_id 是讨论组 ID，
+    其 id 就是评论需要 reply_to 的 top_id。
+    """
+    try:
+        result = await client(GetDiscussionMessageRequest(
+            peer=channel_id,
+            msg_id=msg_id,
+        ))
+        if result and result.messages:
+            return result.messages[0]
+    except Exception as e:
+        logging.warning(f"⚠️ 获取讨论消息失败 (channel={channel_id}, msg={msg_id}): {e}")
+    return None
+
+
+async def get_discussion_group_id(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+) -> Optional[int]:
+    """获取频道关联的讨论组 ID。"""
+    try:
+        full = await client.get_entity(channel_id)
+        if hasattr(full, 'linked_chat_id') and full.linked_chat_id:
+            return full.linked_chat_id
+        # 备选方案：通过 GetFullChannel 获取
+        from telethon.tl.functions.channels import GetFullChannelRequest
+        full_channel = await client(GetFullChannelRequest(channel_id))
+        if hasattr(full_channel.full_chat, 'linked_chat_id'):
+            return full_channel.full_chat.linked_chat_id
+    except Exception as e:
+        logging.warning(f"⚠️ 获取讨论组失败 (channel={channel_id}): {e}")
+    return None
+
+
 # =====================================================================
-#  Spoiler 检测与发送
+#  Spoiler 检测与发送（不变）
 # =====================================================================
 
 def _has_spoiler(message: Message) -> bool:
@@ -183,7 +240,7 @@ async def _send_album_with_spoiler(
 
 
 # =====================================================================
-#  主发送函数
+#  主发送函数（增加 comment_to_post 参数）
 # =====================================================================
 
 def platform_info():
@@ -200,9 +257,23 @@ async def send_message(
     tm: "NbMessage",
     grouped_messages: Optional[List[Message]] = None,
     grouped_tms: Optional[List["NbMessage"]] = None,
+    comment_to_post: Optional[int] = None,
 ) -> Union[Message, List[Message], None]:
-    """发送消息的统一入口。"""
+    """发送消息的统一入口。
+
+    Args:
+        recipient: 目标聊天
+        tm: 处理后的消息对象
+        grouped_messages: 媒体组原始消息列表
+        grouped_tms: 媒体组处理后的消息列表
+        comment_to_post: 如果是发送到评论区，这是目标帖子在讨论组中的消息 ID
+                         消息会作为该帖子的评论发送（reply_to 设为此 ID）
+    """
     client: TelegramClient = tm.client
+
+    # 如果指定了 comment_to_post，则 reply_to 强制设为帖子 ID
+    # 这样消息就会出现在该帖子的评论区
+    effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
     # === 情况 1: 直接转发（保留 forwarded from） ===
     if CONFIG.show_forwarded_from and grouped_messages:
@@ -245,7 +316,7 @@ async def send_message(
                     result = await _send_album_with_spoiler(
                         client, recipient, grouped_messages,
                         caption=combined_caption or None,
-                        reply_to=tm.reply_to,
+                        reply_to=effective_reply_to,
                     )
                 else:
                     files_to_send = [
@@ -256,12 +327,12 @@ async def send_message(
                         return await client.send_message(
                             recipient,
                             combined_caption or "空相册",
-                            reply_to=tm.reply_to,
+                            reply_to=effective_reply_to,
                         )
                     result = await client.send_file(
                         recipient, files_to_send,
                         caption=combined_caption or None,
-                        reply_to=tm.reply_to,
+                        reply_to=effective_reply_to,
                         supports_streaming=True,
                         force_document=False,
                         allow_cache=False,
@@ -271,6 +342,7 @@ async def send_message(
                 logging.info(
                     f"✅ 媒体组发送成功"
                     f"{'（含 spoiler）' if any_spoiler else ''}"
+                    f"{'（评论区）' if comment_to_post else ''}"
                     f" (attempt {attempt+1})"
                 )
                 return result
@@ -291,7 +363,6 @@ async def send_message(
 
     # === 情况 3: 单条消息 ===
 
-    # 取出处理后的 reply_markup（可能为 None = 已移除）
     processed_markup = getattr(tm, 'reply_markup', None)
 
     # 3a: 插件生成了新文件
@@ -300,7 +371,7 @@ async def send_message(
             return await client.send_file(
                 recipient, tm.new_file,
                 caption=tm.text,
-                reply_to=tm.reply_to,
+                reply_to=effective_reply_to,
                 supports_streaming=True,
                 buttons=processed_markup,
             )
@@ -310,7 +381,7 @@ async def send_message(
                 return await client.send_file(
                     recipient, tm.new_file,
                     caption=tm.text,
-                    reply_to=tm.reply_to,
+                    reply_to=effective_reply_to,
                     supports_streaming=True,
                 )
             except Exception as e2:
@@ -323,59 +394,55 @@ async def send_message(
         try:
             result = await _send_single_with_spoiler(
                 client, recipient, tm.message,
-                caption=tm.text, reply_to=tm.reply_to,
+                caption=tm.text, reply_to=effective_reply_to,
             )
             logging.info("✅ 带 spoiler 单条消息发送成功")
             return result
         except Exception as e:
             logging.warning(f"⚠️ spoiler 发送失败，回退普通模式: {e}")
 
-    # 3c: 普通消息 —— ★ 正确处理 reply_markup ★
+    # 3c: 普通消息
     try:
         if processed_markup is not None:
-            # 有处理后的按钮，用分离参数发送（避免原始 Message 对象携带旧 markup）
             try:
                 return await client.send_message(
                     recipient,
                     tm.text,
                     file=tm.message.media if tm.message.media else None,
                     buttons=processed_markup,
-                    reply_to=tm.reply_to,
+                    reply_to=effective_reply_to,
                     link_preview=not bool(tm.message.media),
                 )
             except Exception as e:
                 logging.warning(f"⚠️ 带按钮发送失败，去除按钮重试: {e}")
-                # 回退：不带按钮
                 if tm.message.media:
                     return await client.send_message(
                         recipient,
                         tm.text,
                         file=tm.message.media,
-                        reply_to=tm.reply_to,
+                        reply_to=effective_reply_to,
                         link_preview=False,
                     )
                 else:
                     return await client.send_message(
                         recipient,
                         tm.text,
-                        reply_to=tm.reply_to,
+                        reply_to=effective_reply_to,
                     )
         else:
-            # markup 为 None —— 必须避免把原始 Message 的按钮带过去
-            # 不能直接 send_message(recipient, tm.message)，因为 Message 对象内含原始 markup
             if tm.message.media:
                 return await client.send_message(
                     recipient,
                     tm.text,
                     file=tm.message.media,
-                    reply_to=tm.reply_to,
+                    reply_to=effective_reply_to,
                     link_preview=False,
                 )
             else:
                 return await client.send_message(
                     recipient,
                     tm.text,
-                    reply_to=tm.reply_to,
+                    reply_to=effective_reply_to,
                 )
     except Exception as e:
         logging.error(f"❌ 消息发送失败: {e}")
@@ -383,7 +450,7 @@ async def send_message(
 
 
 # =====================================================================
-#  工具函数（不变）
+#  工具函数
 # =====================================================================
 
 def cleanup(*files: str) -> None:
