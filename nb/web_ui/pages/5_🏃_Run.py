@@ -12,7 +12,7 @@ from nb.web_ui.utils import hide_st, switch_theme
 
 CONFIG = read_config()
 
-# ★ 全局 PID 文件路径（比配置文件更可靠）
+# ★ 全局 PID 文件路径
 PID_FILE = os.path.join(os.getcwd(), "nb_process.pid")
 
 
@@ -60,12 +60,12 @@ def is_process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     try:
-        os.kill(pid, 0)  # 信号 0 不会杀死进程，只检查是否存在
+        os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # 进程存在但无权限
+        return True
     except OSError:
         return False
 
@@ -74,7 +74,6 @@ def _get_child_pids(parent_pid: int) -> list:
     """获取进程的所有子进程 PID"""
     children = []
     try:
-        # 方法 1: 使用 /proc (Linux)
         if os.path.exists("/proc"):
             for pid_dir in os.listdir("/proc"):
                 if not pid_dir.isdigit():
@@ -95,7 +94,6 @@ def _get_child_pids(parent_pid: int) -> list:
 
     if not children:
         try:
-            # 方法 2: 使用 pgrep 命令
             result = subprocess.run(
                 ["pgrep", "-P", str(parent_pid)],
                 capture_output=True, text=True, timeout=5
@@ -116,7 +114,7 @@ def _kill_process_tree(pid: int) -> bool:
     if pid <= 0:
         return True
 
-    # 1. 先收集所有子进程（递归）
+    # 1. 收集所有子进程（递归）
     all_pids = []
 
     def _collect_children(parent):
@@ -126,9 +124,8 @@ def _kill_process_tree(pid: int) -> bool:
             _collect_children(child)
 
     _collect_children(pid)
-    all_pids.append(pid)  # 父进程放最后
+    all_pids.append(pid)
 
-    # 去重，保持顺序（子进程在前，父进程在后）
     seen = set()
     unique_pids = []
     for p in all_pids:
@@ -136,21 +133,21 @@ def _kill_process_tree(pid: int) -> bool:
             seen.add(p)
             unique_pids.append(p)
 
-    # 2. 先发 SIGTERM 给所有进程
+    # 2. SIGTERM
     for p in unique_pids:
         try:
             os.kill(p, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
-    # 3. 等待最多 5 秒
+    # 3. 等待
     for _ in range(10):
         time.sleep(0.5)
         alive = [p for p in unique_pids if is_process_alive(p)]
         if not alive:
             return True
 
-    # 4. 还活着的用 SIGKILL 强制终止
+    # 4. SIGKILL
     alive = [p for p in unique_pids if is_process_alive(p)]
     for p in alive:
         try:
@@ -160,10 +157,9 @@ def _kill_process_tree(pid: int) -> bool:
 
     time.sleep(1)
 
-    # 5. 最终检查
+    # 5. 最后手段
     still_alive = [p for p in unique_pids if is_process_alive(p)]
     if still_alive:
-        # 最后手段：用 pkill 杀掉包含 nb.cli 的 Python 进程
         try:
             subprocess.run(
                 ["pkill", "-9", "-f", "nb.cli"],
@@ -188,11 +184,51 @@ def kill_process(pid: int) -> bool:
     return success
 
 
+def _validate_config_for_run(mode: str) -> tuple:
+    """运行前验证配置，返回 (通过, 错误信息)"""
+    errors = []
+
+    # 检查 API 凭证
+    if CONFIG.login.API_ID == 0:
+        errors.append("❌ API_ID 未设置")
+    if not CONFIG.login.API_HASH:
+        errors.append("❌ API_HASH 未设置")
+
+    # 检查登录凭证
+    if CONFIG.login.user_type == 0:
+        if not CONFIG.login.BOT_TOKEN:
+            errors.append("❌ Bot Token 未设置")
+    else:
+        if not CONFIG.login.SESSION_STRING:
+            errors.append("❌ Session String 未设置")
+
+    # ★ past 模式必须用户账号
+    if mode == "past" and CONFIG.login.user_type == 0:
+        errors.append(
+            "❌ **past 模式不支持 Bot 账号！**\n"
+            "   Telegram 禁止 Bot 遍历聊天历史记录。\n"
+            "   请切换为 User 账号并填入 Session String。"
+        )
+
+    # 检查连接
+    active_forwards = [f for f in CONFIG.forwards if f.use_this]
+    if not active_forwards:
+        errors.append("❌ 没有启用的转发连接")
+    else:
+        for f in active_forwards:
+            name = f.con_name or "未命名"
+            if not f.source and f.source != 0:
+                errors.append(f"⚠️ 连接 '{name}' 未设置源")
+            if not f.dest:
+                errors.append(f"⚠️ 连接 '{name}' 未设置目标")
+
+    return (len(errors) == 0, errors)
+
+
 def start_nb_process(mode: str) -> int:
     """启动 nb 进程，返回 PID。"""
     log_file = os.path.join(os.getcwd(), "logs.txt")
 
-    # 备份旧日志
     if os.path.exists(log_file):
         old_log = os.path.join(os.getcwd(), "old_logs.txt")
         try:
@@ -200,16 +236,14 @@ def start_nb_process(mode: str) -> int:
         except Exception:
             pass
 
-    # 创建新日志文件
     log_fd = open(log_file, "w")
 
-    # 构建环境变量（继承当前环境 + 禁用 Python 缓冲）
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONPATH"] = os.getcwd()
 
     cmd = [
-        sys.executable, "-u",  # -u 禁用缓冲
+        sys.executable, "-u",
         "-m", "nb.cli",
         mode,
         "--loud",
@@ -222,27 +256,20 @@ def start_nb_process(mode: str) -> int:
             stderr=subprocess.STDOUT,
             cwd=os.getcwd(),
             env=env,
-            # ★ 不使用 start_new_session，这样可以直接通过 PID 管理
-            # 改为用 PID 文件 + 进程树杀死来管理
         )
 
-        # 等一小段时间检查进程是否立刻崩溃
         time.sleep(2)
         if process.poll() is not None:
-            # 进程已退出，读取错误日志
             log_fd.close()
             with open(log_file, "r") as f:
                 error_output = f.read()
             st.error(f"进程启动后立即退出 (code={process.returncode})")
             if error_output.strip():
-                st.code(error_output[-2000:])  # 显示最后 2000 字符
+                st.code(error_output[-2000:])
             return 0
 
-        log_fd.close()  # 父进程关闭文件描述符，子进程继续持有
-
-        # ★ 写入 PID 文件
+        log_fd.close()
         _write_pid_file(process.pid)
-
         return process.pid
 
     except Exception as e:
@@ -256,7 +283,6 @@ def termination():
     log_file = os.path.join(os.getcwd(), "logs.txt")
     old_log = os.path.join(os.getcwd(), "old_logs.txt")
 
-    # 提供日志下载
     for fname, label in [(log_file, "当前日志"), (old_log, "上次日志")]:
         try:
             with open(fname, "r") as f:
@@ -298,10 +324,24 @@ if check_password(st):
         mode = st.radio("Choose mode", ["live", "past"], index=CONFIG.mode)
         if mode == "past":
             CONFIG.mode = 1
-            st.warning(
-                "Only User Account can be used in Past mode. "
-                "Telegram does not allow bot account to go through history of a chat!"
-            )
+
+            # ★★★ Bot 账号警告 ★★★
+            if CONFIG.login.user_type == 0:
+                st.error(
+                    "🚫 **past 模式不支持 Bot 账号！**\n\n"
+                    "Telegram 禁止 Bot 账号使用 `GetHistoryRequest`（遍历聊天历史记录）。\n\n"
+                    "**解决方法：**\n"
+                    "1. 前往 **Telegram Login** 页面\n"
+                    "2. 将账号类型切换为 **User**\n"
+                    "3. 填入 **Session String**\n"
+                    "4. 保存配置后返回此页面运行\n\n"
+                    "📖 [获取 Session String](https://replit.com/@artai8/tg-login?v=1)"
+                )
+            else:
+                st.warning(
+                    "Only User Account can be used in Past mode. "
+                    "Telegram does not allow bot account to go through history of a chat!"
+                )
             CONFIG.past.delay = st.slider(
                 "Delay in seconds", 0, 100, value=CONFIG.past.delay
             )
@@ -316,18 +356,15 @@ if check_password(st):
             st.success("配置已保存")
 
     # ---------- 进程状态检查 ----------
-    # ★ 同时从配置文件和 PID 文件获取 PID，取存活的那个
     pid_from_config = CONFIG.pid
     pid_from_file = _read_pid_file()
 
-    # 优先使用 PID 文件中的值
     pid = 0
     if pid_from_file > 0 and is_process_alive(pid_from_file):
         pid = pid_from_file
     elif pid_from_config > 0 and is_process_alive(pid_from_config):
         pid = pid_from_config
 
-    # 同步状态
     if pid == 0:
         if CONFIG.pid != 0:
             CONFIG.pid = 0
@@ -341,30 +378,45 @@ if check_password(st):
 
     # ---------- 启动/停止控制 ----------
     if pid == 0:
-        # 没有运行中的进程
-        if st.button("▶️ Run", type="primary", key="run_btn"):
-            st.info(f"正在启动 nb ({mode} 模式)...")
-            new_pid = start_nb_process(mode)
-            if new_pid > 0:
-                CONFIG.pid = new_pid
-                write_config(CONFIG)
-                st.success(f"✅ 进程已启动 (PID={new_pid})")
-                time.sleep(1)
-                rerun()
+        # ★ 运行前验证
+        can_run, validation_errors = _validate_config_for_run(mode)
+
+        if not can_run:
+            st.markdown("### ⚠️ 配置问题")
+            for err in validation_errors:
+                st.error(err)
+            st.info("请先解决上述问题再运行。")
+
+        # 即使有警告也允许点击（但有严重错误时禁用按钮）
+        has_critical = any("不支持 Bot" in e for e in validation_errors)
+
+        if st.button(
+            "▶️ Run",
+            type="primary",
+            key="run_btn",
+            disabled=has_critical,
+        ):
+            if not can_run:
+                st.error("请先修复配置问题！")
             else:
-                st.error("❌ 启动失败，请检查日志")
+                st.info(f"正在启动 nb ({mode} 模式)...")
+                new_pid = start_nb_process(mode)
+                if new_pid > 0:
+                    CONFIG.pid = new_pid
+                    write_config(CONFIG)
+                    st.success(f"✅ 进程已启动 (PID={new_pid})")
+                    time.sleep(1)
+                    rerun()
+                else:
+                    st.error("❌ 启动失败，请检查日志")
     else:
-        # 有运行中的进程
         st.info(f"🟢 nb 正在运行 (PID={pid})")
 
-        # ★ 显示子进程信息
         children = _get_child_pids(pid)
         if children:
             st.caption(f"子进程: {children}")
 
-        st.warning(
-            "修改配置后需要先停止再重新启动才能生效"
-        )
+        st.warning("修改配置后需要先停止再重新启动才能生效")
 
         col1, col2 = st.columns(2)
 
@@ -389,23 +441,17 @@ if check_password(st):
         with col2:
             if st.button("🔴 Force Kill", key="force_kill_btn"):
                 with st.spinner("强制终止所有 nb 进程..."):
-                    # 强制杀死所有相关进程
-                    killed = False
                     try:
-                        # 杀主进程
                         os.kill(pid, signal.SIGKILL)
-                        killed = True
                     except Exception:
                         pass
 
-                    # 杀所有子进程
                     for child_pid in _get_child_pids(pid):
                         try:
                             os.kill(child_pid, signal.SIGKILL)
                         except Exception:
                             pass
 
-                    # 用 pkill 清理残留
                     try:
                         subprocess.run(
                             ["pkill", "-9", "-f", "nb.cli"],
@@ -443,7 +489,6 @@ if check_password(st):
             with open(log_file, "r") as f:
                 all_lines = f.readlines()
 
-            # 取最后 N 行
             display_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
             log_content = "".join(display_lines)
 
@@ -459,6 +504,5 @@ if check_password(st):
     else:
         st.info("暂无日志文件")
 
-    # 手动刷新按钮
     if st.button("🔄 刷新日志", key="refresh_logs"):
         rerun()
