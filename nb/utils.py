@@ -6,7 +6,7 @@ import random
 import re
 import sys
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from telethon.client import TelegramClient
 from telethon.hints import EntityLike
 from telethon.tl.custom.message import Message
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 MAX_RETRIES = 3
 COMMENT_MAX_RETRIES = 6
 COMMENT_RETRY_BASE_DELAY = 3
-DISCUSSION_CACHE = {}
+DISCUSSION_CACHE: Dict[int, Optional[int]] = {}
 
 
 def extract_msg_id(fwded) -> Optional[int]:
@@ -54,6 +54,11 @@ def _get_reply_to_top_id(message) -> Optional[int]:
     return getattr(reply_to, 'reply_to_top_id', None)
 
 
+def _extract_flood_wait(e) -> int:
+    m = re.search(r'(\d+)', str(e))
+    return int(m.group()) + 5 if m else 30
+
+
 async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message]:
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
@@ -64,63 +69,137 @@ async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
-                wait_match = re.search(r'\d+', str(e))
-                wait = int(wait_match.group()) + 5 if wait_match else min(15 * (attempt + 1), 120)
-                logging.warning(f"获取讨论消息FloodWait, 等待{wait}秒 (attempt={attempt+1})")
-                await asyncio.sleep(wait)
+                await asyncio.sleep(_extract_flood_wait(e))
                 continue
-            if any(k in err_str for k in ("MSG_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED", "PEER_ID_INVALID")):
-                return None
-            if "DISCUSSION" in err_str and "DISABLED" in err_str:
+            if any(k in err_str for k in ("MSG_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED", "PEER_ID_INVALID", "DISCUSSION")):
                 return None
             if attempt < COMMENT_MAX_RETRIES - 1:
                 await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-            else:
-                logging.error(f"获取讨论消息最终失败 channel={channel_id} msg={msg_id}: {e}")
     return None
 
 
 async def get_discussion_group_id(client, channel_id) -> Optional[int]:
-    cache_key = channel_id
-    if cache_key in DISCUSSION_CACHE:
-        return DISCUSSION_CACHE[cache_key]
+    if channel_id in DISCUSSION_CACHE:
+        return DISCUSSION_CACHE[channel_id]
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
             input_channel = await client.get_input_entity(channel_id)
             full_result = await client(GetFullChannelRequest(input_channel))
             linked = getattr(full_result.full_chat, 'linked_chat_id', None)
-            if linked:
-                DISCUSSION_CACHE[cache_key] = linked
+            DISCUSSION_CACHE[channel_id] = linked
             return linked
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
-                wait_match = re.search(r'\d+', str(e))
-                wait = int(wait_match.group()) + 5 if wait_match else 15 * (attempt + 1)
-                await asyncio.sleep(wait)
+                await asyncio.sleep(_extract_flood_wait(e))
                 continue
             if any(k in err_str for k in ("CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED")):
                 return None
             if attempt < COMMENT_MAX_RETRIES - 1:
                 await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-            else:
-                logging.error(f"获取讨论组ID最终失败 channel={channel_id}: {e}")
     return None
 
 
-async def get_discussion_group_id_reverse(client, discussion_id) -> Optional[int]:
-    cache_key = f"rev_{discussion_id}"
-    if cache_key in DISCUSSION_CACHE:
-        return DISCUSSION_CACHE[cache_key]
+async def walk_up_to_root(client, chat_id, msg_id, max_depth=10):
+    from nb import storage as st
+    visited = set()
+    current_id = msg_id
+    for _ in range(max_depth):
+        if current_id is None or current_id in visited:
+            return None
+        visited.add(current_id)
+        cp = st.discussion_to_channel_post.get((chat_id, current_id))
+        if cp is not None:
+            return cp
+        try:
+            msg = await client.get_messages(chat_id, ids=current_id)
+            if msg is None:
+                return None
+            if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(chat_id, current_id, cp)
+                    return cp
+            parent_top = _get_reply_to_top_id(msg)
+            if parent_top and parent_top not in visited:
+                cp_top = st.discussion_to_channel_post.get((chat_id, parent_top))
+                if cp_top:
+                    return cp_top
+                current_id = parent_top
+                continue
+            parent_id = _get_reply_to_msg_id(msg)
+            if parent_id and parent_id not in visited:
+                current_id = parent_id
+                continue
+            return None
+        except Exception:
+            return None
+    return None
+
+
+async def scan_for_auto_messages(client, chat_id, around_id, limit=100):
+    from nb import storage as st
+    found = 0
     try:
-        input_entity = await client.get_input_entity(discussion_id)
-        full_result = await client(GetFullChannelRequest(input_entity))
-        linked = getattr(full_result.full_chat, 'linked_chat_id', None)
-        if linked:
-            DISCUSSION_CACHE[cache_key] = linked
-        return linked
+        async for msg in client.iter_messages(chat_id, limit=limit, offset_id=around_id + limit // 2):
+            if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(chat_id, msg.id, cp)
+                    found += 1
     except Exception:
-        return None
+        pass
+    if found == 0:
+        try:
+            async for msg in client.iter_messages(chat_id, limit=limit, min_id=max(0, around_id - limit), reverse=True):
+                if hasattr(msg, 'fwd_from') and msg.fwd_from:
+                    cp = getattr(msg.fwd_from, 'channel_post', None)
+                    if cp:
+                        st.add_discussion_mapping(chat_id, msg.id, cp)
+                        found += 1
+        except Exception:
+            pass
+    return found
+
+
+async def find_channel_post_for_comment(client, chat_id, message):
+    from nb import storage as st
+    top_id = _get_reply_to_top_id(message)
+    reply_id = _get_reply_to_msg_id(message)
+    candidates = []
+    if top_id is not None:
+        candidates.append(top_id)
+    if reply_id is not None and reply_id != top_id:
+        candidates.append(reply_id)
+    for cid in candidates:
+        cp = st.discussion_to_channel_post.get((chat_id, cid))
+        if cp is not None:
+            return cp
+    for cid in candidates:
+        try:
+            msg = await client.get_messages(chat_id, ids=cid)
+            if msg and hasattr(msg, 'fwd_from') and msg.fwd_from:
+                cp = getattr(msg.fwd_from, 'channel_post', None)
+                if cp:
+                    st.add_discussion_mapping(chat_id, cid, cp)
+                    return cp
+        except Exception:
+            pass
+    for cid in candidates:
+        cp = await walk_up_to_root(client, chat_id, cid)
+        if cp is not None:
+            return cp
+    scan_center = top_id or reply_id or message.id
+    await scan_for_auto_messages(client, chat_id, scan_center, limit=100)
+    for cid in candidates:
+        cp = st.discussion_to_channel_post.get((chat_id, cid))
+        if cp is not None:
+            return cp
+    if top_id and reply_id and top_id != reply_id:
+        cp = await walk_up_to_root(client, chat_id, reply_id)
+        if cp is not None:
+            return cp
+    return None
 
 
 def _has_spoiler(message) -> bool:
@@ -193,8 +272,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 return await client.forward_messages(recipient, grouped_messages)
             except Exception as e:
                 if "FLOOD_WAIT" in str(e).upper():
-                    wait_match = re.search(r'\d+', str(e))
-                    await asyncio.sleep((int(wait_match.group()) if wait_match else 30) + 10)
+                    await asyncio.sleep(_extract_flood_wait(e))
                 else:
                     logging.error(f"转发失败 ({attempt+1}/{MAX_RETRIES}): {e}")
                 await asyncio.sleep(min(5 * 2 ** attempt, 300))
@@ -213,8 +291,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                     return await client.send_file(recipient, files, caption=combined_caption or None, reply_to=effective_reply_to, supports_streaming=True, force_document=False, allow_cache=False, parse_mode="md")
             except Exception as e:
                 if "FLOOD_WAIT" in str(e).upper():
-                    wait_match = re.search(r'\d+', str(e))
-                    await asyncio.sleep((int(wait_match.group()) if wait_match else 30) + 10)
+                    await asyncio.sleep(_extract_flood_wait(e))
                 else:
                     logging.error(f"媒体组发送失败 ({attempt+1}/{MAX_RETRIES}): {e}")
                 await asyncio.sleep(min(5 * 2 ** attempt, 300))
