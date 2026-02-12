@@ -1,7 +1,3 @@
-# nb/plugins/__init__.py
-
-"""Subpackage of nb: plugins."""
-
 import inspect
 import logging
 from typing import Any, Dict, List, Optional
@@ -24,13 +20,7 @@ PLUGIN_ORDER = [
 ]
 
 
-# =====================================================================
-#  Inline Button 处理
-# =====================================================================
-
-
 def _replace_in_string(original: str, replacements: Dict[str, str]) -> str:
-    """对字符串依次应用所有替换规则（纯字符串替换）"""
     result = original
     for old, new in replacements.items():
         result = result.replace(old, new)
@@ -43,25 +33,15 @@ def _process_reply_markup(
     url_replacements: Dict[str, str],
     text_replacements: Dict[str, str],
 ):
-    """
-    根据配置处理 reply_markup。
-
-    Returns:
-        处理后的 markup，或 None（表示移除）
-    """
-    # 没有 markup 则无需处理
     if reply_markup is None:
         return None
 
-    # 不是 inline markup（比如 ReplyKeyboardMarkup），直接移除
     if not isinstance(reply_markup, ReplyInlineMarkup):
         return None
 
-    # 模式: 完全移除
     if mode == InlineButtonMode.REMOVE:
         return None
 
-    # 模式: 只替换 URL / 替换 URL + 文字
     new_rows = []
     for row in reply_markup.rows:
         new_buttons = []
@@ -80,22 +60,17 @@ def _process_reply_markup(
 
 
 def _process_single_button(button, mode, url_replacements, text_replacements):
-    """处理单个按钮，返回新按钮或 None"""
-
     btn_text = button.text or ""
 
-    # 是否替换文字（仅 REPLACE_ALL 模式）
     if mode == InlineButtonMode.REPLACE_ALL and text_replacements:
         btn_text = _replace_in_string(btn_text, text_replacements)
 
-    # URL 按钮
     if isinstance(button, KeyboardButtonUrl):
         url = button.url or ""
         if url_replacements:
             url = _replace_in_string(url, url_replacements)
         return KeyboardButtonUrl(text=btn_text, url=url)
 
-    # Callback 按钮 — 原样保留结构，只改文字
     if isinstance(button, KeyboardButtonCallback):
         if mode == InlineButtonMode.REPLACE_ALL:
             return KeyboardButtonCallback(
@@ -103,10 +78,8 @@ def _process_single_button(button, mode, url_replacements, text_replacements):
                 data=button.data,
                 requires_password=getattr(button, 'requires_password', False),
             )
-        # REPLACE_URL 模式不需要改 callback 按钮
         return button
 
-    # SwitchInline 按钮
     if isinstance(button, KeyboardButtonSwitchInline):
         if mode == InlineButtonMode.REPLACE_ALL:
             return KeyboardButtonSwitchInline(
@@ -116,13 +89,7 @@ def _process_single_button(button, mode, url_replacements, text_replacements):
             )
         return button
 
-    # 其他类型按钮原样保留
     return button
-
-
-# =====================================================================
-#  NbMessage
-# =====================================================================
 
 
 class NbMessage:
@@ -136,19 +103,15 @@ class NbMessage:
         self.cleanup = False
         self.reply_to = None
         self.client = self.message.client
-
-        # Inline Button 处理
         self.reply_markup = self._build_reply_markup()
 
     def _build_reply_markup(self):
-        """根据配置处理消息的 reply_markup"""
         original_markup = self.message.reply_markup
         if original_markup is None:
             return None
 
         inline_cfg = CONFIG.plugins.inline
         if not inline_cfg.check:
-            # 插件未启用 → 默认移除，避免转发报错
             return None
 
         return _process_reply_markup(
@@ -174,11 +137,6 @@ class NbMessage:
         if self.new_file and self.cleanup:
             cleanup(self.new_file)
             self.new_file = None
-
-
-# =====================================================================
-#  NbPlugin 基类 & 加载逻辑
-# =====================================================================
 
 
 class NbPlugin:
