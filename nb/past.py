@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional
 from telethon import TelegramClient
@@ -16,7 +17,7 @@ from nb.utils import (
     _get_reply_to_msg_id, _get_reply_to_top_id, _extract_channel_post,
     get_discussion_message, get_discussion_group_id,
     walk_to_header, preload_discussion_mappings,
-    COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY,
+    COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY, wait_for_dest_post_id
 )
 
 
@@ -188,8 +189,10 @@ async def _resolve_dest_targets(client, src_channel_id, src_post_id, dest_list, 
                 dest_resolved = await config.get_id(client, dest_ch)
             except Exception:
                 continue
-        dest_post_id = st.get_dest_post_id(src_channel_id, src_post_id, dest_resolved)
+        # === 关键修改：等待映射建立 ===
+        dest_post_id = await wait_for_dest_post_id(src_channel_id, src_post_id, dest_resolved, timeout=120)
         if dest_post_id is None:
+            logging.warning(f"Past模式：跳过评论，因目标帖子未转发 src_post={src_post_id} dest={dest_resolved}")
             continue
         if cfg.dest_mode == "comments":
             for attempt in range(COMMENT_MAX_RETRIES):
