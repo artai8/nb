@@ -12,18 +12,25 @@ class NbCaption(NbPlugin):
         if not self._header and not self._footer:
             return tm
 
-        text = tm.text if tm.text else ""
-        original_text = text.strip()
+        text = tm.text or ""
+        has_content = bool(text.strip())
 
-        parts = []
-        if self._header:
-            parts.append(self._header)
-        if original_text:
-            parts.append(original_text)
-        if self._footer:
-            parts.append(self._footer)
+        if self._header and self._footer:
+            if has_content:
+                tm.text = self._header + "\n\n" + text + "\n\n" + self._footer
+            else:
+                tm.text = self._header + "\n\n" + self._footer
+        elif self._header:
+            if has_content:
+                tm.text = self._header + "\n\n" + text
+            else:
+                tm.text = self._header
+        elif self._footer:
+            if has_content:
+                tm.text = text + "\n\n" + self._footer
+            else:
+                tm.text = self._footer
 
-        tm.text = "\n\n".join(parts)
         return tm
 
     def modify_group(self, tms):
@@ -32,13 +39,10 @@ class NbCaption(NbPlugin):
         if not self._header and not self._footer:
             return tms
 
-        # 找到第一个有文本的消息添加header
-        # 找到最后一个有文本的消息添加footer
-        # 如果都没文本，就在第一条上添加
         text_indices = [i for i, tm in enumerate(tms) if tm.text and tm.text.strip()]
 
         if not text_indices:
-            # 没有任何文本，在第一条上添加 header + footer
+            # 没有任何文本，在第一条上添加
             parts = []
             if self._header:
                 parts.append(self._header)
@@ -48,14 +52,12 @@ class NbCaption(NbPlugin):
                 tms[0].text = "\n\n".join(parts)
             return tms
 
-        # 在第一个有文本的消息上添加 header
         if self._header:
             idx = text_indices[0]
             original = tms[idx].text.strip()
             if not original.startswith(self._header):
                 tms[idx].text = self._header + "\n\n" + original
 
-        # 在最后一个有文本的消息上添加 footer
         if self._footer:
             idx = text_indices[-1]
             original = tms[idx].text.strip()
