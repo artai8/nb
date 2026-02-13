@@ -39,7 +39,7 @@ comment_msg_mapping: Dict[Tuple[int, int], Dict[int, int]] = {}
 KEEP_LAST_MANY_POSTS = 100000
 GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
-GROUPED_TIMEOUT = 2.0
+GROUPED_TIMEOUT = 3.0  # 从2秒增加到3秒，给更多时间收集媒体组消息
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
 
 
@@ -50,10 +50,14 @@ def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id)
     post_id_mapping[key][dest_channel_id] = dest_post_id
     if len(post_id_mapping) > KEEP_LAST_MANY_POSTS:
         del post_id_mapping[next(iter(post_id_mapping))]
+    logging.debug(f"帖子映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}/{dest_post_id}")
 
 
 def get_dest_post_id(src_channel_id, src_post_id, dest_channel_id):
-    return post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
+    result = post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
+    if result is None:
+        logging.debug(f"未找到帖子映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}")
+    return result
 
 
 def add_discussion_mapping(discussion_id, discussion_msg_id, channel_post_id):
@@ -95,6 +99,7 @@ async def _flush_group(grouped_id):
     finally:
         GROUPED_CACHE.pop(grouped_id, None)
         GROUPED_TIMERS.pop(grouped_id, None)
+        GROUPED_MAPPING.pop(grouped_id, None)
 
 
 def add_to_group_cache(chat_id, grouped_id, message):
