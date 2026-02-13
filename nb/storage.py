@@ -1,7 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 from pymongo.collection import Collection
 from telethon.tl.custom.message import Message
 
@@ -30,77 +29,87 @@ class DummyEvent:
         self.id = msg_id
 
 
-@dataclass
-class PendingComment:
-    message: Message
-    forward: Any
-    source_channel_id: int
-    source_post_id: int
-    attempts: int = 0
-    grouped_id: Optional[int] = None
-
-
 stored: Dict[EventUid, Dict[int, Message]] = {}
 CONFIG_TYPE: int = 0
 mycol: Collection = None
-post_id_mapping: Dict[tuple, Dict[int, int]] = {}
-discussion_to_channel_post: Dict[tuple, int] = {}
-channel_post_to_discussion: Dict[tuple, int] = {}
-comment_msg_mapping: Dict[tuple, Dict[int, int]] = {}
-KEEP_LAST_MANY_POSTS = 50000
+
+# 帖子映射: (源频道ID, 源帖子ID) -> {目标频道ID: 目标帖子ID}
+post_id_mapping: Dict[Tuple[int, int], Dict[int, int]] = {}
+
+# 讨论组映射: (讨论组ID, 讨论消息ID) -> 频道帖子ID
+discussion_to_channel_post: Dict[Tuple[int, int], int] = {}
+
+# 频道帖子映射: (讨论组ID, 频道帖子ID) -> 讨论消息ID
+channel_post_to_discussion: Dict[Tuple[int, int], int] = {}
+
+# 评论映射
+comment_msg_mapping: Dict[Tuple[int, int], Dict[int, int]] = {}
+
+KEEP_LAST_MANY_POSTS = 100000
+
+# 媒体组缓存
 GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
-GROUPED_TIMEOUT = 1.5
+GROUPED_TIMEOUT = 2.0
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
 
-# 评论相关存储
-PENDING_COMMENTS: Dict[Tuple[int, int], List[PendingComment]] = {}
-PENDING_COMMENT_GROUPS: Dict[int, List[Message]] = {}
-PENDING_COMMENT_LOCK = asyncio.Lock()
-PROCESSED_COMMENTS: set = set()
 
-
-def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id):
+def add_post_mapping(src_channel_id: int, src_post_id: int, dest_channel_id: int, dest_post_id: int):
+    """添加帖子映射"""
     key = (src_channel_id, src_post_id)
     if key not in post_id_mapping:
         post_id_mapping[key] = {}
     post_id_mapping[key][dest_channel_id] = dest_post_id
+    logging.info(f"✅ 映射建立: 源={src_channel_id}/{src_post_id} -> 目标={dest_channel_id}/{dest_post_id}")
+    
+    # 清理旧映射
     if len(post_id_mapping) > KEEP_LAST_MANY_POSTS:
-        del post_id_mapping[next(iter(post_id_mapping))]
-    logging.debug(f"建立帖子映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}/{dest_post_id}")
+        oldest_key = next(iter(post_id_mapping))
+        del post_id_mapping[oldest_key]
 
 
-def get_dest_post_id(src_channel_id, src_post_id, dest_channel_id):
-    return post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
+def get_dest_post_id(src_channel_id: int, src_post_id: int, dest_channel_id: int) -> Optional[int]:
+    """获取目标帖子ID"""
+    result = post_id_mapping.get((src_channel_id, src_post_id), {}).get(dest_channel_id)
+    if result:
+        logging.debug(f"找到映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}/{result}")
+    return result
 
 
-def add_discussion_mapping(discussion_id, discussion_msg_id, channel_post_id):
+def add_discussion_mapping(discussion_id: int, discussion_msg_id: int, channel_post_id: int):
+    """添加讨论组消息映射"""
     discussion_to_channel_post[(discussion_id, discussion_msg_id)] = channel_post_id
     channel_post_to_discussion[(discussion_id, channel_post_id)] = discussion_msg_id
+    logging.debug(f"讨论映射: 讨论组={discussion_id}/{discussion_msg_id} <-> 帖子={channel_post_id}")
+    
+    # 清理
     if len(discussion_to_channel_post) > KEEP_LAST_MANY_POSTS:
         oldest = next(iter(discussion_to_channel_post))
         old_cp = discussion_to_channel_post.pop(oldest)
         channel_post_to_discussion.pop((oldest[0], old_cp), None)
 
 
-def get_channel_post_id(discussion_id, discussion_msg_id):
+def get_channel_post_id(discussion_id: int, discussion_msg_id: int) -> Optional[int]:
+    """从讨论消息ID获取频道帖子ID"""
     return discussion_to_channel_post.get((discussion_id, discussion_msg_id))
 
 
-def get_discussion_msg_id(discussion_id, channel_post_id):
+def get_discussion_msg_id(discussion_id: int, channel_post_id: int) -> Optional[int]:
+    """从频道帖子ID获取讨论消息ID"""
     return channel_post_to_discussion.get((discussion_id, channel_post_id))
 
 
-def add_comment_mapping(src_discussion_id, src_comment_id, dest_chat_id, dest_msg_id):
-    key = (src_discussion_id, src_comment_id)
+def add_comment_mapping(src_chat_id: int, src_msg_id: int, dest_chat_id: int, dest_msg_id: int):
+    """添加评论映射"""
+    key = (src_chat_id, src_msg_id)
     if key not in comment_msg_mapping:
         comment_msg_mapping[key] = {}
     comment_msg_mapping[key][dest_chat_id] = dest_msg_id
-    logging.debug(f"建立评论映射: {src_discussion_id}/{src_comment_id} -> {dest_chat_id}/{dest_msg_id}")
 
 
-def get_comment_dest(src_discussion_id, src_comment_id):
-    return comment_msg_mapping.get((src_discussion_id, src_comment_id))
+def get_comment_dest(src_chat_id: int, src_msg_id: int) -> Optional[Dict[int, int]]:
+    """获取评论目标"""
+    return comment_msg_mapping.get((src_chat_id, src_msg_id))
 
 
 async def _flush_group(grouped_id):
@@ -116,7 +125,7 @@ async def _flush_group(grouped_id):
         GROUPED_TIMERS.pop(grouped_id, None)
 
 
-def add_to_group_cache(chat_id, grouped_id, message):
+def add_to_group_cache(chat_id: int, grouped_id: int, message: Message):
     if grouped_id not in GROUPED_CACHE:
         GROUPED_CACHE[grouped_id] = {}
         GROUPED_MAPPING[grouped_id] = {}
@@ -125,8 +134,10 @@ def add_to_group_cache(chat_id, grouped_id, message):
         GROUPED_MAPPING[grouped_id][chat_id] = []
     GROUPED_CACHE[grouped_id][chat_id].append(message)
     GROUPED_MAPPING[grouped_id][chat_id].append(message.id)
+    
     if grouped_id in GROUPED_TIMERS:
         GROUPED_TIMERS[grouped_id].cancel()
+    
     loop = asyncio.get_running_loop()
     GROUPED_TIMERS[grouped_id] = loop.call_later(
         GROUPED_TIMEOUT,
@@ -134,7 +145,7 @@ def add_to_group_cache(chat_id, grouped_id, message):
     )
 
 
-def get_grouped_messages(chat_id, msg_id):
+def get_grouped_messages(chat_id: int, msg_id: int) -> Optional[List[int]]:
     for grouped_id, mapping in GROUPED_MAPPING.items():
         if chat_id in mapping and msg_id in mapping[chat_id]:
             return mapping[chat_id]
