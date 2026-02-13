@@ -20,8 +20,6 @@ COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 COMMENT_GROUPED_TIMEOUT = 3.0
 
 
-# ======================== 主帖子处理 ========================
-
 async def _send_grouped_messages(grouped_id):
     if grouped_id not in st.GROUPED_CACHE:
         return
@@ -150,11 +148,7 @@ async def deleted_message_handler(event):
             del st.stored[uid]
 
 
-# ======================== 评论处理 ========================
-
 async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
-    """解析评论所属的主帖子ID"""
-    # reply_to_top_id
     top_id = _get_reply_to_top_id(message)
     if top_id:
         cp = st.get_channel_post_id(chat_id, top_id)
@@ -169,7 +163,6 @@ async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
                     return fwd
         except Exception:
             pass
-    # reply_to_msg_id
     reply_id = _get_reply_to_msg_id(message)
     if reply_id:
         cp = st.get_channel_post_id(chat_id, reply_id)
@@ -188,7 +181,6 @@ async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
 
 
 async def _get_dest_targets(client, src_channel_id, src_post_id, forward):
-    """获取评论的目标位置"""
     dest_targets = {}
     for dest_ch in forward.dest:
         dest_resolved = dest_ch
@@ -304,12 +296,10 @@ async def comment_message_handler(event):
     forward = config.comment_forward_map.get(chat_id)
     if not forward or not forward.comments.enabled:
         return
-    # 帖子头
     cp = _extract_channel_post(message)
     if cp:
         st.add_discussion_mapping(chat_id, message.id, cp)
         return
-    # 过滤
     if forward.comments.only_media and not message.media:
         return
     if not forward.comments.include_text_comments and not message.media:
@@ -321,11 +311,9 @@ async def comment_message_handler(event):
                 return
         except Exception:
             pass
-    # 媒体组
     if message.grouped_id is not None:
         _add_comment_to_group_cache(chat_id, message.grouped_id, message)
         return
-    # 单条
     src_post_id = await _resolve_channel_post_id(event.client, chat_id, message)
     if not src_post_id:
         logging.warning(f"无法解析评论帖子: {chat_id}/{message.id}")
@@ -336,8 +324,6 @@ async def comment_message_handler(event):
         return
     await _send_single_comment(event.client, message, dest_targets, chat_id)
 
-
-# ======================== 启动 ========================
 
 ALL_EVENTS = {
     "new": (new_message_handler, events.NewMessage()),
