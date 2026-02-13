@@ -14,7 +14,6 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
 from nb import __version__
-from nb.config import CONFIG
 from nb.plugin_models import STYLE_CODES
 
 if TYPE_CHECKING:
@@ -24,6 +23,16 @@ MAX_RETRIES = 3
 COMMENT_MAX_RETRIES = 5
 COMMENT_RETRY_BASE_DELAY = 2
 DISCUSSION_CACHE: Dict[int, int] = {}
+
+
+def _get_config():
+    from nb.config import CONFIG
+    return CONFIG
+
+
+def _get_storage():
+    from nb import storage as st
+    return st
 
 
 def extract_msg_id(fwded) -> Optional[int]:
@@ -58,7 +67,7 @@ def _extract_channel_post(msg) -> Optional[int]:
 
 
 async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message]:
-    from nb import storage as st
+    st = _get_storage()
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
             result = await client(GetDiscussionMessageRequest(
@@ -111,7 +120,7 @@ async def get_discussion_group_id(client, channel_id) -> Optional[int]:
 
 
 async def preload_discussion_mappings(client, discussion_id, limit=500):
-    from nb import storage as st
+    st = _get_storage()
     count = 0
     try:
         async for msg in client.iter_messages(discussion_id, limit=limit):
@@ -151,11 +160,12 @@ async def _download_media_bytes(client, message) -> Optional[bytes]:
 
 async def _send_with_retry(client, recipient, message, caption=None, reply_to=None):
     """发送单条带媒体的消息，失败则下载重传"""
+    cap = caption if caption else ""
+
     # 尝试1: 直接用媒体引用发送
     try:
         return await client.send_message(
-            recipient,
-            caption if caption else "",
+            recipient, cap,
             file=message.media,
             reply_to=reply_to,
             link_preview=False,
@@ -184,7 +194,7 @@ async def _send_with_retry(client, recipient, message, caption=None, reply_to=No
         except Exception as e2:
             logging.error(f"重传失败: {e2}")
 
-    # 尝试3: 只发文本（如果有的话）
+    # 尝试3: 只发文本
     if caption and caption.strip():
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
@@ -233,7 +243,6 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
             )
         except Exception as e2:
             logging.warning(f"媒体组重传失败: {e2}")
-            # 尝试3: 逐条发送
             sent = None
             for i, f in enumerate(files):
                 try:
@@ -249,7 +258,6 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
             if sent:
                 return sent
 
-    # 最终: 只发文本
     if caption and caption.strip():
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
@@ -260,6 +268,7 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
 
 async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, comment_to_post=None):
     """发送消息主函数"""
+    CONFIG = _get_config()
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
     has_media = _msg_has_media(tm.message)
@@ -351,7 +360,6 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 else:
                     logging.error(f"单条媒体 ({attempt+1}): {e}")
                     await asyncio.sleep(5 * (attempt + 1))
-        # 降级：只发文本
         if text and text.strip():
             try:
                 return await client.send_message(recipient, text, reply_to=effective_reply_to)
@@ -365,7 +373,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
             return await client.send_message(recipient, text, reply_to=effective_reply_to)
         except Exception as e:
             logging.error(f"文本发送失败: {e}")
-    
+
     return None
 
 
