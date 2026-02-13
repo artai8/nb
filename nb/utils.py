@@ -13,7 +13,6 @@ from telethon.tl.custom.message import Message
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
-import nb.storage as st
 from nb import __version__
 from nb.config import CONFIG
 from nb.plugin_models import STYLE_CODES
@@ -59,6 +58,7 @@ def _extract_channel_post(msg) -> Optional[int]:
 
 
 async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message]:
+    from nb import storage as st
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
             result = await client(GetDiscussionMessageRequest(
@@ -111,6 +111,7 @@ async def get_discussion_group_id(client, channel_id) -> Optional[int]:
 
 
 async def preload_discussion_mappings(client, discussion_id, limit=500):
+    from nb import storage as st
     count = 0
     try:
         async for msg in client.iter_messages(discussion_id, limit=limit):
@@ -135,39 +136,12 @@ def platform_info():
 
 
 def _msg_has_media(message) -> bool:
-    """检查消息是否有媒体"""
     if not message:
         return False
     return bool(message.media)
 
 
-def _msg_is_video(message) -> bool:
-    """检查消息是否是视频"""
-    try:
-        if getattr(message, "video", None):
-            return True
-        if getattr(message, "document", None):
-            doc = message.document
-            mime = getattr(doc, "mime_type", "") or ""
-            if mime.startswith("video/"):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _msg_file_name(message) -> Optional[str]:
-    """获取消息中媒体的文件名"""
-    try:
-        if hasattr(message, "file") and message.file:
-            return message.file.name
-    except Exception:
-        pass
-    return None
-
-
 async def _download_media_bytes(client, message) -> Optional[bytes]:
-    """下载消息媒体为字节"""
     try:
         return await client.download_media(message, file=bytes)
     except Exception as e:
@@ -175,9 +149,9 @@ async def _download_media_bytes(client, message) -> Optional[bytes]:
         return None
 
 
-async def _send_with_reupload(client, recipient, message, caption=None, reply_to=None):
-    """先尝试直接发送媒体，失败则下载后重新上传"""
-    # 第一步：尝试直接引用发送
+async def _send_with_retry(client, recipient, message, caption=None, reply_to=None):
+    """发送单条带媒体的消息，失败则下载重传"""
+    # 尝试1: 直接发送
     try:
         return await client.send_message(
             recipient, caption or "",
@@ -188,25 +162,28 @@ async def _send_with_reupload(client, recipient, message, caption=None, reply_to
     except Exception as e:
         err_str = str(e).upper()
         if "FLOOD" in err_str:
-            raise  # flood 由外层处理
-        logging.info(f"直接发送失败，尝试下载重传: {e}")
+            raise
+        logging.debug(f"直接发送失败: {e}")
 
-    # 第二步：下载后重新上传
+    # 尝试2: 下载后重传
     data = await _download_media_bytes(client, message)
     if data:
         try:
+            fname = None
+            if hasattr(message, "file") and message.file:
+                fname = message.file.name
             return await client.send_file(
                 recipient, data,
                 caption=caption,
                 reply_to=reply_to,
-                file_name=_msg_file_name(message),
-                supports_streaming=_msg_is_video(message),
+                file_name=fname,
+                supports_streaming=True,
                 force_document=False,
             )
         except Exception as e2:
-            logging.error(f"重传也失败: {e2}")
+            logging.error(f"重传失败: {e2}")
 
-    # 第三步：降级只发文本
+    # 尝试3: 只发文本
     if caption:
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
@@ -215,15 +192,15 @@ async def _send_with_reupload(client, recipient, message, caption=None, reply_to
     return None
 
 
-async def _send_album_with_reupload(client, recipient, messages, caption=None, reply_to=None):
-    """先尝试直接发送媒体组，失败则下载后重新上传"""
+async def _send_album_with_retry(client, recipient, messages, caption=None, reply_to=None):
+    """发送媒体组，失败则下载重传"""
     media_msgs = [m for m in messages if _msg_has_media(m)]
     if not media_msgs:
         if caption:
             return await client.send_message(recipient, caption, reply_to=reply_to)
         return None
 
-    # 第一步：尝试直接发送
+    # 尝试1: 直接发送
     try:
         return await client.send_file(
             recipient, media_msgs,
@@ -236,9 +213,9 @@ async def _send_album_with_reupload(client, recipient, messages, caption=None, r
         err_str = str(e).upper()
         if "FLOOD" in err_str:
             raise
-        logging.info(f"媒体组直接发送失败，尝试下载重传: {e}")
+        logging.debug(f"媒体组直接发送失败: {e}")
 
-    # 第二步：下载后重新上传
+    # 尝试2: 下载后重传
     files = []
     for msg in media_msgs:
         data = await _download_media_bytes(client, msg)
@@ -254,8 +231,8 @@ async def _send_album_with_reupload(client, recipient, messages, caption=None, r
                 force_document=False,
             )
         except Exception as e2:
-            logging.warning(f"媒体组重传失败，逐条发送: {e2}")
-            # 第三步：逐条发送
+            logging.warning(f"媒体组重传失败: {e2}")
+            # 尝试3: 逐条发送
             sent = None
             for i, f in enumerate(files):
                 try:
@@ -271,7 +248,7 @@ async def _send_album_with_reupload(client, recipient, messages, caption=None, r
             if sent:
                 return sent
 
-    # 最终降级
+    # 最终: 只发文本
     if caption:
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
@@ -285,7 +262,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
-    # ========== 转发模式（保留"转发自"） ==========
+    # ========== 转发模式 ==========
     if CONFIG.show_forwarded_from:
         msgs = grouped_messages if grouped_messages else [tm.message]
         for attempt in range(MAX_RETRIES):
@@ -300,7 +277,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 else:
                     logging.error(f"转发失败 ({attempt+1}): {e}")
                     await asyncio.sleep(5 * (attempt + 1))
-        # 转发失败时不 return，继续走下面的普通发送逻辑
+        # 转发失败继续走普通发送
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
@@ -309,7 +286,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
         )
         for attempt in range(MAX_RETRIES):
             try:
-                result = await _send_album_with_reupload(
+                result = await _send_album_with_retry(
                     client, recipient, grouped_messages,
                     caption=combined_caption or None,
                     reply_to=effective_reply_to,
@@ -327,7 +304,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                     await asyncio.sleep(5 * (attempt + 1))
         return None
 
-    # ========== 有处理过的新文件（水印等） ==========
+    # ========== 处理过的新文件 ==========
     if tm.new_file:
         for attempt in range(MAX_RETRIES):
             try:
@@ -352,11 +329,11 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 pass
         return None
 
-    # ========== 单条带媒体消息 ==========
+    # ========== 单条带媒体 ==========
     if _msg_has_media(tm.message):
         for attempt in range(MAX_RETRIES):
             try:
-                result = await _send_with_reupload(
+                result = await _send_with_retry(
                     client, recipient, tm.message,
                     caption=tm.text or None,
                     reply_to=effective_reply_to,
