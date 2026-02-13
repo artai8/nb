@@ -141,14 +141,6 @@ def _msg_has_media(message) -> bool:
     return bool(message.media)
 
 
-def _safe_caption(text) -> Optional[str]:
-    """安全处理caption，空字符串返回None"""
-    if not text:
-        return None
-    t = text.strip()
-    return t if t else None
-
-
 async def _download_media_bytes(client, message) -> Optional[bytes]:
     try:
         return await client.download_media(message, file=bytes)
@@ -159,24 +151,15 @@ async def _download_media_bytes(client, message) -> Optional[bytes]:
 
 async def _send_with_retry(client, recipient, message, caption=None, reply_to=None):
     """发送单条带媒体的消息，失败则下载重传"""
-    safe_cap = _safe_caption(caption)
-
-    # 尝试1: 直接发送
+    # 尝试1: 直接用媒体引用发送
     try:
-        if safe_cap is not None:
-            return await client.send_message(
-                recipient, safe_cap,
-                file=message.media,
-                reply_to=reply_to,
-                link_preview=False,
-            )
-        else:
-            return await client.send_message(
-                recipient, "",
-                file=message.media,
-                reply_to=reply_to,
-                link_preview=False,
-            )
+        return await client.send_message(
+            recipient,
+            caption if caption else "",
+            file=message.media,
+            reply_to=reply_to,
+            link_preview=False,
+        )
     except Exception as e:
         err_str = str(e).upper()
         if "FLOOD" in err_str:
@@ -192,7 +175,7 @@ async def _send_with_retry(client, recipient, message, caption=None, reply_to=No
                 fname = message.file.name
             return await client.send_file(
                 recipient, data,
-                caption=safe_cap,
+                caption=caption if caption else None,
                 reply_to=reply_to,
                 file_name=fname,
                 supports_streaming=True,
@@ -201,10 +184,10 @@ async def _send_with_retry(client, recipient, message, caption=None, reply_to=No
         except Exception as e2:
             logging.error(f"重传失败: {e2}")
 
-    # 尝试3: 只发文本
-    if safe_cap:
+    # 尝试3: 只发文本（如果有的话）
+    if caption and caption.strip():
         try:
-            return await client.send_message(recipient, safe_cap, reply_to=reply_to)
+            return await client.send_message(recipient, caption, reply_to=reply_to)
         except Exception:
             pass
     return None
@@ -213,18 +196,16 @@ async def _send_with_retry(client, recipient, message, caption=None, reply_to=No
 async def _send_album_with_retry(client, recipient, messages, caption=None, reply_to=None):
     """发送媒体组，失败则下载重传"""
     media_msgs = [m for m in messages if _msg_has_media(m)]
-    safe_cap = _safe_caption(caption)
-
     if not media_msgs:
-        if safe_cap:
-            return await client.send_message(recipient, safe_cap, reply_to=reply_to)
+        if caption and caption.strip():
+            return await client.send_message(recipient, caption, reply_to=reply_to)
         return None
 
     # 尝试1: 直接发送
     try:
         return await client.send_file(
             recipient, media_msgs,
-            caption=safe_cap,
+            caption=caption if caption else None,
             reply_to=reply_to,
             supports_streaming=True,
             force_document=False,
@@ -245,7 +226,7 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
         try:
             return await client.send_file(
                 recipient, files,
-                caption=safe_cap,
+                caption=caption if caption else None,
                 reply_to=reply_to,
                 supports_streaming=True,
                 force_document=False,
@@ -258,7 +239,7 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
                 try:
                     sent = await client.send_file(
                         recipient, f,
-                        caption=safe_cap if i == 0 else None,
+                        caption=caption if i == 0 else None,
                         reply_to=reply_to,
                         supports_streaming=True,
                         force_document=False,
@@ -269,9 +250,9 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
                 return sent
 
     # 最终: 只发文本
-    if safe_cap:
+    if caption and caption.strip():
         try:
-            return await client.send_message(recipient, safe_cap, reply_to=reply_to)
+            return await client.send_message(recipient, caption, reply_to=reply_to)
         except Exception:
             pass
     return None
@@ -281,6 +262,8 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
     """发送消息主函数"""
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
+    has_media = _msg_has_media(tm.message)
+    text = tm.text if tm.text else ""
 
     # ========== 转发模式 ==========
     if CONFIG.show_forwarded_from:
@@ -297,7 +280,6 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 else:
                     logging.error(f"转发失败 ({attempt+1}): {e}")
                     await asyncio.sleep(5 * (attempt + 1))
-        # 转发失败继续走普通发送
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
@@ -308,7 +290,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
             try:
                 result = await _send_album_with_retry(
                     client, recipient, grouped_messages,
-                    caption=combined_caption or None,
+                    caption=combined_caption if combined_caption else None,
                     reply_to=effective_reply_to,
                 )
                 if result:
@@ -326,12 +308,11 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
     # ========== 处理过的新文件 ==========
     if tm.new_file:
-        safe_cap = _safe_caption(tm.text)
         for attempt in range(MAX_RETRIES):
             try:
                 return await client.send_file(
                     recipient, tm.new_file,
-                    caption=safe_cap,
+                    caption=text if text else None,
                     reply_to=effective_reply_to,
                     supports_streaming=True,
                 )
@@ -343,20 +324,20 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 else:
                     logging.error(f"new_file ({attempt+1}): {e}")
                     await asyncio.sleep(5 * (attempt + 1))
-        if safe_cap:
+        if text and text.strip():
             try:
-                return await client.send_message(recipient, safe_cap, reply_to=effective_reply_to)
+                return await client.send_message(recipient, text, reply_to=effective_reply_to)
             except Exception:
                 pass
         return None
 
-    # ========== 单条带媒体 ==========
-    if _msg_has_media(tm.message):
+    # ========== 单条带媒体消息 ==========
+    if has_media:
         for attempt in range(MAX_RETRIES):
             try:
                 result = await _send_with_retry(
                     client, recipient, tm.message,
-                    caption=tm.text,
+                    caption=text,
                     reply_to=effective_reply_to,
                 )
                 if result:
@@ -370,23 +351,21 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
                 else:
                     logging.error(f"单条媒体 ({attempt+1}): {e}")
                     await asyncio.sleep(5 * (attempt + 1))
-        # 媒体发送全部失败，降级发文本
-        safe_cap = _safe_caption(tm.text)
-        if safe_cap:
+        # 降级：只发文本
+        if text and text.strip():
             try:
-                return await client.send_message(recipient, safe_cap, reply_to=effective_reply_to)
+                return await client.send_message(recipient, text, reply_to=effective_reply_to)
             except Exception:
                 pass
         return None
 
-    # ========== 纯文本 ==========
-    safe_cap = _safe_caption(tm.text)
-    if safe_cap:
+    # ========== 纯文本消息 ==========
+    if text:
         try:
-            return await client.send_message(recipient, safe_cap, reply_to=effective_reply_to)
+            return await client.send_message(recipient, text, reply_to=effective_reply_to)
         except Exception as e:
             logging.error(f"文本发送失败: {e}")
-
+    
     return None
 
 
