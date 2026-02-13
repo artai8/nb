@@ -18,16 +18,30 @@ class NbFilter(NbPlugin):
         return None
 
     def modify_group(self, tms):
+        # 过滤组内的每一条消息
         return [tm for tm in tms if self.modify(tm)]
 
     def text_safe(self, tm):
         flist = self.filters.text
         text = tm.text if flist.case_sensitive else tm.text.lower()
-        if not text and not flist.whitelist:
-            return True
+        
+        # 关键修复：如果没有文字，但包含文件（图片/视频等），则忽略文本过滤，直接认为安全
+        # 否则媒体组中没有 caption 的图片会被误删
+        if not text:
+            if tm.file_type != "nofile":
+                return True
+            # 如果是纯文本且为空，且没有白名单，则放行
+            if not flist.whitelist:
+                return True
+            # 如果有白名单且为空文本，通常认为不安全（除非白名单允许空）
+            return False
+
+        # 黑名单检查
         for f in flist.blacklist:
             if match(f, text, flist.regex):
                 return False
+        
+        # 白名单检查
         if not flist.whitelist:
             return True
         return any(match(a, text, flist.regex) for a in flist.whitelist)
