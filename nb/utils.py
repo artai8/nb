@@ -159,10 +159,10 @@ async def _download_media_bytes(client, message) -> Optional[bytes]:
 
 
 async def _send_with_retry(client, recipient, message, caption=None, reply_to=None):
-    """发送单条带媒体的消息，失败则下载重传"""
+    """发送单条带媒体的消息"""
     cap = caption if caption else ""
 
-    # 尝试1: 直接用媒体引用发送
+    # 尝试1: 直接发送
     try:
         return await client.send_message(
             recipient, cap,
@@ -203,23 +203,58 @@ async def _send_with_retry(client, recipient, message, caption=None, reply_to=No
     return None
 
 
-async def _send_album_with_retry(client, recipient, messages, caption=None, reply_to=None):
-    """发送媒体组，失败则下载重传"""
+async def _send_album_with_retry(client, recipient, messages, captions=None, reply_to=None):
+    """发送媒体组
+    
+    captions: 每条消息对应的caption列表，与messages一一对应
+    """
     media_msgs = [m for m in messages if _msg_has_media(m)]
     if not media_msgs:
-        if caption and caption.strip():
-            return await client.send_message(recipient, caption, reply_to=reply_to)
+        # 没有媒体，发送合并的文本
+        if captions:
+            all_text = "\n\n".join([c for c in captions if c and c.strip()])
+            if all_text:
+                return await client.send_message(recipient, all_text, reply_to=reply_to)
         return None
+
+    # 构建每条消息的caption
+    # Telethon send_file 的 caption 参数：
+    # - 如果是字符串，只应用到第一个文件
+    # - 如果是列表，每个文件对应一个caption
+    caption_list = []
+    if captions and len(captions) == len(messages):
+        for i, msg in enumerate(messages):
+            if _msg_has_media(msg):
+                caption_list.append(captions[i] if captions[i] else "")
+    
+    # 如果没有逐条caption，用合并的方式
+    if not caption_list:
+        if captions:
+            first_caption = "\n\n".join([c for c in captions if c and c.strip()])
+        else:
+            first_caption = None
+        caption_list = None  # 使用单一caption
+    else:
+        first_caption = None
 
     # 尝试1: 直接发送
     try:
-        return await client.send_file(
-            recipient, media_msgs,
-            caption=caption if caption else None,
-            reply_to=reply_to,
-            supports_streaming=True,
-            force_document=False,
-        )
+        if caption_list:
+            return await client.send_file(
+                recipient, media_msgs,
+                caption=caption_list,
+                reply_to=reply_to,
+                supports_streaming=True,
+                force_document=False,
+            )
+        else:
+            return await client.send_file(
+                recipient, media_msgs,
+                caption=first_caption,
+                reply_to=reply_to,
+                supports_streaming=True,
+                force_document=False,
+            )
     except Exception as e:
         err_str = str(e).upper()
         if "FLOOD" in err_str:
@@ -234,21 +269,34 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
             files.append(data)
     if files:
         try:
+            combined = None
+            if caption_list:
+                # 下载后重传时caption_list长度可能变了，用合并方式
+                combined = "\n\n".join([c for c in caption_list if c and c.strip()])
+            elif first_caption:
+                combined = first_caption
             return await client.send_file(
                 recipient, files,
-                caption=caption if caption else None,
+                caption=combined if combined else None,
                 reply_to=reply_to,
                 supports_streaming=True,
                 force_document=False,
             )
         except Exception as e2:
             logging.warning(f"媒体组重传失败: {e2}")
+            # 尝试3: 逐条发送
             sent = None
             for i, f in enumerate(files):
                 try:
+                    cap = None
+                    if i == 0:
+                        if caption_list:
+                            cap = "\n\n".join([c for c in caption_list if c and c.strip()])
+                        elif first_caption:
+                            cap = first_caption
                     sent = await client.send_file(
                         recipient, f,
-                        caption=caption if i == 0 else None,
+                        caption=cap,
                         reply_to=reply_to,
                         supports_streaming=True,
                         force_document=False,
@@ -258,9 +306,15 @@ async def _send_album_with_retry(client, recipient, messages, caption=None, repl
             if sent:
                 return sent
 
-    if caption and caption.strip():
+    # 最终降级: 只发文本
+    all_text = None
+    if caption_list:
+        all_text = "\n\n".join([c for c in caption_list if c and c.strip()])
+    elif first_caption:
+        all_text = first_caption
+    if all_text:
         try:
-            return await client.send_message(recipient, caption, reply_to=reply_to)
+            return await client.send_message(recipient, all_text, reply_to=reply_to)
         except Exception:
             pass
     return None
@@ -292,14 +346,14 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
-        combined_caption = "\n\n".join(
-            [gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()]
-        )
+        # 构建每条消息的caption列表
+        captions = [gtm.text if gtm.text else "" for gtm in grouped_tms]
+        
         for attempt in range(MAX_RETRIES):
             try:
                 result = await _send_album_with_retry(
                     client, recipient, grouped_messages,
-                    caption=combined_caption if combined_caption else None,
+                    captions=captions,
                     reply_to=effective_reply_to,
                 )
                 if result:
