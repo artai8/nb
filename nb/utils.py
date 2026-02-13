@@ -168,9 +168,8 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
             return await client.send_message(recipient, cap, reply_to=reply_to)
         return None
 
-    # 有媒体：尝试发送
     for attempt in range(MAX_RETRIES):
-        # 尝试1: 直接引用发送
+        # 尝试1: 用 message.media 引用发送
         try:
             return await client.send_message(
                 recipient, cap,
@@ -186,8 +185,9 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
                 await asyncio.sleep(wait_time)
                 continue
 
-            # 尝试2: 下载后重传
             logging.debug(f"直接发送失败({attempt+1}): {e}")
+
+            # 尝试2: 下载后重传
             data = await _download_media_bytes(client, message)
             if data:
                 try:
@@ -207,7 +207,6 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
 
             await asyncio.sleep(3 * (attempt + 1))
 
-    # 全部失败，降级发文本
     if cap and cap.strip():
         try:
             return await client.send_message(recipient, cap, reply_to=reply_to)
@@ -217,23 +216,30 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
 
 
 async def _send_media_group(client, recipient, messages, caption, reply_to):
-    """发送媒体组"""
+    """发送媒体组 — 修复版"""
     media_msgs = [m for m in messages if _msg_has_media(m)]
     if not media_msgs:
         if caption and caption.strip():
             return await client.send_message(recipient, caption, reply_to=reply_to)
         return None
 
+    # Telegram caption 限制 1024 字符
+    if caption and len(caption) > 1024:
+        caption = caption[:1021] + "..."
+
     for attempt in range(MAX_RETRIES):
-        # 尝试1: 直接发送原始消息对象
+        # ===== 尝试1: 用 message.media 列表发送（保持相册效果）=====
         try:
-            return await client.send_file(
-                recipient, media_msgs,
+            media_list = [m.media for m in media_msgs]
+            result = await client.send_file(
+                recipient, media_list,
                 caption=caption if caption else None,
                 reply_to=reply_to,
                 supports_streaming=True,
                 force_document=False,
             )
+            if result:
+                return result
         except Exception as e:
             err_str = str(e).upper()
             if "FLOOD" in err_str:
@@ -241,47 +247,67 @@ async def _send_media_group(client, recipient, messages, caption, reply_to):
                 wait_time = int(wait_match.group()) + 10 if wait_match else 60
                 await asyncio.sleep(wait_time)
                 continue
+            logging.warning(f"媒体组方式1失败({attempt+1}): {e}")
 
-            logging.debug(f"媒体组直接发送失败({attempt+1}): {e}")
+        # ===== 尝试2: 下载为 bytes 后重新上传（保持相册效果）=====
+        files = []
+        for msg in media_msgs:
+            data = await _download_media_bytes(client, msg)
+            if data:
+                files.append(data)
 
-            # 尝试2: 逐个下载后重传
-            files = []
-            for msg in media_msgs:
-                data = await _download_media_bytes(client, msg)
-                if data:
-                    files.append(data)
+        if files:
+            try:
+                result = await client.send_file(
+                    recipient, files,
+                    caption=caption if caption else None,
+                    reply_to=reply_to,
+                    supports_streaming=True,
+                    force_document=False,
+                )
+                if result:
+                    return result
+            except Exception as e2:
+                logging.warning(f"媒体组方式2失败({attempt+1}): {e2}")
 
-            if files:
-                try:
-                    return await client.send_file(
-                        recipient, files,
-                        caption=caption if caption else None,
-                        reply_to=reply_to,
-                        supports_streaming=True,
-                        force_document=False,
-                    )
-                except Exception as e2:
-                    logging.debug(f"媒体组重传失败({attempt+1}): {e2}")
+        # ===== 尝试3: 逐条发送，用 send_message + file=media（与单条相同方式）=====
+        sent_list = []
+        for i, msg in enumerate(media_msgs):
+            msg_cap = caption if i == 0 else ""
+            msg_reply = reply_to if i == 0 else None
+            sent = None
+            # 3a: 用 message.media 引用
+            try:
+                sent = await client.send_message(
+                    recipient, msg_cap,
+                    file=msg.media,
+                    reply_to=msg_reply,
+                    link_preview=False,
+                )
+            except Exception as e3:
+                logging.debug(f"逐条media引用失败: {e3}")
+                # 3b: 用下载的 bytes
+                if i < len(files) and files[i]:
+                    try:
+                        sent = await client.send_file(
+                            recipient, files[i],
+                            caption=msg_cap if msg_cap else None,
+                            reply_to=msg_reply,
+                            supports_streaming=True,
+                            force_document=False,
+                        )
+                    except Exception as e4:
+                        logging.error(f"逐条bytes也失败: {e4}")
+            if sent:
+                sent_list.append(sent)
 
-                    # 尝试3: 逐条发送
-                    sent = None
-                    for i, f in enumerate(files):
-                        try:
-                            sent = await client.send_file(
-                                recipient, f,
-                                caption=caption if i == 0 else None,
-                                reply_to=reply_to,
-                                supports_streaming=True,
-                                force_document=False,
-                            )
-                        except Exception as e3:
-                            logging.error(f"逐条发送失败: {e3}")
-                    if sent:
-                        return sent
+        if sent_list:
+            return sent_list
 
-            await asyncio.sleep(3 * (attempt + 1))
+        await asyncio.sleep(3 * (attempt + 1))
 
     # 全部失败，降级发文本
+    logging.error("媒体组所有发送方式均失败，降级为纯文本")
     if caption and caption.strip():
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
@@ -297,7 +323,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
     text = tm.text if tm.text else ""
 
-    # ========== 转发模式（保留转发来源） ==========
+    # ========== 转发模式（保留转发来源）==========
     if CONFIG.show_forwarded_from:
         msgs = grouped_messages if grouped_messages else [tm.message]
         for attempt in range(MAX_RETRIES):
@@ -315,7 +341,6 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
-        # 合并所有有文本的caption
         all_texts = []
         for gtm in grouped_tms:
             if gtm.text and gtm.text.strip():
@@ -328,7 +353,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
             reply_to=effective_reply_to,
         )
 
-    # ========== 处理过的新文件（水印等） ==========
+    # ========== 处理过的新文件（水印等）==========
     if tm.new_file:
         for attempt in range(MAX_RETRIES):
             try:
@@ -404,6 +429,13 @@ def replace(pattern, new, string, regex):
 
 
 def clean_session_files():
-    for item in os.listdir():
-        if item.endswith(".session") or item.endswith(".session-journal"):
-            os.remove(item)
+    """清理 session 文件 — 修复版：捕获异常防止启动失败"""
+    try:
+        for item in os.listdir():
+            if item.endswith(".session") or item.endswith(".session-journal"):
+                try:
+                    os.remove(item)
+                except Exception as e:
+                    logging.warning(f"无法删除 session 文件 {item}: {e}")
+    except Exception as e:
+        logging.warning(f"清理 session 文件失败: {e}")
