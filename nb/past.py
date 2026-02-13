@@ -20,7 +20,9 @@ from nb.utils import (
 
 
 async def _get_all_comments(client, channel_id, post_id):
+    """获取帖子的所有评论 — 增强版"""
     comments = []
+    # 方式1: 通过 GetDiscussionMessage API
     try:
         disc_msg = await get_discussion_message(client, channel_id, post_id)
         if disc_msg:
@@ -30,14 +32,18 @@ async def _get_all_comments(client, channel_id, post_id):
                 if not isinstance(msg, MessageService):
                     comments.append(msg)
             if comments:
+                logging.info(f"方式1获取 {len(comments)} 条评论: {channel_id}/{post_id}")
                 return comments
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"方式1获取评论失败: {e}")
+
+    # 方式2: 通过讨论组查找
     try:
         dg_id = await get_discussion_group_id(client, channel_id)
         if dg_id:
             header_id = None
-            async for msg in client.iter_messages(dg_id, limit=200):
+            # 增大搜索范围
+            async for msg in client.iter_messages(dg_id, limit=500):
                 cp = _extract_channel_post(msg)
                 if cp == post_id:
                     header_id = msg.id
@@ -50,9 +56,12 @@ async def _get_all_comments(client, channel_id, post_id):
                     if not isinstance(msg, MessageService):
                         comments.append(msg)
                 if comments:
+                    logging.info(f"方式2获取 {len(comments)} 条评论: {channel_id}/{post_id}")
                     return comments
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"方式2获取评论失败: {e}")
+
+    # 方式3: 直接在频道中查找回复
     try:
         async for msg in client.iter_messages(
             channel_id, reply_to=post_id, reverse=True
@@ -60,13 +69,16 @@ async def _get_all_comments(client, channel_id, post_id):
             if not isinstance(msg, MessageService):
                 comments.append(msg)
         if comments:
+            logging.info(f"方式3获取 {len(comments)} 条评论: {channel_id}/{post_id}")
             return comments
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"方式3获取评论失败: {e}")
+
     return []
 
 
 def _group_comments_by_media(comments):
+    """将评论按媒体组分组"""
     units = []
     group_map = {}
     for msg in comments:
@@ -82,6 +94,7 @@ def _group_comments_by_media(comments):
 
 
 async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_list, forward):
+    """转发帖子的所有评论 — 增强版"""
     cfg = forward.comments
     await asyncio.sleep(2)
     comments = await _get_all_comments(client, src_channel_id, src_post_id)
@@ -105,7 +118,7 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
         filtered.append(c)
     if not filtered:
         return 0
-    logging.info(f"帖子 {src_post_id}: {len(filtered)} 条评论")
+    logging.info(f"帖子 {src_post_id}: {len(filtered)} 条评论待转发")
     dest_targets = {}
     for dest_ch in dest_list:
         dest_resolved = dest_ch
@@ -116,6 +129,7 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
                 continue
         dest_post_id = st.get_dest_post_id(src_channel_id, src_post_id, dest_resolved)
         if not dest_post_id:
+            logging.debug(f"评论映射未找到: {src_channel_id}/{src_post_id} -> {dest_resolved}")
             continue
         if cfg.dest_mode == "comments":
             disc_msg = await get_discussion_message(client, dest_resolved, dest_post_id)
@@ -131,44 +145,57 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
                 except Exception:
                     continue
     if not dest_targets:
+        logging.debug(f"帖子 {src_post_id} 没有评论目标")
         return 0
     units = _group_comments_by_media(filtered)
     forwarded = 0
     for unit in units:
         if len(unit) > 1:
+            # 媒体组评论
             tms = await apply_plugins_to_group(unit)
             if not tms or not tms[0]:
                 continue
             for dest_chat_id, dest_reply_to in dest_targets.items():
-                try:
-                    fwded = await send_message(
-                        dest_chat_id, tms[0],
-                        grouped_messages=[tm.message for tm in tms],
-                        grouped_tms=tms,
-                        comment_to_post=dest_reply_to,
-                    )
-                    if fwded:
-                        st.add_comment_mapping(src_channel_id, unit[0].id, dest_chat_id, extract_msg_id(fwded))
-                        forwarded += 1
-                except Exception as e:
-                    logging.error(f"评论媒体组失败: {e}")
+                for attempt in range(3):
+                    try:
+                        fwded = await send_message(
+                            dest_chat_id, tms[0],
+                            grouped_messages=[tm.message for tm in tms],
+                            grouped_tms=tms,
+                            comment_to_post=dest_reply_to,
+                        )
+                        if fwded:
+                            fid = extract_msg_id(fwded[0] if isinstance(fwded, list) else fwded)
+                            st.add_comment_mapping(src_channel_id, unit[0].id, dest_chat_id, fid)
+                            forwarded += 1
+                            break
+                    except Exception as e:
+                        logging.error(f"评论媒体组失败 ({attempt+1}/3): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(5 * (attempt + 1))
             for tm in tms:
                 tm.clear()
         else:
+            # 单条评论
             comment = unit[0]
             tm = await apply_plugins(comment)
             if not tm:
                 continue
             for dest_chat_id, dest_reply_to in dest_targets.items():
-                try:
-                    fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
-                    if fwded:
-                        st.add_comment_mapping(src_channel_id, comment.id, dest_chat_id, extract_msg_id(fwded))
-                        forwarded += 1
-                except Exception as e:
-                    logging.error(f"评论失败: {e}")
+                for attempt in range(3):
+                    try:
+                        fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
+                        if fwded:
+                            st.add_comment_mapping(src_channel_id, comment.id, dest_chat_id, extract_msg_id(fwded))
+                            forwarded += 1
+                            break
+                    except Exception as e:
+                        logging.error(f"评论失败 ({attempt+1}/3): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(5 * (attempt + 1))
             tm.clear()
-        await asyncio.sleep(random.uniform(1, 3))
+        await asyncio.sleep(random.uniform(2, 5))
+    logging.info(f"帖子 {src_post_id} 评论转发完成: {forwarded} 条")
     return forwarded
 
 
@@ -223,6 +250,7 @@ async def forward_job():
                     break
                 try:
                     current_gid = message.grouped_id
+                    # 处理缓冲区中的已完成媒体组
                     if grouped_buffer and (current_gid is None or current_gid not in grouped_buffer):
                         for gid, msgs in list(grouped_buffer.items()):
                             if not msgs:
@@ -237,11 +265,19 @@ async def forward_job():
                                             grouped_tms=tms,
                                         )
                                         if fwded:
-                                            uid = st.EventUid(st.DummyEvent(src, msgs[0].id))
-                                            st.stored[uid] = {d: fwded}
-                                            fid = extract_msg_id(fwded[0] if isinstance(fwded, list) else fwded)
+                                            fwded_list = fwded if isinstance(fwded, list) else [fwded]
+                                            # 为每条消息建立映射
+                                            for i_m, m in enumerate(msgs):
+                                                uid = st.EventUid(st.DummyEvent(src, m.id))
+                                                if i_m < len(fwded_list):
+                                                    st.stored[uid] = {d: fwded_list[i_m]}
+                                                else:
+                                                    st.stored[uid] = {d: fwded_list[0]}
+                                            fid = extract_msg_id(fwded_list[0])
                                             if fid:
-                                                st.add_post_mapping(src, msgs[0].id, d, fid)
+                                                # 为组内每条消息都建帖子映射
+                                                for m in msgs:
+                                                    st.add_post_mapping(src, m.id, d, fid)
                                                 post_count += 1
                                     except Exception as e:
                                         logging.error(f"媒体组失败: {e}")
@@ -260,6 +296,8 @@ async def forward_job():
                     logging.info(f"处理消息: {message.id}")
                     tm = await apply_plugins(message)
                     if not tm:
+                        forward.offset = message.id
+                        write_config(CONFIG, persist=False)
                         continue
                     uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
                     st.stored[uid] = {}
@@ -271,11 +309,7 @@ async def forward_job():
                                 r_uid = st.EventUid(st.DummyEvent(message.chat_id, rmid))
                                 if r_uid in st.stored:
                                     fr = st.stored[r_uid].get(d)
-                                    reply_to_id = (
-                                        fr if isinstance(fr, int)
-                                        else getattr(fr, 'id', None) if fr
-                                        else None
-                                    )
+                                    reply_to_id = extract_msg_id(fr)
                         tm.reply_to = reply_to_id
                         try:
                             fwded = await send_message(d, tm)
@@ -299,6 +333,7 @@ async def forward_job():
                     await asyncio.sleep(fwe.seconds + 10)
                 except Exception as e:
                     logging.exception(f"处理消息出错: {e}")
+            # 处理剩余的媒体组
             for gid, msgs in grouped_buffer.items():
                 if not msgs:
                     continue
@@ -312,9 +347,11 @@ async def forward_job():
                                 grouped_tms=tms,
                             )
                             if fwded:
-                                fid = extract_msg_id(fwded[0] if isinstance(fwded, list) else fwded)
+                                fwded_list = fwded if isinstance(fwded, list) else [fwded]
+                                fid = extract_msg_id(fwded_list[0])
                                 if fid:
-                                    st.add_post_mapping(src, msgs[0].id, d, fid)
+                                    for m in msgs:
+                                        st.add_post_mapping(src, m.id, d, fid)
                                     post_count += 1
                         except Exception as e:
                             logging.error(f"剩余媒体组失败: {e}")
