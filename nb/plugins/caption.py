@@ -29,13 +29,11 @@ class NbCaption(NbPlugin):
         if not self._header and not self._footer:
             return tms
 
-        # 收集所有消息的非空文本
         all_texts = []
         for tm in tms:
             if tm.text and tm.text.strip():
                 all_texts.append(tm.text.strip())
 
-        # 构建完整的 caption
         parts = []
         if self._header:
             parts.append(self._header)
@@ -45,10 +43,7 @@ class NbCaption(NbPlugin):
 
         combined = "\n\n".join(parts) if parts else ""
 
-        # 将合并后的文本赋给第一条消息
         tms[0].text = combined
-        
-        # 清空其他消息的文本，但保留对象本身（这样媒体就不会丢失）
         for i in range(1, len(tms)):
             tms[i].text = ""
 
