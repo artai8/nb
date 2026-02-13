@@ -9,19 +9,9 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
-from telethon.client import TelegramClient
 from telethon.tl.custom.message import Message
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.functions.messages import GetDiscussionMessageRequest, SendMediaRequest, SendMultiMediaRequest
-from telethon.tl.types import (
-    InputDocument,
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputPhoto,
-    InputSingleMedia,
-    MessageMediaDocument,
-    MessageMediaPhoto,
-)
+from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
 import nb.storage as st
 from nb import __version__
@@ -63,20 +53,17 @@ def _get_reply_to_top_id(message) -> Optional[int]:
 
 
 def _extract_channel_post(msg) -> Optional[int]:
-    """从转发的消息中提取原始频道帖子ID"""
     if msg and hasattr(msg, "fwd_from") and msg.fwd_from:
         return getattr(msg.fwd_from, "channel_post", None)
     return None
 
 
 async def get_discussion_message(client, channel_id: int, msg_id: int) -> Optional[Message]:
-    """获取帖子对应的讨论组消息"""
     for attempt in range(COMMENT_MAX_RETRIES):
         try:
             result = await client(GetDiscussionMessageRequest(peer=channel_id, msg_id=msg_id))
             if result and result.messages:
                 msg = result.messages[0]
-                # 缓存映射
                 st.add_discussion_mapping(msg.chat_id, msg.id, msg_id)
                 return msg
             return None
@@ -98,7 +85,6 @@ async def get_discussion_message(client, channel_id: int, msg_id: int) -> Option
 
 
 async def get_discussion_group_id(client, channel_id: int) -> Optional[int]:
-    """获取频道关联的讨论组ID"""
     if channel_id in DISCUSSION_CACHE:
         return DISCUSSION_CACHE[channel_id]
     
@@ -126,7 +112,6 @@ async def get_discussion_group_id(client, channel_id: int) -> Optional[int]:
 
 
 async def preload_discussion_mappings(client, discussion_id: int, limit: int = 500) -> int:
-    """预加载讨论组的帖子映射"""
     count = 0
     try:
         async for msg in client.iter_messages(discussion_id, limit=limit):
@@ -139,191 +124,237 @@ async def preload_discussion_mappings(client, discussion_id: int, limit: int = 5
     return count
 
 
-def _has_spoiler(message) -> bool:
-    if not message or not message.media:
-        return False
-    return getattr(message.media, "spoiler", False)
-
-
-async def _send_single_with_spoiler(client, recipient, message, caption=None, reply_to=None):
-    media = message.media
-    peer = await client.get_input_entity(recipient)
-    if isinstance(media, MessageMediaPhoto) and media.photo:
-        p = media.photo
-        input_media = InputMediaPhoto(
-            id=InputPhoto(id=p.id, access_hash=p.access_hash, file_reference=p.file_reference),
-            spoiler=True
-        )
-    elif isinstance(media, MessageMediaDocument) and media.document:
-        d = media.document
-        input_media = InputMediaDocument(
-            id=InputDocument(id=d.id, access_hash=d.access_hash, file_reference=d.file_reference),
-            spoiler=True
-        )
-    else:
-        raise ValueError(f"不支持的媒体类型: {type(media)}")
-    
-    result = await client(SendMediaRequest(
-        peer=peer,
-        media=input_media,
-        message=caption or "",
-        random_id=random.randrange(-2**63, 2**63),
-        reply_to_msg_id=reply_to
-    ))
-    if hasattr(result, "updates"):
-        for update in result.updates:
-            if hasattr(update, "message"):
-                return update.message
-    return result
-
-
-async def _send_album_with_spoiler(client, recipient, grouped_messages, caption=None, reply_to=None):
-    peer = await client.get_input_entity(recipient)
-    multi_media = []
-    for i, msg in enumerate(grouped_messages):
-        media = msg.media
-        is_spoiler = _has_spoiler(msg)
-        msg_text = caption if (i == 0 and caption) else ""
-        input_media = None
-        if isinstance(media, MessageMediaPhoto) and media.photo:
-            p = media.photo
-            input_media = InputMediaPhoto(
-                id=InputPhoto(id=p.id, access_hash=p.access_hash, file_reference=p.file_reference),
-                spoiler=is_spoiler
-            )
-        elif isinstance(media, MessageMediaDocument) and media.document:
-            d = media.document
-            input_media = InputMediaDocument(
-                id=InputDocument(id=d.id, access_hash=d.access_hash, file_reference=d.file_reference),
-                spoiler=is_spoiler
-            )
-        if input_media is None:
-            continue
-        multi_media.append(InputSingleMedia(
-            media=input_media,
-            random_id=random.randrange(-2**63, 2**63),
-            message=msg_text
-        ))
-    if not multi_media:
-        raise ValueError("没有有效的媒体")
-    kwargs = {"peer": peer, "multi_media": multi_media}
-    if reply_to is not None:
-        kwargs["reply_to_msg_id"] = reply_to
-    result = await client(SendMultiMediaRequest(**kwargs))
-    sent = []
-    if hasattr(result, "updates"):
-        for update in result.updates:
-            if hasattr(update, "message"):
-                sent.append(update.message)
-    return sent if sent else result
-
-
 def platform_info():
     nl = "\n"
     return f"Running nb {__version__}\nPython {sys.version.replace(nl,'')}\nOS {os.name}\nPlatform {platform.system()} {platform.release()}\n{platform.architecture()} {platform.processor()}"
 
 
+async def _download_and_send_media(client, recipient, message, caption=None, reply_to=None):
+    """下载媒体后重新发送（最可靠的方式）"""
+    try:
+        # 下载媒体到内存
+        media_bytes = await client.download_media(message, file=bytes)
+        if not media_bytes:
+            # 没有媒体，只发送文本
+            if caption:
+                return await client.send_message(recipient, caption, reply_to=reply_to)
+            return None
+        
+        # 确定文件名和属性
+        file_name = None
+        if hasattr(message, 'file') and message.file:
+            file_name = message.file.name
+        
+        # 发送下载的媒体
+        return await client.send_file(
+            recipient,
+            media_bytes,
+            caption=caption,
+            reply_to=reply_to,
+            file_name=file_name,
+            supports_streaming=True,
+            force_document=False
+        )
+    except Exception as e:
+        logging.error(f"下载并发送媒体失败: {e}")
+        # 降级：只发送文本
+        if caption:
+            try:
+                return await client.send_message(recipient, caption, reply_to=reply_to)
+            except:
+                pass
+        return None
+
+
+async def _send_media_group(client, recipient, messages, caption=None, reply_to=None):
+    """发送媒体组（下载后重新发送）"""
+    try:
+        files = []
+        for msg in messages:
+            if msg.media:
+                try:
+                    # 下载每个媒体
+                    media_bytes = await client.download_media(msg, file=bytes)
+                    if media_bytes:
+                        files.append(media_bytes)
+                except Exception as e:
+                    logging.warning(f"下载媒体失败: {e}")
+                    continue
+        
+        if not files:
+            # 没有有效媒体，只发送文本
+            if caption:
+                return await client.send_message(recipient, caption, reply_to=reply_to)
+            return None
+        
+        # 发送媒体组
+        return await client.send_file(
+            recipient,
+            files,
+            caption=caption,
+            reply_to=reply_to,
+            supports_streaming=True,
+            force_document=False
+        )
+    except Exception as e:
+        logging.error(f"发送媒体组失败: {e}")
+        # 降级：只发送文本
+        if caption:
+            try:
+                return await client.send_message(recipient, caption, reply_to=reply_to)
+            except:
+                pass
+        return None
+
+
 async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, comment_to_post=None):
-    """发送消息"""
+    """发送消息（稳定版）"""
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
     
-    # 转发模式
-    if CONFIG.show_forwarded_from and grouped_messages:
-        for attempt in range(MAX_RETRIES):
+    # ========== 转发模式 ==========
+    if CONFIG.show_forwarded_from:
+        if grouped_messages:
             try:
                 return await client.forward_messages(recipient, grouped_messages)
             except Exception as e:
-                if "FLOOD_WAIT" in str(e).upper():
-                    wait_match = re.search(r"\d+", str(e))
-                    await asyncio.sleep((int(wait_match.group()) if wait_match else 30) + 10)
-                else:
-                    logging.error(f"转发失败 ({attempt+1}/{MAX_RETRIES}): {e}")
-                await asyncio.sleep(min(5 * 2 ** attempt, 300))
-        return None
+                logging.warning(f"转发失败，尝试下载重发: {e}")
+                # 转发失败，尝试下载重发
+        elif tm.message:
+            try:
+                return await client.forward_messages(recipient, tm.message)
+            except Exception as e:
+                logging.warning(f"转发失败，尝试下载重发: {e}")
     
-    # 媒体组
+    # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
-        combined_caption = "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
-        any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
+        combined_caption = "\n\n".join([
+            gtm.text.strip() for gtm in grouped_tms 
+            if gtm.text and gtm.text.strip()
+        ])
+        
         for attempt in range(MAX_RETRIES):
             try:
-                if any_spoiler:
-                    return await _send_album_with_spoiler(
-                        client, recipient, grouped_messages,
-                        caption=combined_caption or None,
-                        reply_to=effective_reply_to
-                    )
-                else:
-                    files = [msg for msg in grouped_messages if msg.photo or msg.video or msg.gif or msg.document]
-                    if not files:
-                        return await client.send_message(recipient, combined_caption or "空相册", reply_to=effective_reply_to)
-                    return await client.send_file(
-                        recipient, files,
+                # 方法1：直接发送
+                files = [msg for msg in grouped_messages if msg.media]
+                if files:
+                    result = await client.send_file(
+                        recipient,
+                        files,
                         caption=combined_caption or None,
                         reply_to=effective_reply_to,
                         supports_streaming=True,
-                        force_document=False,
-                        allow_cache=False,
-                        parse_mode="md",
+                        force_document=False
                     )
+                    if result:
+                        return result
             except Exception as e:
-                if "FLOOD_WAIT" in str(e).upper():
+                err_str = str(e).upper()
+                if "FLOOD" in err_str:
                     wait_match = re.search(r"\d+", str(e))
-                    await asyncio.sleep((int(wait_match.group()) if wait_match else 30) + 10)
+                    wait_time = int(wait_match.group()) + 10 if wait_match else 60
+                    logging.warning(f"FloodWait {wait_time}秒")
+                    await asyncio.sleep(wait_time)
+                    continue
+                elif "MEDIA" in err_str or "INVALID" in err_str or "FILE_REFERENCE" in err_str:
+                    # 媒体无效，尝试下载重发
+                    logging.warning(f"媒体无效，下载重发: {e}")
+                    try:
+                        return await _send_media_group(
+                            client, recipient, grouped_messages,
+                            caption=combined_caption,
+                            reply_to=effective_reply_to
+                        )
+                    except Exception as e2:
+                        logging.error(f"下载重发也失败: {e2}")
                 else:
                     logging.error(f"媒体组发送失败 ({attempt+1}/{MAX_RETRIES}): {e}")
-                await asyncio.sleep(min(5 * 2 ** attempt, 300))
+                
+                await asyncio.sleep(5 * (attempt + 1))
+        
+        # 最后降级：只发送文本
+        if combined_caption:
+            try:
+                return await client.send_message(recipient, combined_caption, reply_to=effective_reply_to)
+            except:
+                pass
         return None
     
-    # 单条消息
-    processed_markup = getattr(tm, "reply_markup", None)
+    # ========== 单条消息 ==========
+    text = tm.text or ""
+    has_media = tm.message and tm.message.media
     
+    # 如果有新处理过的文件
     if tm.new_file:
         try:
             return await client.send_file(
-                recipient, tm.new_file,
-                caption=tm.text,
+                recipient,
+                tm.new_file,
+                caption=text,
                 reply_to=effective_reply_to,
-                supports_streaming=True,
-                buttons=processed_markup
+                supports_streaming=True
             )
-        except Exception:
+        except Exception as e:
+            logging.error(f"发送处理过的文件失败: {e}")
+            if text:
+                try:
+                    return await client.send_message(recipient, text, reply_to=effective_reply_to)
+                except:
+                    pass
+            return None
+    
+    # 有媒体的消息
+    if has_media:
+        for attempt in range(MAX_RETRIES):
             try:
-                return await client.send_file(
-                    recipient, tm.new_file,
-                    caption=tm.text,
+                # 方法1：直接发送
+                return await client.send_message(
+                    recipient,
+                    text,
+                    file=tm.message.media,
                     reply_to=effective_reply_to,
-                    supports_streaming=True
+                    link_preview=False
                 )
             except Exception as e:
-                logging.error(f"文件发送失败: {e}")
-                return None
-    
-    if _has_spoiler(tm.message):
-        try:
-            return await _send_single_with_spoiler(client, recipient, tm.message, caption=tm.text, reply_to=effective_reply_to)
-        except Exception:
-            pass
-    
-    try:
-        if tm.message.media:
-            return await client.send_message(
-                recipient, tm.text,
-                file=tm.message.media,
-                reply_to=effective_reply_to,
-                link_preview=False,
-                buttons=processed_markup
-            )
-        else:
-            return await client.send_message(
-                recipient, tm.text,
-                reply_to=effective_reply_to,
-                buttons=processed_markup
-            )
-    except Exception as e:
-        logging.error(f"消息发送失败: {e}")
+                err_str = str(e).upper()
+                if "FLOOD" in err_str:
+                    wait_match = re.search(r"\d+", str(e))
+                    wait_time = int(wait_match.group()) + 10 if wait_match else 60
+                    logging.warning(f"FloodWait {wait_time}秒")
+                    await asyncio.sleep(wait_time)
+                    continue
+                elif "MEDIA" in err_str or "INVALID" in err_str or "FILE_REFERENCE" in err_str:
+                    # 方法2：下载后重新发送
+                    logging.warning(f"媒体无效，下载重发: {e}")
+                    try:
+                        return await _download_and_send_media(
+                            client, recipient, tm.message,
+                            caption=text,
+                            reply_to=effective_reply_to
+                        )
+                    except Exception as e2:
+                        logging.error(f"下载重发失败: {e2}")
+                else:
+                    logging.error(f"发送失败 ({attempt+1}/{MAX_RETRIES}): {e}")
+                
+                await asyncio.sleep(5 * (attempt + 1))
+        
+        # 最后降级：只发送文本
+        if text:
+            try:
+                return await client.send_message(recipient, text, reply_to=effective_reply_to)
+            except:
+                pass
         return None
+    
+    # 纯文本消息
+    if text:
+        try:
+            return await client.send_message(recipient, text, reply_to=effective_reply_to)
+        except Exception as e:
+            logging.error(f"发送文本失败: {e}")
+    
+    return None
 
 
 def cleanup(*files):
