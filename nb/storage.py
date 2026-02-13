@@ -29,6 +29,13 @@ class DummyEvent:
         self.id = msg_id
 
 
+class PendingComment:
+    def __init__(self, message: Message, forward):
+        self.message = message
+        self.forward = forward
+        self.attempts = 0
+
+
 stored: Dict[EventUid, Dict[int, Message]] = {}
 CONFIG_TYPE: int = 0
 mycol: Collection = None
@@ -41,6 +48,10 @@ GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 GROUPED_TIMEOUT = 1.5
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
+
+# 新增：延迟评论队列
+PENDING_COMMENTS: Dict[tuple, List[PendingComment]] = {}
+PENDING_COMMENT_LOCK = asyncio.Lock()
 
 
 def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id):
