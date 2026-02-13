@@ -388,7 +388,6 @@ def clean_session_files():
             os.remove(item)
 
 
-# 新增函数：等待目标帖子ID映射建立
 async def wait_for_dest_post_id(src_channel_id: int, src_post_id: int, dest_channel_id: int, timeout: int = 60) -> Optional[int]:
     """等待直到目标帖子ID映射建立，最多等待timeout秒"""
     start = time.time()
