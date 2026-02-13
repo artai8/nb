@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field
 from pymongo.collection import Collection
 from telethon.tl.custom.message import Message
 
@@ -33,7 +33,7 @@ class DummyEvent:
 @dataclass
 class PendingComment:
     message: Message
-    forward: any  # Forward config
+    forward: Any
     source_channel_id: int
     source_post_id: int
     attempts: int = 0
@@ -55,10 +55,9 @@ GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
 
 # 评论相关存储
 PENDING_COMMENTS: Dict[Tuple[int, int], List[PendingComment]] = {}
-PENDING_COMMENT_GROUPS: Dict[int, List[Message]] = {}  # 暂存的评论媒体组
+PENDING_COMMENT_GROUPS: Dict[int, List[Message]] = {}
 PENDING_COMMENT_LOCK = asyncio.Lock()
-COMMENT_BATCH_SIZE = 10  # 批量处理大小
-COMMENT_BATCH_TIMEOUT = 30  # 批量等待超时（秒）
+PROCESSED_COMMENTS: set = set()
 
 
 def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id):
@@ -68,7 +67,7 @@ def add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_post_id)
     post_id_mapping[key][dest_channel_id] = dest_post_id
     if len(post_id_mapping) > KEEP_LAST_MANY_POSTS:
         del post_id_mapping[next(iter(post_id_mapping))]
-    logging.info(f"建立帖子映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}/{dest_post_id}")
+    logging.debug(f"建立帖子映射: {src_channel_id}/{src_post_id} -> {dest_channel_id}/{dest_post_id}")
 
 
 def get_dest_post_id(src_channel_id, src_post_id, dest_channel_id):
@@ -97,7 +96,7 @@ def add_comment_mapping(src_discussion_id, src_comment_id, dest_chat_id, dest_ms
     if key not in comment_msg_mapping:
         comment_msg_mapping[key] = {}
     comment_msg_mapping[key][dest_chat_id] = dest_msg_id
-    logging.info(f"建立评论映射: {src_discussion_id}/{src_comment_id} -> {dest_chat_id}/{dest_msg_id}")
+    logging.debug(f"建立评论映射: {src_discussion_id}/{src_comment_id} -> {dest_chat_id}/{dest_msg_id}")
 
 
 def get_comment_dest(src_discussion_id, src_comment_id):
@@ -140,14 +139,3 @@ def get_grouped_messages(chat_id, msg_id):
         if chat_id in mapping and msg_id in mapping[chat_id]:
             return mapping[chat_id]
     return None
-
-
-def add_pending_comment(comment: PendingComment):
-    """添加待处理评论"""
-    key = (comment.source_channel_id, comment.source_post_id)
-    async def _add():
-        async with PENDING_COMMENT_LOCK:
-            if key not in PENDING_COMMENTS:
-                PENDING_COMMENTS[key] = []
-            PENDING_COMMENTS[key].append(comment)
-    asyncio.create_task(_add())
