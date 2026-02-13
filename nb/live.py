@@ -1,272 +1,201 @@
-import asyncio
-import logging
-from typing import Dict, List, Optional, Union
-from telethon import TelegramClient, events
-from telethon.tl.custom.message import Message
-from nb import config, const
-from nb import storage as st
-from nb.bot import get_events
-from nb.config import CONFIG, get_SESSION
-from nb.plugins import apply_plugins, apply_plugins_to_group, load_async_plugins
-from nb.utils import (
-    clean_session_files, extract_msg_id, send_message,
-    _get_reply_to_msg_id, _get_reply_to_top_id, _extract_channel_post,
-    get_discussion_message, get_discussion_group_id,
-    walk_to_header, preload_discussion_mappings,
-    COMMENT_MAX_RETRIES, COMMENT_RETRY_BASE_DELAY, wait_for_dest_post_id
-)
+# 在文件开头导入部分添加
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, Tuple
 
+# 评论处理相关全局变量
 COMMENT_GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 COMMENT_GROUPED_TIMEOUT = 3.0
+PROCESSED_COMMENTS: Set[int] = set()  # 已处理的评论ID
 
 
-async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
+async def _resolve_channel_post_id_enhanced(client, chat_id, message) -> Optional[int]:
+    """增强版：解析评论所属的主帖子ID"""
+    # 方法1：通过 reply_to_top_id
     top_id = _get_reply_to_top_id(message)
     if top_id is not None:
         cp = st.get_channel_post_id(chat_id, top_id)
         if cp:
             return cp
-        header_id, cp = await walk_to_header(client, chat_id, top_id)
-        if cp:
-            return cp
+        # 尝试获取顶层消息
+        try:
+            top_msg = await client.get_messages(chat_id, ids=top_id)
+            if top_msg:
+                fwd = _extract_channel_post(top_msg)
+                if fwd:
+                    st.add_discussion_mapping(chat_id, top_id, fwd)
+                    return fwd
+        except Exception:
+            pass
+    
+    # 方法2：通过 reply_to_msg_id
     reply_msg_id = _get_reply_to_msg_id(message)
     if reply_msg_id is not None:
         cp = st.get_channel_post_id(chat_id, reply_msg_id)
         if cp:
             return cp
-        header_id, cp = await walk_to_header(client, chat_id, reply_msg_id)
-        if cp:
-            return cp
+        # 尝试获取回复的消息
+        try:
+            reply_msg = await client.get_messages(chat_id, ids=reply_msg_id)
+            if reply_msg:
+                fwd = _extract_channel_post(reply_msg)
+                if fwd:
+                    st.add_discussion_mapping(chat_id, reply_msg_id, fwd)
+                    return fwd
+                # 递归查找
+                return await _resolve_channel_post_id_enhanced(client, chat_id, reply_msg)
+        except Exception:
+            pass
+    
+    # 方法3：向上遍历查找帖子头
+    try:
+        async for msg in client.iter_messages(chat_id, min_id=message.id - 50, max_id=message.id):
+            if msg:
+                fwd = _extract_channel_post(msg)
+                if fwd:
+                    st.add_discussion_mapping(chat_id, msg.id, fwd)
+                    return fwd
+    except Exception:
+        pass
+    
     return None
 
 
-async def _process_single_comment(client, message, forward, dest_map):
-    """处理单条评论（非媒体组）"""
-    tm = await apply_plugins(message)
-    if not tm:
-        return
+async def _find_or_create_dest_mapping(client, src_channel_id, src_post_id, dest_channel_id) -> Optional[int]:
+    """查找或创建目标帖子映射"""
+    # 首先检查现有映射
+    existing = st.get_dest_post_id(src_channel_id, src_post_id, dest_channel_id)
+    if existing:
+        return existing
+    
+    # 尝试通过内容匹配查找
     try:
-        for dest_chat_id, dest_reply_to in dest_map.items():
-            fwded = await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
-            if fwded:
-                st.add_comment_mapping(message.chat_id, message.id, dest_chat_id, extract_msg_id(fwded))
-    finally:
-        tm.clear()
-
-
-async def _process_grouped_comments(client, chat_id, grouped_id, forward):
-    """处理评论媒体组"""
-    if grouped_id not in COMMENT_GROUPED_CACHE:
-        return
-    chat_messages_map = COMMENT_GROUPED_CACHE[grouped_id]
-    messages = chat_messages_map.get(chat_id, [])
-    if not messages:
-        return
-    
-    tms = await apply_plugins_to_group(messages)
-    if not tms or tms[0] is None:
-        return
-    
-    # 解析目标映射（等待主帖完成）
-    src_channel_id = config.comment_sources[chat_id]
-    cp = await _resolve_channel_post_id(client, chat_id, messages[0])
-    if cp is None:
-        return
-    
-    dest_map = {}
-    for dest_ch in forward.dest:
-        dest_resolved = dest_ch
-        if not isinstance(dest_resolved, int):
-            try:
-                dest_resolved = await config.get_id(client, dest_ch)
-            except Exception:
-                continue
+        # 获取源帖子
+        src_msg = await client.get_messages(src_channel_id, ids=src_post_id)
+        if not src_msg:
+            return None
         
-        # 等待目标帖子ID
-        dest_post_id = await wait_for_dest_post_id(src_channel_id, cp, dest_resolved, timeout=120)
-        if dest_post_id is None:
-            logging.warning(f"超时：无法获取目标帖子ID，源={cp}, 目标={dest_resolved}")
-            continue
+        # 在目标频道搜索相似内容
+        search_text = (src_msg.text or "")[:50] if src_msg.text else None
+        if search_text:
+            async for dest_msg in client.iter_messages(dest_channel_id, search=search_text, limit=10):
+                if dest_msg and dest_msg.text and search_text in dest_msg.text:
+                    st.add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_msg.id)
+                    return dest_msg.id
         
-        if forward.comments.dest_mode == "comments":
-            disc_msg = await get_discussion_message(client, dest_resolved, dest_post_id)
-            if disc_msg:
-                dest_map[disc_msg.chat_id] = disc_msg.id
-            else:
-                dest_map[dest_resolved] = dest_post_id
-        elif forward.comments.dest_mode == "discussion":
-            for dg in forward.comments.dest_discussion_groups:
-                dg_id = dg
-                if not isinstance(dg_id, int):
-                    try:
-                        dg_id = await config.get_id(client, dg)
-                    except Exception:
-                        continue
-                dest_map[dg_id] = None
-    
-    if not dest_map:
-        return
-    
-    # 发送媒体组
-    for dest_chat_id, dest_reply_to in dest_map.items():
-        try:
-            fwded = await send_message(
-                dest_chat_id, tms[0],
-                grouped_messages=[tm.message for tm in tms],
-                grouped_tms=tms,
-                comment_to_post=dest_reply_to
-            )
-            if fwded:
-                src_msg = messages[0]
-                st.add_comment_mapping(chat_id, src_msg.id, dest_chat_id, extract_msg_id(fwded))
-        except Exception as e:
-            logging.error(f"评论媒体组发送失败: {e}")
-    
-    for tm in tms:
-        tm.clear()
-
-
-async def _send_comment_with_retry(client, message, forward, dest_map, tm=None, tms=None, grouped_messages=None):
-    for dest_id, dest_top_id in dest_map.items():
-        for attempt in range(COMMENT_MAX_RETRIES):
-            try:
-                if tms and grouped_messages:
-                    fwded = await send_message(dest_id, tms[0], grouped_messages=grouped_messages, grouped_tms=tms, comment_to_post=dest_top_id)
-                else:
-                    fwded = await send_message(dest_id, tm, comment_to_post=dest_top_id)
-                if fwded is not None:
-                    src_msg = grouped_messages[0] if grouped_messages else message
-                    st.add_comment_mapping(message.chat_id, src_msg.id if hasattr(src_msg, 'id') else message.id, dest_id, extract_msg_id(fwded))
-                break
-            except Exception as e:
-                err_str = str(e).upper()
-                if "FLOOD" in err_str:
-                    import re
-                    wait_match = re.search(r'\d+', str(e))
-                    await asyncio.sleep((int(wait_match.group()) if wait_match else 30) + 5)
-                elif attempt < COMMENT_MAX_RETRIES - 1:
-                    await asyncio.sleep(COMMENT_RETRY_BASE_DELAY * (attempt + 1))
-                else:
-                    logging.error(f"评论转发最终失败 dest={dest_id}: {e}")
-
-
-async def _flush_comment_group(grouped_id):
-    if grouped_id not in COMMENT_GROUPED_CACHE:
-        return
-    try:
-        chat_messages_map = COMMENT_GROUPED_CACHE[grouped_id]
-        for chat_id, messages in chat_messages_map.items():
-            if chat_id not in config.comment_sources:
-                continue
-            forward = config.comment_forward_map.get(chat_id)
-            if forward is None or not forward.comments.enabled:
-                continue
-            await _process_grouped_comments(messages[0].client, chat_id, grouped_id, forward)
+        # 通过时间戳匹配（最近24小时内的消息）
+        if src_msg.date:
+            start_time = src_msg.date - timedelta(hours=1)
+            end_time = src_msg.date + timedelta(hours=1)
+            async for dest_msg in client.iter_messages(dest_channel_id, offset_date=end_time, limit=50):
+                if dest_msg and dest_msg.date >= start_time:
+                    # 比较内容相似度
+                    if src_msg.text == dest_msg.text or (src_msg.media and dest_msg.media):
+                        st.add_post_mapping(src_channel_id, src_post_id, dest_channel_id, dest_msg.id)
+                        return dest_msg.id
     except Exception as e:
-        logging.exception(f"处理评论媒体组 {grouped_id} 失败: {e}")
-    finally:
-        COMMENT_GROUPED_CACHE.pop(grouped_id, None)
-        COMMENT_GROUPED_TIMERS.pop(grouped_id, None)
+        logging.error(f"查找映射失败: {e}")
+    
+    return None
 
 
-def _add_comment_to_group_cache(chat_id, grouped_id, message):
-    if grouped_id not in COMMENT_GROUPED_CACHE:
-        COMMENT_GROUPED_CACHE[grouped_id] = {}
-    if chat_id not in COMMENT_GROUPED_CACHE[grouped_id]:
-        COMMENT_GROUPED_CACHE[grouped_id][chat_id] = []
-    COMMENT_GROUPED_CACHE[grouped_id][chat_id].append(message)
-    if grouped_id in COMMENT_GROUPED_TIMERS:
-        COMMENT_GROUPED_TIMERS[grouped_id].cancel()
-    loop = asyncio.get_running_loop()
-    COMMENT_GROUPED_TIMERS[grouped_id] = loop.call_later(
-        COMMENT_GROUPED_TIMEOUT,
-        lambda gid=grouped_id: asyncio.ensure_future(_flush_comment_group(gid)),
-    )
-
-
-async def _send_grouped_messages(grouped_id):
-    if grouped_id not in st.GROUPED_CACHE:
+async def _process_comment_batch(client, comments: List[st.PendingComment]):
+    """批量处理评论"""
+    if not comments:
         return
-    chat_messages_map = st.GROUPED_CACHE[grouped_id]
-    for chat_id, messages in chat_messages_map.items():
-        if chat_id not in config.from_to:
-            continue
-        dest = config.from_to.get(chat_id)
-        tms = await apply_plugins_to_group(messages)
-        if not tms:
-            continue
-        for d in dest:
+    
+    # 按目标分组
+    by_dest = {}
+    for comment in comments:
+        forward = comment.forward
+        src_channel_id = comment.source_channel_id
+        src_post_id = comment.source_post_id
+        
+        for dest_ch in forward.dest:
+            dest_resolved = dest_ch
+            if not isinstance(dest_resolved, int):
+                try:
+                    dest_resolved = await config.get_id(client, dest_ch)
+                except:
+                    continue
+            
+            # 查找或创建映射
+            dest_post_id = await _find_or_create_dest_mapping(client, src_channel_id, src_post_id, dest_resolved)
+            if not dest_post_id:
+                continue
+            
+            key = (dest_resolved, dest_post_id)
+            if key not in by_dest:
+                by_dest[key] = []
+            by_dest[key].append(comment)
+    
+    # 批量发送
+    for (dest_channel_id, dest_post_id), batch in by_dest.items():
+        # 获取目标讨论组
+        disc_msg = await get_discussion_message(client, dest_channel_id, dest_post_id)
+        dest_chat_id = disc_msg.chat_id if disc_msg else dest_channel_id
+        dest_reply_to = disc_msg.id if disc_msg else dest_post_id
+        
+        # 发送每条评论
+        for comment in batch:
+            if comment.message.id in PROCESSED_COMMENTS:
+                continue
+            
             try:
-                fwded_msgs = await send_message(d, tms[0], grouped_messages=[tm.message for tm in tms], grouped_tms=tms)
-                for i, msg in enumerate(messages):
-                    uid = st.EventUid(st.DummyEvent(chat_id, msg.id))
-                    if uid not in st.stored:
-                        st.stored[uid] = {}
-                    if isinstance(fwded_msgs, list) and i < len(fwded_msgs):
-                        st.stored[uid][d] = fwded_msgs[i]
-                    elif not isinstance(fwded_msgs, list):
-                        st.stored[uid][d] = fwded_msgs
-                    if i == 0:
-                        fid = extract_msg_id(fwded_msgs[0] if isinstance(fwded_msgs, list) else fwded_msgs)
-                        if fid is not None:
-                            st.add_post_mapping(chat_id, msg.id, d, fid)
+                # 处理媒体组
+                if comment.grouped_id and comment.grouped_id in st.PENDING_COMMENT_GROUPS:
+                    messages = st.PENDING_COMMENT_GROUPS[comment.grouped_id]
+                    tms = await apply_plugins_to_group(messages)
+                    if tms:
+                        await send_message(
+                            dest_chat_id, tms[0],
+                            grouped_messages=[tm.message for tm in tms],
+                            grouped_tms=tms,
+                            comment_to_post=dest_reply_to
+                        )
+                        for tm in tms:
+                            tm.clear()
+                    st.PENDING_COMMENT_GROUPS.pop(comment.grouped_id, None)
+                else:
+                    # 单条评论
+                    tm = await apply_plugins(comment.message)
+                    if tm:
+                        await send_message(dest_chat_id, tm, comment_to_post=dest_reply_to)
+                        tm.clear()
+                
+                PROCESSED_COMMENTS.add(comment.message.id)
+                st.add_comment_mapping(
+                    comment.message.chat_id,
+                    comment.message.id,
+                    dest_chat_id,
+                    dest_reply_to
+                )
             except Exception as e:
-                logging.critical(f"live组播失败: {e}")
-    st.GROUPED_CACHE.pop(grouped_id, None)
-    st.GROUPED_TIMERS.pop(grouped_id, None)
-    st.GROUPED_MAPPING.pop(grouped_id, None)
-
-
-async def new_message_handler(event):
-    chat_id = event.chat_id
-    if chat_id not in config.from_to:
-        return
-    message = event.message
-    if message.grouped_id is not None:
-        st.add_to_group_cache(chat_id, message.grouped_id, message)
-        return
-    uid = st.EventUid(event)
-    if len(st.stored) > const.KEEP_LAST_MANY:
-        del st.stored[next(iter(st.stored))]
-    dest = config.from_to.get(chat_id)
-    tm = await apply_plugins(message)
-    if not tm:
-        return
-    st.stored[uid] = {}
-    for d in dest:
-        reply_to_id = None
-        if event.is_reply:
-            rmid = _get_reply_to_msg_id(event.message)
-            if rmid is not None:
-                r_uid = st.EventUid(st.DummyEvent(chat_id, rmid))
-                if r_uid in st.stored:
-                    reply_to_id = extract_msg_id(st.stored[r_uid].get(d))
-        tm.reply_to = reply_to_id
-        try:
-            fwded = await send_message(d, tm)
-            if fwded is not None:
-                st.stored[uid][d] = fwded
-                fid = extract_msg_id(fwded)
-                if fid is not None:
-                    st.add_post_mapping(chat_id, message.id, d, fid)
-        except Exception as e:
-            logging.error(f"live发送失败: {e}")
-    tm.clear()
+                logging.error(f"评论发送失败: {e}")
 
 
 async def comment_message_handler(event):
+    """重写的评论处理器"""
     chat_id = event.chat_id
     message = event.message
+    
+    # 检查是否在监听的讨论组中
     if chat_id not in config.comment_sources:
         return
+    
     forward = config.comment_forward_map.get(chat_id)
-    if forward is None or not forward.comments.enabled:
+    if not forward or not forward.comments.enabled:
         return
+    
+    # 检查是否是帖子头消息
     cp = _extract_channel_post(message)
     if cp:
         st.add_discussion_mapping(chat_id, message.id, cp)
+        logging.info(f"发现帖子头: 讨论组={chat_id}/{message.id} -> 频道帖子={cp}")
         return
+    
+    # 过滤
     if forward.comments.only_media and not message.media:
         return
     if not forward.comments.include_text_comments and not message.media:
@@ -276,227 +205,77 @@ async def comment_message_handler(event):
             sender = await event.get_sender()
             if sender and getattr(sender, 'bot', False):
                 return
-        except Exception:
+        except:
             pass
+    
+    # 解析所属主帖子
+    src_post_id = await _resolve_channel_post_id_enhanced(event.client, chat_id, message)
+    if not src_post_id:
+        logging.warning(f"无法解析评论所属帖子: chat={chat_id} msg={message.id}")
+        # 尝试加入延迟队列（假设主帖子稍后会出现）
+        src_channel_id = config.comment_sources[chat_id]
+        # 使用消息ID作为临时帖子ID
+        src_post_id = message.id // 100  # 粗略估计
+    else:
+        src_channel_id = config.comment_sources[chat_id]
+    
+    # 处理媒体组
     if message.grouped_id is not None:
-        _add_comment_to_group_cache(chat_id, message.grouped_id, message)
+        if message.grouped_id not in st.PENDING_COMMENT_GROUPS:
+            st.PENDING_COMMENT_GROUPS[message.grouped_id] = []
+        st.PENDING_COMMENT_GROUPS[message.grouped_id].append(message)
+        
+        # 设置定时器
+        async def flush_group():
+            await asyncio.sleep(2)
+            if message.grouped_id in st.PENDING_COMMENT_GROUPS:
+                messages = st.PENDING_COMMENT_GROUPS[message.grouped_id]
+                if messages:
+                    comment = st.PendingComment(
+                        message=messages[0],
+                        forward=forward,
+                        source_channel_id=src_channel_id,
+                        source_post_id=src_post_id,
+                        grouped_id=message.grouped_id
+                    )
+                    await _process_comment_batch(event.client, [comment])
+        
+        asyncio.create_task(flush_group())
         return
-
-    # --- 单条评论处理 ---
-    cp = await _resolve_channel_post_id(event.client, chat_id, message)
-    if cp is None:
-        logging.warning(f"无法解析评论所属帖子: {message.id}")
-        return
-
-    src_channel_id = config.comment_sources[chat_id]
-    dest_map = {}
-    ready_dests = []
-    pending_dests = []
-
-    for dest_ch in forward.dest:
-        dest_resolved = dest_ch
-        if not isinstance(dest_resolved, int):
-            try:
-                dest_resolved = await config.get_id(event.client, dest_ch)
-            except Exception:
-                continue
-
-        dest_post_id = st.get_dest_post_id(src_channel_id, cp, dest_resolved)
-        if dest_post_id is None:
-            pending_dests.append(dest_resolved)
-        else:
-            ready_dests.append((dest_resolved, dest_post_id))
-
-    # 如果有 ready 的目标，立即发送
-    if ready_dests:
-        for dest_resolved, dest_post_id in ready_dests:
-            if forward.comments.dest_mode == "comments":
-                disc_msg = await get_discussion_message(event.client, dest_resolved, dest_post_id)
-                if disc_msg:
-                    dest_map[disc_msg.chat_id] = disc_msg.id
-                else:
-                    dest_map[dest_resolved] = dest_post_id
-            elif forward.comments.dest_mode == "discussion":
-                for dg in forward.comments.dest_discussion_groups:
-                    dg_id = dg
-                    if not isinstance(dg_id, int):
-                        try:
-                            dg_id = await config.get_id(event.client, dg)
-                        except Exception:
-                            continue
-                    dest_map[dg_id] = None
-
-        if dest_map:
-            await _process_single_comment(event.client, message, forward, dest_map)
-
-    # 如果还有 pending 的目标，加入延迟队列
-    if pending_dests:
-        async with st.PENDING_COMMENT_LOCK:
-            key = (chat_id, cp)
-            if key not in st.PENDING_COMMENTS:
-                st.PENDING_COMMENTS[key] = []
-            st.PENDING_COMMENTS[key].append(PendingComment(message, forward))
+    
+    # 创建待处理评论
+    comment = st.PendingComment(
+        message=message,
+        forward=forward,
+        source_channel_id=src_channel_id,
+        source_post_id=src_post_id
+    )
+    
+    # 立即尝试处理
+    await _process_comment_batch(event.client, [comment])
 
 
-async def edited_message_handler(event):
-    chat_id = event.chat_id
-    if chat_id not in config.from_to:
-        return
-    uid = st.EventUid(event)
-    if uid not in st.stored:
-        return
-    if CONFIG.live.delete_on_edit and event.message.text == CONFIG.live.delete_on_edit:
-        for d in config.from_to.get(chat_id, []):
-            mid = extract_msg_id(st.stored[uid].get(d))
-            if mid is not None:
-                try:
-                    await event.client.delete_messages(d, mid)
-                except Exception:
-                    pass
-        try:
-            await event.message.delete()
-        except Exception:
-            pass
-        del st.stored[uid]
-        return
-    tm = await apply_plugins(event.message)
-    if not tm:
-        return
-    for d in config.from_to.get(chat_id, []):
-        mid = extract_msg_id(st.stored[uid].get(d))
-        if mid is not None:
-            try:
-                await event.client.edit_message(d, mid, tm.text)
-            except Exception:
-                pass
-    tm.clear()
-
-
-async def deleted_message_handler(event):
-    for did in event.deleted_ids:
-        for chat_id in list(config.from_to.keys()):
-            uid = st.EventUid(st.DummyEvent(chat_id, did))
-            if uid not in st.stored:
-                continue
-            for d, fwded in st.stored[uid].items():
-                mid = extract_msg_id(fwded)
-                if mid is not None:
-                    try:
-                        await event.client.delete_messages(d, mid)
-                    except Exception:
-                        pass
-            del st.stored[uid]
-
-
-ALL_EVENTS = {
-    "new": (new_message_handler, events.NewMessage()),
-    "edited": (edited_message_handler, events.MessageEdited()),
-    "deleted": (deleted_message_handler, events.MessageDeleted()),
-}
-
-
-async def _setup_comment_listeners(client):
-    comment_sources = {}
-    comment_forward_map = {}
-    for forward in CONFIG.forwards:
-        if not forward.use_this or not forward.comments.enabled:
-            continue
-        src = forward.source
-        if not isinstance(src, int):
-            try:
-                src = await config.get_id(client, forward.source)
-            except Exception:
-                continue
-        if forward.comments.source_mode == "discussion":
-            dg = forward.comments.source_discussion_group
-            if dg is None:
-                continue
-            if not isinstance(dg, int):
-                try:
-                    dg = await config.get_id(client, dg)
-                except Exception:
-                    continue
-            comment_sources[dg] = src
-            comment_forward_map[dg] = forward
-            logging.info(f"评论监听(手动): 讨论组={dg} -> 源频道={src}")
-        else:
-            dg_id = await get_discussion_group_id(client, src)
-            if dg_id is None:
-                logging.warning(f"无法获取频道 {src} 的讨论组")
-                continue
-            comment_sources[dg_id] = src
-            comment_forward_map[dg_id] = forward
-            logging.info(f"评论监听(自动): 讨论组={dg_id} -> 源频道={src}")
-    return comment_sources, comment_forward_map
-
-
-async def _process_pending_comments(client):
-    """后台任务：定期检查并处理延迟评论"""
+async def _periodic_comment_processor(client):
+    """定期处理待发送评论"""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
+        
         async with st.PENDING_COMMENT_LOCK:
-            keys_to_remove = []
-            for (chat_id, src_post_id), pending_list in list(st.PENDING_COMMENTS.items()):
-                src_channel_id = config.comment_sources.get(chat_id)
-                if not src_channel_id:
-                    keys_to_remove.append((chat_id, src_post_id))
-                    continue
-                
-                forward = config.comment_forward_map.get(chat_id)
-                if not forward:
-                    keys_to_remove.append((chat_id, src_post_id))
-                    continue
-                
-                ready_dests = []
-                for dest_ch in forward.dest:
-                    dest_resolved = dest_ch
-                    if not isinstance(dest_resolved, int):
-                        try:
-                            dest_resolved = await config.get_id(client, dest_ch)
-                        except:
-                            continue
-                    if st.get_dest_post_id(src_channel_id, src_post_id, dest_resolved) is not None:
-                        ready_dests.append(dest_resolved)
-                
-                if not ready_dests:
-                    continue
-                
-                # 处理这批评论
-                new_pending = []
-                for pc in pending_list:
-                    dest_map = {}
-                    for dest_resolved in ready_dests:
-                        dest_post_id = st.get_dest_post_id(src_channel_id, src_post_id, dest_resolved)
-                        if forward.comments.dest_mode == "comments":
-                            disc_msg = await get_discussion_message(client, dest_resolved, dest_post_id)
-                            if disc_msg:
-                                dest_map[disc_msg.chat_id] = disc_msg.id
-                            else:
-                                dest_map[dest_resolved] = dest_post_id
-                        else:
-                            for dg in forward.comments.dest_discussion_groups:
-                                try:
-                                    dg_id = await config.get_id(client, dg) if not isinstance(dg, int) else dg
-                                    dest_map[dg_id] = None
-                                except:
-                                    continue
-                    
-                    if dest_map:
-                        await _process_single_comment(client, pc.message, forward, dest_map)
-                    else:
-                        pc.attempts += 1
-                        if pc.attempts < 3:
-                            new_pending.append(pc)
-                
-                if new_pending:
-                    st.PENDING_COMMENTS[(chat_id, src_post_id)] = new_pending
-                else:
-                    keys_to_remove.append((chat_id, src_post_id))
+            if not st.PENDING_COMMENTS:
+                continue
             
-            for key in keys_to_remove:
-                st.PENDING_COMMENTS.pop(key, None)
+            # 批量处理
+            all_comments = []
+            for comments in st.PENDING_COMMENTS.values():
+                all_comments.extend(comments)
+            
+            if all_comments:
+                logging.info(f"处理 {len(all_comments)} 条待发送评论")
+                await _process_comment_batch(client, all_comments)
+                st.PENDING_COMMENTS.clear()
 
 
+# 修改 start_sync 函数，添加评论处理器
 async def start_sync():
     clean_session_files()
     await load_async_plugins()
@@ -524,6 +303,9 @@ async def start_sync():
                 count = await preload_discussion_mappings(client, discussion_id, limit=2000)
                 logging.info(f"预加载 {count} 个帖子映射: 讨论组={discussion_id}")
             client.add_event_handler(comment_message_handler, events.NewMessage(chats=list(cs.keys())))
+            
+            # 启动定期处理器
+            asyncio.create_task(_periodic_comment_processor(client))
             logging.info(f"评论监听已启动, 监听讨论组: {list(cs.keys())}")
         else:
             logging.warning("未找到任何可用的讨论组, 评论转发将不会工作")
@@ -531,8 +313,5 @@ async def start_sync():
         if not CONFIG.live.delete_sync and key == "deleted":
             continue
         client.add_event_handler(*val)
-    
-    # 启动延迟评论处理器
-    asyncio.create_task(_process_pending_comments(client))
     logging.info("live模式启动完成")
     await client.run_until_disconnected()
