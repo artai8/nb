@@ -71,6 +71,8 @@ class NbMessage:
         self.reply_to = None
         self.client = self.message.client
         self.reply_markup = self._build_reply_markup()
+        # 标记 caption 插件是否已处理过，防止 send_message 重复拼接
+        self._caption_applied = False
 
     def _build_reply_markup(self):
         original_markup = self.message.reply_markup
