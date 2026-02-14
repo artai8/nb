@@ -151,16 +151,23 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
     forwarded = 0
     for unit in units:
         if len(unit) > 1:
-            # 媒体组评论
+            # 媒体组评论 — 关键修复
             tms = await apply_plugins_to_group(unit)
             if not tms or not tms[0]:
                 continue
+            
+            # 对齐
+            if len(tms) != len(unit):
+                aligned_unit = [tm.message for tm in tms]
+            else:
+                aligned_unit = unit
+            
             for dest_chat_id, dest_reply_to in dest_targets.items():
                 for attempt in range(3):
                     try:
                         fwded = await send_message(
                             dest_chat_id, tms[0],
-                            grouped_messages=[tm.message for tm in tms],
+                            grouped_messages=aligned_unit,
                             grouped_tms=tms,
                             comment_to_post=dest_reply_to,
                         )
@@ -173,6 +180,7 @@ async def _forward_comments_for_post(client, src_channel_id, src_post_id, dest_l
                         logging.error(f"评论媒体组失败 ({attempt+1}/3): {e}")
                         if attempt < 2:
                             await asyncio.sleep(5 * (attempt + 1))
+            
             for tm in tms:
                 tm.clear()
         else:
@@ -255,50 +263,75 @@ async def forward_job():
                         for gid, msgs in list(grouped_buffer.items()):
                             if not msgs:
                                 continue
+                            
+                            # 关键修复：应用插件并确保对齐
                             tms = await apply_plugins_to_group(msgs)
+                            if not tms:
+                                logging.warning(f"Past模式: 媒体组 {gid} 所有消息被过滤")
+                                grouped_buffer.pop(gid, None)
+                                continue
+                            
+                            # 对齐：如果过滤了，用 tm.message
+                            if len(tms) != len(msgs):
+                                aligned_msgs = [tm.message for tm in tms]
+                            else:
+                                aligned_msgs = msgs
+                            
                             if tms and tms[0]:
                                 for d in dest:
                                     try:
                                         fwded = await send_message(
                                             d, tms[0],
-                                            grouped_messages=[tm.message for tm in tms],
+                                            grouped_messages=aligned_msgs,
                                             grouped_tms=tms,
                                         )
                                         if fwded:
                                             fwded_list = fwded if isinstance(fwded, list) else [fwded]
-                                            # 为每条消息建立映射
-                                            for i_m, m in enumerate(msgs):
+                                            
+                                            # 建立映射（修复：为每条消息建立）
+                                            for i_m, m in enumerate(aligned_msgs):
                                                 uid = st.EventUid(st.DummyEvent(src, m.id))
                                                 if i_m < len(fwded_list):
                                                     st.stored[uid] = {d: fwded_list[i_m]}
                                                 else:
-                                                    st.stored[uid] = {d: fwded_list[0]}
+                                                    st.stored[uid] = {d: fwded_list[0] if fwded_list else None}
+                                            
                                             fid = extract_msg_id(fwded_list[0])
                                             if fid:
-                                                # 为组内每条消息都建帖子映射
-                                                for m in msgs:
+                                                for m in aligned_msgs:
                                                     st.add_post_mapping(src, m.id, d, fid)
                                                 post_count += 1
                                     except Exception as e:
-                                        logging.error(f"媒体组失败: {e}")
+                                        logging.error(f"Past模式媒体组失败: {e}")
+                                
                                 for tm in tms:
                                     tm.clear()
-                            if forward.comments.enabled:
-                                cc = await _forward_comments_for_post(client, src, msgs[0].id, dest, forward)
+                            
+                            # 评论转发
+                            if forward.comments.enabled and aligned_msgs:
+                                cc = await _forward_comments_for_post(client, src, aligned_msgs[0].id, dest, forward)
                                 comment_count += cc
-                            forward.offset = max(m.id for m in msgs)
-                            write_config(CONFIG, persist=False)
+                            
+                            # 更新 offset 为组内最大 ID
+                            if aligned_msgs:
+                                forward.offset = max(m.id for m in aligned_msgs)
+                                write_config(CONFIG, persist=False)
+                            
                             await asyncio.sleep(random.randint(30, 120))
-                        grouped_buffer.clear()
+                            grouped_buffer.pop(gid, None)
+                    
                     if current_gid is not None:
                         grouped_buffer[current_gid].append(message)
                         continue
+                    
+                    # 单条消息处理
                     logging.info(f"处理消息: {message.id}")
                     tm = await apply_plugins(message)
                     if not tm:
                         forward.offset = message.id
                         write_config(CONFIG, persist=False)
                         continue
+                    
                     uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
                     st.stored[uid] = {}
                     for d in dest:
@@ -324,41 +357,59 @@ async def forward_job():
                     post_count += 1
                     forward.offset = message.id
                     write_config(CONFIG, persist=False)
+                    
+                    # 评论转发
                     if forward.comments.enabled:
                         cc = await _forward_comments_for_post(client, src, message.id, dest, forward)
                         comment_count += cc
+                    
                     await asyncio.sleep(random.randint(30, 120))
+                    
                 except FloodWaitError as fwe:
                     logging.warning(f"FloodWait: {fwe.seconds}秒")
                     await asyncio.sleep(fwe.seconds + 10)
                 except Exception as e:
                     logging.exception(f"处理消息出错: {e}")
+            
             # 处理剩余的媒体组
             for gid, msgs in grouped_buffer.items():
                 if not msgs:
                     continue
+                
                 tms = await apply_plugins_to_group(msgs)
-                if tms and tms[0]:
-                    for d in dest:
-                        try:
-                            fwded = await send_message(
-                                d, tms[0],
-                                grouped_messages=[tm.message for tm in tms],
-                                grouped_tms=tms,
-                            )
-                            if fwded:
-                                fwded_list = fwded if isinstance(fwded, list) else [fwded]
-                                fid = extract_msg_id(fwded_list[0])
-                                if fid:
-                                    for m in msgs:
-                                        st.add_post_mapping(src, m.id, d, fid)
-                                    post_count += 1
-                        except Exception as e:
-                            logging.error(f"剩余媒体组失败: {e}")
-                    for tm in tms:
-                        tm.clear()
-                if forward.comments.enabled:
-                    cc = await _forward_comments_for_post(client, src, msgs[0].id, dest, forward)
+                if not tms or not tms[0]:
+                    continue
+                
+                # 对齐
+                if len(tms) != len(msgs):
+                    aligned_msgs = [tm.message for tm in tms]
+                else:
+                    aligned_msgs = msgs
+                
+                for d in dest:
+                    try:
+                        fwded = await send_message(
+                            d, tms[0],
+                            grouped_messages=aligned_msgs,
+                            grouped_tms=tms,
+                        )
+                        if fwded:
+                            fwded_list = fwded if isinstance(fwded, list) else [fwded]
+                            fid = extract_msg_id(fwded_list[0])
+                            if fid:
+                                for m in aligned_msgs:
+                                    st.add_post_mapping(src, m.id, d, fid)
+                                post_count += 1
+                    except Exception as e:
+                        logging.error(f"剩余媒体组失败: {e}")
+                
+                for tm in tms:
+                    tm.clear()
+                
+                # 评论转发
+                if forward.comments.enabled and aligned_msgs:
+                    cc = await _forward_comments_for_post(client, src, aligned_msgs[0].id, dest, forward)
                     comment_count += cc
+            
             logging.info(f"频道 {src} 完成: 帖子={post_count}, 评论={comment_count}")
         logging.info("Past模式完成")
