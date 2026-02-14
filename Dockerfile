@@ -69,7 +69,7 @@ RUN python -c "import pydantic; print(f'Pydantic Version: {pydantic.VERSION}'); 
 # 端口与权限设置 (适配 HF)
 EXPOSE 7860
 EXPOSE 8501
-ENV PORT=7860
+ENV PORT=8501
 RUN chmod -R 777 /app
 
 CMD ["python", "-m", "nb.web_ui.run"]
