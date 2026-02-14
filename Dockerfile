@@ -8,7 +8,7 @@ RUN printf '"""Package nb."""\ntry:\n    from importlib.metadata import version\
 RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then mv nb/web_ui/page nb/web_ui/pages; fi
 RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/null || true
 RUN pip install --no-cache-dir \
-    altair==4.2.2 streamlit==1.15.2 pymongo==4.3.3 pydantic==1.10.2 \
+    altair==4.2.2 streamlit==1.54.0 pymongo==4.3.3 pydantic==1.10.2 \
     python-dotenv==0.21.0 "PyYAML>=6.0,<7.0" requests==2.28.1 typer==0.7.0 \
     Telethon==1.42.0 cryptg==0.4.0 "Pillow>=9.3,<11.0" hachoir==3.1.3 \
     aiohttp==3.8.3 tg-login==0.0.4 watermark.py==0.0.3 pytesseract==0.3.7 \
