@@ -4,6 +4,8 @@ import logging
 
 import yaml
 from telethon import events
+# ✅ 新增：导入 Pydantic 的校验异常
+from pydantic import ValidationError
 
 from nb import config, const, plugins
 from nb.bot.utils import (
@@ -40,7 +42,12 @@ async def forward_command_handler(event):
             raise ValueError(f"{notes}\n{display_forwards(config.CONFIG.forwards)}")
 
         parsed_args = yaml.safe_load(args)
+        if not isinstance(parsed_args, dict):
+            raise ValueError("Invalid format. Please provide valid YAML/JSON.")
+
+        # ✅ Pydantic v2 实例化
         forward = config.Forward(**parsed_args)
+        
         try:
             remove_source(forward.source, config.CONFIG.forwards)
         except:
@@ -50,9 +57,12 @@ async def forward_command_handler(event):
 
         await event.respond("Success")
         write_config(config.CONFIG)
-    except ValueError as err:
-        logging.error(err)
-        await event.respond(str(err))
+    
+    # ✅ 修复：同时捕获 ValueError 和 ValidationError
+    except (ValueError, ValidationError) as err:
+        logging.error(f"Command Error: {err}")
+        # 转换为字符串发送给用户
+        await event.respond(f"Error:\n`{str(err)}`")
 
     finally:
         raise events.StopPropagation
@@ -76,13 +86,18 @@ async def remove_command_handler(event):
             raise ValueError(f"{notes}\n{display_forwards(config.CONFIG.forwards)}")
 
         parsed_args = yaml.safe_load(args)
+        if not isinstance(parsed_args, dict):
+            raise ValueError("Invalid YAML.")
+            
         source_to_remove = parsed_args.get("source")
         CONFIG.forwards = remove_source(source_to_remove, config.CONFIG.forwards)
         config.from_to = await config.load_from_to(event.client, config.CONFIG.forwards)
 
         await event.respond("Success")
         write_config(config.CONFIG)
-    except ValueError as err:
+    
+    # ✅ 修复：异常捕获
+    except (ValueError, ValidationError) as err:
         logging.error(err)
         await event.respond(str(err))
 
@@ -113,7 +128,7 @@ async def style_command_handler(event):
         CONFIG.plugins.fmt.style = args
         await event.respond("Success")
         write_config(CONFIG)
-    except ValueError as err:
+    except Exception as err:
         logging.error(err)
         await event.respond(str(err))
 
