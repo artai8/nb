@@ -114,7 +114,7 @@ async def _handle_flood_wait(e: Exception) -> int:
 
 
 # =====================================================================
-#  判断插件是否修改了消息
+#  判断是否需要 copy
 # =====================================================================
 
 def _plugins_modified(tm: "NbMessage") -> bool:
@@ -126,11 +126,6 @@ def _plugins_modified(tm: "NbMessage") -> bool:
     if original_text != current_text:
         return True
 
-    original_markup = tm.message.reply_markup
-    current_markup = getattr(tm, 'reply_markup', None)
-    if original_markup is not None and current_markup is None:
-        return True
-
     msg_client = getattr(tm.message, '_client', None) or getattr(tm.message, 'client', None)
     if msg_client is not None and tm.client is not msg_client:
         return True
@@ -139,12 +134,11 @@ def _plugins_modified(tm: "NbMessage") -> bool:
 
 
 def _need_copy(tm: "NbMessage") -> bool:
-    """判断是否需要用 copy 方式（下载+上传）而不是 forward。
+    """判断是否需要 copy 方式（下载+上传）。
 
-    以下情况必须 copy：
-    1. 插件修改了内容
-    2. 用户要求隐藏 "Forwarded from"（show_forwarded_from=False）
-    3. 需要发送到评论区（reply_to 指定帖子）
+    必须 copy 的情况：
+    1. 插件修改了内容（文本/文件/sender）
+    2. 用户要隐藏 "Forwarded from"
     """
     if _plugins_modified(tm):
         return True
@@ -188,6 +182,7 @@ async def _download_media_robust(
         logging.debug(f"下载方法1失败: {e}")
 
     # 方法2: 刷新消息 + 临时文件
+    temp_path = None
     try:
         refreshed = await download_client.get_messages(chat_id, ids=msg_id)
         if refreshed and refreshed.media:
@@ -196,11 +191,18 @@ async def _download_media_robust(
                 with open(temp_path, "rb") as f:
                     data = f.read()
                 os.remove(temp_path)
+                temp_path = None
                 if data:
                     logging.info(f"✅ 下载成功(file) msg={msg_id} ({len(data)} bytes)")
                     return data
     except Exception as e:
         logging.debug(f"下载方法2失败: {e}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
     # 方法3: client.download_media
     try:
@@ -214,22 +216,33 @@ async def _download_media_robust(
         logging.debug(f"下载方法3失败: {e}")
 
     # 方法4: 原始消息
-    for method_name, dl_func in [
-        ("原始bytes", lambda: message.download_media(file=bytes)),
-        ("原始file", lambda: message.download_media(file="")),
-    ]:
-        try:
-            result = await dl_func()
-            if method_name == "原始file" and result and os.path.exists(result):
-                with open(result, "rb") as f:
-                    data = f.read()
-                os.remove(result)
-                result = data
-            if result:
-                logging.info(f"✅ 下载成功({method_name}) msg={msg_id} ({len(result)} bytes)")
-                return result
-        except Exception as e:
-            logging.debug(f"下载{method_name}失败: {e}")
+    try:
+        data = await message.download_media(file=bytes)
+        if data:
+            logging.info(f"✅ 下载成功(原始) msg={msg_id} ({len(data)} bytes)")
+            return data
+    except Exception as e:
+        logging.debug(f"下载方法4失败: {e}")
+
+    temp_path = None
+    try:
+        temp_path = await message.download_media(file="")
+        if temp_path and os.path.exists(temp_path):
+            with open(temp_path, "rb") as f:
+                data = f.read()
+            os.remove(temp_path)
+            temp_path = None
+            if data:
+                logging.info(f"✅ 下载成功(原始file) msg={msg_id} ({len(data)} bytes)")
+                return data
+    except Exception as e:
+        logging.debug(f"下载方法5失败: {e}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
     logging.error(f"❌ 所有下载方式均失败 msg={msg_id}")
     return None
@@ -290,7 +303,7 @@ async def _forward_album(
 
 
 # =====================================================================
-#  copy 方式发送（下载+上传）
+#  copy 方式发送（下载+上传，去除 "Forwarded from"）
 # =====================================================================
 
 async def _copy_single(
@@ -300,7 +313,9 @@ async def _copy_single(
     tm: "NbMessage",
     reply_to: Optional[int] = None,
 ) -> Optional[Message]:
-    """复制发送单条消息。失败则降级为 forward。"""
+    """复制发送单条消息：下载媒体再上传，不带来源标记。
+    如果所有 copy 方式都失败，降级为 forward（会带来源标记）。
+    """
     processed_markup = getattr(tm, 'reply_markup', None)
 
     # 插件生成了新文件
@@ -349,6 +364,7 @@ async def _copy_single(
                     await _handle_flood_wait(e)
                 else:
                     logging.warning(f"⚠️ copy 失败 (attempt {attempt+1}): {e}")
+                    # 去掉按钮重试
                     if processed_markup is not None:
                         try:
                             return await send_client.send_file(
@@ -360,8 +376,8 @@ async def _copy_single(
                             pass
                     await asyncio.sleep(RETRY_BASE_DELAY * (attempt + 1))
 
-    # 全部失败 → 降级 forward（但 forward 不支持 reply_to）
-    logging.warning("⚠️ copy 失败，降级为 forward（注意：评论区位置可能丢失）")
+    # 全部失败 → 降级 forward
+    logging.warning("⚠️ copy 失败，降级为 forward（会带来源标记）")
     return await _forward_single(send_client, recipient, tm.message)
 
 
@@ -374,7 +390,6 @@ async def _copy_album(
     reply_to: Optional[int] = None,
 ) -> Optional[List[Message]]:
     """复制发送媒体组。失败则降级为 forward。"""
-    # 合并 caption
     if tms:
         combined_caption = "\n\n".join([
             gtm.text.strip() for gtm in tms
@@ -386,7 +401,6 @@ async def _copy_album(
             if (m.text or "").strip()
         ])
 
-    # 下载所有媒体
     downloaded = []
     for msg in messages:
         if msg.media and (msg.photo or msg.video or msg.gif or msg.document):
@@ -442,49 +456,46 @@ async def send_message(
     """发送消息的统一入口。
 
     策略:
-      - show_forwarded_from=True 且无插件修改 → forward（保留来源标记）
-      - show_forwarded_from=False 或有插件修改 → copy（下载+上传，无来源标记）
-      - 评论区消息 → 强制 copy（需要 reply_to 指定帖子）
+      - show_forwarded_from=True 且无插件修改 且非评论区 → forward
+      - 其他所有情况 → copy（下载+上传），失败降级 forward
     """
     send_client: TelegramClient = tm.client
     download_client: TelegramClient = _get_download_client(tm)
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
-    # 评论区消息必须用 copy（forward 不支持 reply_to 评论帖子）
+    # 评论区消息必须 copy（forward 不支持 reply_to 到评论帖子）
     force_copy = comment_to_post is not None
     need_copy = force_copy or _need_copy(tm)
 
     # === 媒体组 ===
     if grouped_messages:
-        group_need_copy = force_copy
+        group_need_copy = force_copy or (not CONFIG.show_forwarded_from)
         if not group_need_copy and grouped_tms:
             for gtm in grouped_tms:
-                if _need_copy(gtm):
+                if _plugins_modified(gtm):
                     group_need_copy = True
                     break
-        if not group_need_copy and not CONFIG.show_forwarded_from:
-            group_need_copy = True
 
         if group_need_copy:
-            logging.info("📦 媒体组 → copy 方式")
+            logging.info("📦 媒体组 → copy")
             return await _copy_album(
                 send_client, download_client,
                 recipient, grouped_messages, grouped_tms,
                 reply_to=effective_reply_to,
             )
         else:
-            logging.info("📦 媒体组 → forward 方式")
+            logging.info("📦 媒体组 → forward")
             return await _forward_album(send_client, recipient, grouped_messages)
 
     # === 单条消息 ===
     if need_copy:
-        logging.info(f"📝 msg={tm.message.id} → copy 方式")
+        logging.info(f"📝 msg={tm.message.id} → copy")
         return await _copy_single(
             send_client, download_client,
             recipient, tm, reply_to=effective_reply_to,
         )
     else:
-        logging.info(f"📨 msg={tm.message.id} → forward 方式")
+        logging.info(f"📨 msg={tm.message.id} → forward")
         return await _forward_single(send_client, recipient, tm.message)
 
 
