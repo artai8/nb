@@ -98,7 +98,8 @@ async def get_discussion_message(client, channel_id, msg_id) -> Optional[Message
             if any(k in err_str for k in (
                 "MSG_ID_INVALID", "CHANNEL_PRIVATE", "PEER_ID_INVALID"
             )):
-                logging.debug(f"无法获取讨论消息 {channel_id}/{msg_id}: {e}")
+                if attempt == 0:
+                    logging.warning(f"讨论消息无效 {channel_id}/{msg_id}: {e}")
                 return None
             if attempt < COMMENT_MAX_RETRIES - 1:
                 delay = COMMENT_RETRY_BASE_DELAY * (attempt + 1)
@@ -228,7 +229,18 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
                         await asyncio.sleep(3 * (attempt + 1))
         return None
 
+    media_type = type(message.media).__name__ if message.media else "None"
+    msg_id = getattr(message, 'id', '?')
+    chat_id = getattr(message, 'chat_id', '?')
+    logging.info(
+        f"[send_single] media_type={media_type}, msg={chat_id}/{msg_id}, "
+        f"to={recipient}, caption_len={len(cap)}"
+    )
+
+    last_error = None
+
     for attempt in range(MAX_RETRIES):
+        # 尝试1: send_message + file=message.media
         try:
             result = await client.send_message(
                 recipient, cap,
@@ -237,88 +249,91 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
                 link_preview=False,
             )
             if result:
+                logging.info(f"[send_single] 成功(方式1)")
                 return result
         except Exception as e:
+            last_error = e
             err_str = str(e).upper()
+            logging.warning(f"[send_single] 方式1失败({attempt+1}): {type(e).__name__}: {e}")
+
             if "FLOOD" in err_str:
                 wait_match = re.search(r"\d+", str(e))
                 wait_time = int(wait_match.group()) + 10 if wait_match else 60
-                logging.warning(f"FloodWait {wait_time}s")
                 await asyncio.sleep(wait_time)
                 continue
 
-            logging.debug(f"直接发送失败 ({attempt+1}): {e}")
-
+        # 尝试2: 下载后重传
+        try:
             data = await _download_media_bytes(client, message)
             if data:
-                try:
-                    fname = _get_file_name(message)
-                    result = await client.send_file(
-                        recipient, data,
-                        caption=cap if cap else None,
-                        reply_to=reply_to,
-                        file_name=fname,
-                        supports_streaming=True,
-                        force_document=False,
-                    )
-                    if result:
-                        return result
-                except Exception as e2:
-                    logging.error(f"重传失败 ({attempt+1}): {e2}")
-
-            try:
+                logging.info(f"[send_single] 下载成功: {len(data)} bytes")
+                fname = _get_file_name(message)
                 result = await client.send_file(
-                    recipient, message.media,
+                    recipient, data,
                     caption=cap if cap else None,
                     reply_to=reply_to,
+                    file_name=fname,
                     supports_streaming=True,
                     force_document=False,
                 )
                 if result:
+                    logging.info(f"[send_single] 成功(方式2)")
                     return result
-            except Exception as e3:
-                logging.debug(f"send_file media 也失败 ({attempt+1}): {e3}")
+            else:
+                logging.warning(f"[send_single] 下载返回空")
+        except Exception as e2:
+            last_error = e2
+            logging.warning(f"[send_single] 方式2失败({attempt+1}): {type(e2).__name__}: {e2}")
 
-            await asyncio.sleep(3 * (attempt + 1))
+        # 尝试3: send_file + message.media
+        try:
+            result = await client.send_file(
+                recipient, message.media,
+                caption=cap if cap else None,
+                reply_to=reply_to,
+                supports_streaming=True,
+                force_document=False,
+            )
+            if result:
+                logging.info(f"[send_single] 成功(方式3)")
+                return result
+        except Exception as e3:
+            last_error = e3
+            logging.warning(f"[send_single] 方式3失败({attempt+1}): {type(e3).__name__}: {e3}")
+
+        await asyncio.sleep(3 * (attempt + 1))
+
+    logging.error(
+        f"[send_single] 全部失败! media_type={media_type}, "
+        f"msg={chat_id}/{msg_id}, to={recipient}, "
+        f"last_error={type(last_error).__name__}: {last_error}"
+    )
 
     if cap and cap.strip():
         try:
-            logging.warning("所有媒体发送方式失败，降级为纯文本")
+            logging.warning("[send_single] 降级为纯文本")
             return await client.send_message(recipient, cap, reply_to=reply_to)
-        except Exception:
-            pass
+        except Exception as e_text:
+            logging.error(f"[send_single] 纯文本也失败: {e_text}")
     return None
 
 
 def _find_caption_text(grouped_tms):
-    """从 grouped_tms 中找到 caption 文本。
-
-    优先找: 有媒体 + text 非空 + _caption_applied
-    其次:   任意有 text 的
-    返回 caption 字符串或 None
-    """
-    # 1. 有媒体 + 有 text + _caption_applied
     for gtm in grouped_tms:
         if (gtm.file_type != "nofile"
                 and gtm.text
                 and getattr(gtm, '_caption_applied', False)):
             return gtm.text
-
-    # 2. _caption_applied + 有 text（可能是纯文字）
     for gtm in grouped_tms:
         if gtm.text and getattr(gtm, '_caption_applied', False):
             return gtm.text
-
-    # 3. 任意有 text
     for gtm in grouped_tms:
         if gtm.text:
             return gtm.text
-
     return None
 
 
 def _collect_caption_no_plugin(grouped_tms):
-    """caption 插件未处理时，收集所有文本合并。"""
     all_texts = []
     for gtm in grouped_tms:
         content = gtm.text or gtm.raw_text or ""
@@ -328,13 +343,7 @@ def _collect_caption_no_plugin(grouped_tms):
 
 
 async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, comment_to_post=None):
-    """发送消息主函数 — 完全重写版
-
-    关键修复:
-    1. 媒体组: 确保 grouped_messages 和 grouped_tms 对齐
-    2. caption: 正确从 tms 中提取
-    3. 发送: 只发送有 media 的消息，caption 附加到第一个
-    """
+    """发送消息主函数"""
     CONFIG = _get_config()
     client = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
@@ -359,14 +368,12 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
-        # 对齐检查
         if len(grouped_messages) != len(grouped_tms):
             logging.warning(
-                f"[send] 数量不匹配: msgs={len(grouped_messages)} tms={len(grouped_tms)}, 用 tm.message 重建"
+                f"[send] 数量不匹配: msgs={len(grouped_messages)} tms={len(grouped_tms)}"
             )
             grouped_messages = [t.message for t in grouped_tms]
 
-        # 提取 caption
         caption_applied = any(getattr(g, '_caption_applied', False) for g in grouped_tms)
 
         if caption_applied:
@@ -374,29 +381,28 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
         else:
             combined_caption = _collect_caption_no_plugin(grouped_tms)
 
-        # 从 grouped_messages 中筛选有 media 的
         media_messages = [m for m in grouped_messages if _msg_has_media(m)]
 
+        logging.info(
+            f"[send] 媒体组: total={len(grouped_messages)}, "
+            f"media={len(media_messages)}, "
+            f"caption_applied={caption_applied}, "
+            f"caption={repr(combined_caption[:50]) if combined_caption else None}, "
+            f"types=[{', '.join(type(m.media).__name__ if m.media else 'None' for m in grouped_messages)}]"
+        )
+
         if not media_messages:
-            # 没有媒体，只发文本
             logging.warning("[send] 媒体组中没有媒体消息，降级为纯文本")
             if combined_caption and combined_caption.strip():
                 try:
                     return await client.send_message(recipient, combined_caption, reply_to=effective_reply_to)
                 except Exception as e:
-                    logging.error(f"[send] 纯文本降级也失败: {e}")
+                    logging.error(f"[send] 纯文本也失败: {e}")
             return None
 
-        # Telegram caption 限制 1024 字符
         safe_caption = combined_caption
         if safe_caption and len(safe_caption) > 1024:
             safe_caption = safe_caption[:1021] + "..."
-
-        logging.debug(
-            f"[send] 媒体组: {len(media_messages)} 个媒体, "
-            f"caption_applied={caption_applied}, "
-            f"caption_len={len(safe_caption) if safe_caption else 0}"
-        )
 
         return await _do_send_media_group(
             client, recipient, media_messages,
@@ -404,7 +410,7 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
             reply_to=effective_reply_to,
         )
 
-    # ========== 新文件（水印等）==========
+    # ========== 新文件 ==========
     if tm.new_file:
         for attempt in range(MAX_RETRIES):
             try:
@@ -439,17 +445,20 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
 
 async def _do_send_media_group(client, recipient, media_messages, caption, reply_to):
-    """发送媒体组 — 简化可靠版
+    """发送媒体组"""
+    media_types = [type(m.media).__name__ for m in media_messages]
+    logging.info(
+        f"[media_group] {len(media_messages)} 个媒体, "
+        f"types={media_types}, to={recipient}, "
+        f"caption={repr(caption[:50]) if caption else None}"
+    )
 
-    media_messages: 只包含有 media 的 Message 对象
-    caption: 要附加到第一个媒体的文本（已经由调用方处理好）
-    """
+    last_error = None
 
-    # ===== 策略1: 用 message.media 列表发送（保持相册效果）=====
+    # ===== 策略1: media 列表 =====
     for attempt in range(MAX_RETRIES):
         try:
             media_list = [m.media for m in media_messages]
-            logging.debug(f"[media_group] 策略1: {len(media_list)} 个 media, caption={bool(caption)}")
             result = await client.send_file(
                 recipient, media_list,
                 caption=caption if caption else None,
@@ -458,31 +467,32 @@ async def _do_send_media_group(client, recipient, media_messages, caption, reply
                 force_document=False,
             )
             if result:
+                logging.info(f"[media_group] 策略1成功")
                 return result if isinstance(result, list) else [result]
         except Exception as e:
+            last_error = e
             err_str = str(e).upper()
+            logging.warning(f"[media_group] 策略1失败({attempt+1}): {type(e).__name__}: {e}")
             if "FLOOD" in err_str:
                 wait_match = re.search(r"\d+", str(e))
                 wait_time = int(wait_match.group()) + 10 if wait_match else 60
-                logging.warning(f"FloodWait {wait_time}s (媒体组策略1)")
                 await asyncio.sleep(wait_time)
                 continue
-            logging.warning(f"[media_group] 策略1失败 ({attempt+1}): {e}")
-            break  # 非 Flood 错误，换策略
+            break
 
-    # ===== 策略2: 下载为 bytes 后重新上传 =====
+    # ===== 策略2: 下载重传 =====
     files_data = []
     file_names = []
     for msg in media_messages:
         data = await _download_media_bytes(client, msg)
         files_data.append(data)
         file_names.append(_get_file_name(msg))
+        logging.info(f"[media_group] 下载 msg_id={getattr(msg, 'id', '?')}: {'OK ' + str(len(data)) + ' bytes' if data else 'FAILED'}")
 
     valid_indices = [i for i, d in enumerate(files_data) if d]
     if valid_indices:
         valid_data = [files_data[i] for i in valid_indices]
         try:
-            logging.debug(f"[media_group] 策略2: {len(valid_data)} 个文件")
             result = await client.send_file(
                 recipient, valid_data,
                 caption=caption if caption else None,
@@ -491,17 +501,18 @@ async def _do_send_media_group(client, recipient, media_messages, caption, reply
                 force_document=False,
             )
             if result:
+                logging.info(f"[media_group] 策略2成功")
                 return result if isinstance(result, list) else [result]
         except Exception as e2:
-            logging.warning(f"[media_group] 策略2失败: {e2}")
+            last_error = e2
+            logging.warning(f"[media_group] 策略2失败: {type(e2).__name__}: {e2}")
 
-    # ===== 策略3: 逐条发送（保底）=====
-    logging.warning("[media_group] 降级为逐条发送")
+    # ===== 策略3: 逐条 =====
+    logging.warning("[media_group] 降级逐条发送")
     sent_list = []
     for i, msg in enumerate(media_messages):
         msg_caption = caption if i == 0 else ""
         msg_reply = reply_to if i == 0 else None
-
         sent = await _send_single_message(
             client, recipient, msg,
             caption=msg_caption,
@@ -509,15 +520,16 @@ async def _do_send_media_group(client, recipient, media_messages, caption, reply
         )
         if sent:
             sent_list.append(sent)
-
         if i < len(media_messages) - 1:
             await asyncio.sleep(1)
 
     if sent_list:
         return sent_list
 
-    # ===== 全部失败，降级发纯文本 =====
-    logging.error("[media_group] 所有方式失败，降级为纯文本")
+    logging.error(
+        f"[media_group] 全部失败! types={media_types}, to={recipient}, "
+        f"last_error={type(last_error).__name__}: {last_error}"
+    )
     if caption and caption.strip():
         try:
             return await client.send_message(recipient, caption, reply_to=reply_to)
