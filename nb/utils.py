@@ -1,4 +1,4 @@
-# nb/utils.py — Telethon >= 1.34 兼容版
+# nb/utils.py
 
 import logging
 import asyncio
@@ -14,15 +14,12 @@ from telethon.client import TelegramClient
 from telethon.hints import EntityLike
 from telethon.tl.custom.message import Message
 from telethon.tl.types import (
-    DocumentAttributeVideo,
-    DocumentAttributeAnimated,
-    DocumentAttributeAudio,
-    DocumentAttributeSticker,
     InputMediaPhoto,
     InputMediaDocument,
     InputPhoto,
     InputDocument,
     InputSingleMedia,
+    # ✅ 必须引入 InputReplyToMessage 以兼容 Telethon 1.34+
     InputReplyToMessage,
     MessageMediaPhoto,
     MessageMediaDocument,
@@ -46,16 +43,14 @@ RETRY_BASE_DELAY = 5
 
 
 # =====================================================================
-#  reply_to 兼容辅助（兼容 1.26 和 1.34+）
+#  reply_to 兼容辅助（兼容 1.34+）
 # =====================================================================
 
 def _get_reply_to_msg_id(message) -> Optional[int]:
     """兼容所有版本获取 reply_to_msg_id。"""
-    # 新版: message.reply_to.reply_to_msg_id
     if hasattr(message, 'reply_to') and message.reply_to is not None:
         if hasattr(message.reply_to, 'reply_to_msg_id'):
             return message.reply_to.reply_to_msg_id
-    # 旧版: message.reply_to_msg_id
     if hasattr(message, 'reply_to_msg_id') and message.reply_to_msg_id is not None:
         return message.reply_to_msg_id
     return None
@@ -70,9 +65,9 @@ def _get_reply_to_top_id(message) -> Optional[int]:
 
 
 def _make_reply_to(msg_id: Optional[int]):
-    """构造 reply_to 参数，兼容新旧 Telethon。
-    新版 Telethon 底层 API 需要 InputReplyToMessage 对象，
-    而高层 API (send_message/send_file) 仍接受 int。
+    """
+    ✅ 核心修复：构造 reply_to 参数
+    Telethon 1.34+ 底层 API 要求使用 InputReplyToMessage
     """
     if msg_id is None:
         return None
@@ -87,7 +82,6 @@ async def get_discussion_message(
     channel_id: Union[int, str],
     msg_id: int,
 ) -> Optional[Message]:
-    """获取频道帖子在讨论组中的副本消息。"""
     try:
         result = await client(GetDiscussionMessageRequest(
             peer=channel_id, msg_id=msg_id,
@@ -103,7 +97,6 @@ async def get_discussion_group_id(
     client: TelegramClient,
     channel_id: Union[int, str],
 ) -> Optional[int]:
-    """获取频道关联的讨论组 ID。"""
     try:
         full = await client.get_entity(channel_id)
         if hasattr(full, 'linked_chat_id') and full.linked_chat_id:
@@ -117,10 +110,6 @@ async def get_discussion_group_id(
     return None
 
 
-# =====================================================================
-#  FloodWait
-# =====================================================================
-
 def _is_flood_wait(e: Exception) -> bool:
     return "FLOOD_WAIT" in str(e).upper() or "flood" in str(e).lower()
 
@@ -132,10 +121,6 @@ async def _handle_flood_wait(e: Exception) -> int:
     await asyncio.sleep(wait_sec + 10)
     return wait_sec
 
-
-# =====================================================================
-#  Spoiler 检测与发送（底层 API 用 InputReplyToMessage）
-# =====================================================================
 
 def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
@@ -150,7 +135,6 @@ async def _send_single_with_spoiler(
     caption: Optional[str] = None,
     reply_to: Optional[int] = None,
 ) -> Message:
-    """通过底层 API 发送单条带 spoiler 的媒体消息。"""
     media = message.media
     peer = await client.get_input_entity(recipient)
 
@@ -177,7 +161,7 @@ async def _send_single_with_spoiler(
     else:
         raise ValueError(f"不支持的媒体类型: {type(media)}")
 
-    # ★ Telethon 1.34+ 底层 API 用 reply_to 参数 (InputReplyToMessage)
+    # ✅ 修复：使用 _make_reply_to 处理
     kwargs = {
         'peer': peer,
         'media': input_media,
@@ -203,7 +187,6 @@ async def _send_album_with_spoiler(
     caption: Optional[str] = None,
     reply_to: Optional[int] = None,
 ) -> List[Message]:
-    """通过底层 SendMultiMedia API 发送媒体组，保留 spoiler 属性。"""
     peer = await client.get_input_entity(recipient)
     multi_media = []
 
@@ -249,7 +232,7 @@ async def _send_album_with_spoiler(
     if not multi_media:
         raise ValueError("没有有效的媒体可发送")
 
-    # ★ Telethon 1.34+ 底层 API 用 reply_to 参数
+    # ✅ 修复：使用 _make_reply_to 处理
     kwargs = {
         'peer': peer,
         'multi_media': multi_media,
@@ -265,13 +248,8 @@ async def _send_album_with_spoiler(
             if hasattr(update, 'message'):
                 sent_messages.append(update.message)
 
-    logging.info(f"✅ 发送媒体组完成 ({len(multi_media)} 项)")
     return sent_messages if sent_messages else result
 
-
-# =====================================================================
-#  辅助
-# =====================================================================
 
 def _get_download_client(tm: "NbMessage") -> TelegramClient:
     msg_client = getattr(tm.message, '_client', None) or getattr(tm.message, 'client', None)
@@ -279,10 +257,6 @@ def _get_download_client(tm: "NbMessage") -> TelegramClient:
         return msg_client
     return tm.client
 
-
-# =====================================================================
-#  主发送函数
-# =====================================================================
 
 def platform_info():
     nl = "\n"
@@ -300,18 +274,10 @@ async def send_message(
     grouped_tms: Optional[List["NbMessage"]] = None,
     comment_to_post: Optional[int] = None,
 ) -> Union[Message, List[Message], None]:
-    """发送消息的统一入口。
-
-    策略（学习 tgcf，Telethon 1.34+ 支持）：
-    - show_forwarded_from=True → forward_messages（保留来源）
-    - 其他 → 修改 message.text 后 send_message(entity, message_object)
-      Telethon 1.34+ 会自动复制消息，不带 "Forwarded from"
-    - 评论区 → reply_to=comment_to_post
-    """
     client: TelegramClient = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
-    # === 情况 1: 直接转发（保留 "Forwarded from"） ===
+    # 1. 转发消息 (Show Forwarded From)
     if CONFIG.show_forwarded_from:
         if grouped_messages:
             attempt = 0
@@ -319,17 +285,13 @@ async def send_message(
             while attempt < MAX_RETRIES:
                 try:
                     result = await client.forward_messages(recipient, grouped_messages)
-                    logging.info(f"✅ 直接转发媒体组成功 (attempt {attempt+1})")
+                    logging.info(f"✅ 直接转发媒体组成功")
                     return result
                 except Exception as e:
-                    if _is_flood_wait(e):
-                        await _handle_flood_wait(e)
-                    else:
-                        logging.error(f"❌ 转发失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                    if _is_flood_wait(e): await _handle_flood_wait(e)
+                    else: logging.error(f"❌ 转发失败: {e}")
                     attempt += 1
-                    delay = min(delay * 2, 300)
                     await asyncio.sleep(delay)
-            logging.error(f"❌ 直接转发最终失败")
             return None
         else:
             attempt = 0
@@ -339,52 +301,33 @@ async def send_message(
                     result = await client.forward_messages(
                         recipient, tm.message.id, from_peer=tm.message.chat_id,
                     )
-                    if isinstance(result, list):
-                        result = result[0] if result else None
+                    if isinstance(result, list): result = result[0] if result else None
                     logging.info(f"✅ forward 成功 msg={tm.message.id}")
                     return result
                 except Exception as e:
-                    if _is_flood_wait(e):
-                        await _handle_flood_wait(e)
-                    else:
-                        logging.error(f"❌ forward 失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                    if _is_flood_wait(e): await _handle_flood_wait(e)
+                    else: logging.error(f"❌ forward 失败: {e}")
                     attempt += 1
-                    delay = min(delay * 2, 300)
                     await asyncio.sleep(delay)
-            logging.error(f"❌ forward 最终失败 msg={tm.message.id}")
             return None
 
-    # === 情况 2: 媒体组复制发送（不带 "Forwarded from"） ===
+    # 2. 媒体组发送 (Send Album)
     if grouped_messages and grouped_tms:
-        combined_caption = "\n\n".join([
-            gtm.text.strip() for gtm in grouped_tms
-            if gtm.text and gtm.text.strip()
-        ])
-
+        combined_caption = "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
         any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
-
         attempt = 0
-        delay = 5
         while attempt < MAX_RETRIES:
             try:
                 if any_spoiler:
-                    logging.info("🔒 检测到 Spoiler，使用底层 API 发送")
                     result = await _send_album_with_spoiler(
                         client, recipient, grouped_messages,
                         caption=combined_caption or None,
                         reply_to=effective_reply_to,
                     )
                 else:
-                    files_to_send = [
-                        msg for msg in grouped_messages
-                        if msg.photo or msg.video or msg.gif or msg.document
-                    ]
+                    files_to_send = [msg for msg in grouped_messages if msg.photo or msg.video or msg.gif or msg.document]
                     if not files_to_send:
-                        return await client.send_message(
-                            recipient,
-                            combined_caption or "空相册",
-                            reply_to=effective_reply_to,
-                        )
+                        return await client.send_message(recipient, combined_caption or "空相册", reply_to=effective_reply_to)
                     result = await client.send_file(
                         recipient, files_to_send,
                         caption=combined_caption or None,
@@ -394,31 +337,19 @@ async def send_message(
                         allow_cache=False,
                         parse_mode="md",
                     )
-
-                logging.info(
-                    f"✅ 媒体组发送成功"
-                    f"{'（含 spoiler）' if any_spoiler else ''}"
-                    f"{'（评论区）' if comment_to_post else ''}"
-                    f" (attempt {attempt+1})"
-                )
+                logging.info(f"✅ 媒体组发送成功")
                 return result
-
             except Exception as e:
-                if _is_flood_wait(e):
-                    await _handle_flood_wait(e)
-                else:
-                    logging.error(f"❌ 媒体组发送失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                if _is_flood_wait(e): await _handle_flood_wait(e)
+                else: logging.error(f"❌ 媒体组发送失败: {e}")
                 attempt += 1
-                delay = min(delay * 2, 300)
-                await asyncio.sleep(delay)
-        logging.error(f"❌ 媒体组发送最终失败")
+                await asyncio.sleep(5)
         return None
 
-    # === 情况 3: 单条消息复制发送（不带 "Forwarded from"） ===
-
+    # 3. 单条消息发送
     processed_markup = getattr(tm, 'reply_markup', None)
-
-    # 3a: 插件生成了新文件
+    
+    # 3a. 插件生成的新文件
     if tm.new_file:
         try:
             return await client.send_file(
@@ -429,7 +360,7 @@ async def send_message(
                 buttons=processed_markup,
             )
         except Exception as e:
-            logging.warning(f"⚠️ 带按钮发送新文件失败: {e}")
+            logging.warning(f"⚠️ 新文件发送失败 (重试无按钮): {e}")
             try:
                 return await client.send_file(
                     recipient, tm.new_file,
@@ -441,26 +372,23 @@ async def send_message(
                 logging.error(f"❌ 新文件发送最终失败: {e2}")
                 return None
 
-    # 3b: 单条带 spoiler 的媒体
+    # 3b. Spoiler 媒体
     if _has_spoiler(tm.message):
-        logging.info("🔒 单条 Spoiler 消息，使用底层 API")
         try:
             result = await _send_single_with_spoiler(
                 client, recipient, tm.message,
                 caption=tm.text, reply_to=effective_reply_to,
             )
-            logging.info("✅ 带 spoiler 单条消息发送成功")
+            logging.info("✅ Spoiler 消息发送成功")
             return result
         except Exception as e:
-            logging.warning(f"⚠️ spoiler 发送失败，回退普通模式: {e}")
+            logging.warning(f"⚠️ spoiler 发送失败，回退: {e}")
 
-    # 3c: 普通消息 ★ 核心：传整个 message 对象 ★
+    # 3c. 普通消息
     attempt = 0
-    delay = 5
     while attempt < MAX_RETRIES:
         try:
             tm.message.text = tm.text
-
             if processed_markup is not None:
                 try:
                     result = await client.send_message(
@@ -468,7 +396,7 @@ async def send_message(
                         reply_to=effective_reply_to,
                         buttons=processed_markup,
                     )
-                    logging.info(f"✅ copy 成功(带按钮) msg={tm.message.id} (attempt {attempt+1})")
+                    logging.info(f"✅ copy 成功(带按钮) msg={tm.message.id}")
                     return result
                 except Exception as e_btn:
                     logging.warning(f"⚠️ 带按钮失败: {e_btn}")
@@ -477,32 +405,22 @@ async def send_message(
                 recipient, tm.message,
                 reply_to=effective_reply_to,
             )
-            logging.info(f"✅ copy 成功 msg={tm.message.id} (attempt {attempt+1})")
+            logging.info(f"✅ copy 成功 msg={tm.message.id}")
             return result
-
         except Exception as e:
-            if _is_flood_wait(e):
-                await _handle_flood_wait(e)
-            else:
-                logging.error(f"❌ copy 失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+            if _is_flood_wait(e): await _handle_flood_wait(e)
+            else: logging.error(f"❌ copy 失败: {e}")
             attempt += 1
-            delay = min(delay * 2, 300)
-            await asyncio.sleep(delay)
-
-    logging.error(f"❌ copy 最终失败 msg={tm.message.id}")
+            await asyncio.sleep(5)
     return None
 
-
-# =====================================================================
-#  工具函数
-# =====================================================================
 
 def cleanup(*files: str) -> None:
     for file in files:
         try:
             os.remove(file)
         except FileNotFoundError:
-            logging.info(f"File {file} does not exist.")
+            pass
 
 
 def stamp(file: str, user: str) -> str:
@@ -512,7 +430,6 @@ def stamp(file: str, user: str) -> str:
         os.rename(file, outf)
         return outf
     except Exception as err:
-        logging.warning(f"重命名失败 {file} → {outf}: {err}")
         return file
 
 
