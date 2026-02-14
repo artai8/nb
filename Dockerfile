@@ -18,7 +18,7 @@ RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/nu
 # 🚀 全量依赖升级 (Pydantic v2, Streamlit 1.33+, Python 3.11)
 RUN pip install --no-cache-dir \
     "altair>=5.2.0" \
-    "streamlit>=1.54.0" \
+    "streamlit>=1.50.0" \
     "pymongo>=4.6.3" \
     "pydantic>=2.7.0" \
     "python-dotenv>=1.0.1" \
