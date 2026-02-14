@@ -1,60 +1,65 @@
 import json
-
 import streamlit as st
-
 from nb.config import CONFIG_FILE_NAME, read_config, write_config
 from nb.utils import platform_info
 from nb.web_ui.password import check_password
-from nb.web_ui.utils import hide_st, switch_theme
+from nb.web_ui.utils import switch_theme
 
 CONFIG = read_config()
 
-st.set_page_config(
-    page_title="Advanced",
-    page_icon="🔬",
-)
-hide_st(st)
-switch_theme(st,CONFIG)
+st.set_page_config(page_title="Advanced", page_icon="🔬", layout="wide")
+switch_theme(st, CONFIG)
 
 if check_password(st):
+    st.title("Advanced Settings")
+    
+    st.markdown("""
+    <div style="background:#fff3cd; color:#856404; padding:15px; border-radius:8px; border:1px solid #ffeeba; margin-bottom:20px;">
+        ⚠️ <strong>Warning:</strong> This page allows raw configuration access. Proceed with caution.
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.warning("This page is for developers and advanced users.")
-    if st.checkbox("I agree"):
-
-        with st.expander("Version & Platform"):
+    if st.checkbox("I understand the risks"):
+        
+        with st.expander("System Info"):
             st.code(platform_info())
 
-        with st.expander("Configuration"):
+        with st.expander("Raw Configuration (JSON)"):
             with open(CONFIG_FILE_NAME, "r") as file:
+                # 兼容 Pydantic v2 dump 后的 JSON
                 data = json.loads(file.read())
                 dumped = json.dumps(data, indent=3)
-            st.download_button(
-                f"Download config json", data=dumped, file_name=CONFIG_FILE_NAME
-            )
+            
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                st.download_button(
+                    "📥 Download Config", 
+                    data=dumped, 
+                    file_name=CONFIG_FILE_NAME,
+                    use_container_width=True
+                )
             st.json(data)
 
-        with st.expander("Special Options for Live Mode"):
+        with st.expander("Live Mode Tweaks"):
             CONFIG.live.sequential_updates = st.checkbox(
                 "Enforce sequential updates", value=CONFIG.live.sequential_updates
             )
-
+            
+            st.markdown("**Delete-on-Edit Trigger**")
             CONFIG.live.delete_on_edit = st.text_input(
-                "Delete a message when source edited to",
-                value=CONFIG.live.delete_on_edit,
+                "Trigger Text", value=CONFIG.live.delete_on_edit
             )
-            st.write(
-                "When you edit the message in source to something particular, the message will be deleted in both source and destinations."
-            )
-            if st.checkbox("Customize Bot Messages"):
-                st.info(
-                    "Note: For userbots, the commands start with `.` instead of `/`, like `.start` and not `/start`"
-                )
-                CONFIG.bot_messages.start = st.text_area(
-                    "Bot's Reply to /start command", value=CONFIG.bot_messages.start
-                )
-                CONFIG.bot_messages.bot_help = st.text_area(
-                    "Bot's Reply to /help command", value=CONFIG.bot_messages.bot_help
-                )
+            st.caption("If an edited message matches this text, the message will be deleted.")
 
-            if st.button("Save"):
+            st.markdown("---")
+            st.markdown("**Bot Responses**")
+            CONFIG.bot_messages.start = st.text_area(
+                "/start Reply", value=CONFIG.bot_messages.start
+            )
+            CONFIG.bot_messages.bot_help = st.text_area(
+                "/help Reply", value=CONFIG.bot_messages.bot_help
+            )
+
+            if st.button("💾 Save Advanced Config", type="primary"):
                 write_config(CONFIG)
+                st.success("Saved!")
