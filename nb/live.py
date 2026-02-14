@@ -20,53 +20,51 @@ COMMENT_GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 COMMENT_GROUPED_TIMEOUT = 3.0
 
 
+def _align_messages_and_tms(messages, tms):
+    """确保 messages 和 tms 数量一致，返回对齐后的 messages 列表。"""
+    if len(tms) == len(messages):
+        return messages
+    logging.debug(f"[align] 插件过滤: {len(messages)} -> {len(tms)}")
+    return [tm.message for tm in tms]
+
+
 async def _send_grouped_messages(grouped_id):
-    """发送缓冲的媒体组消息 — 修复版"""
+    """发送缓冲的媒体组消息"""
     if grouped_id not in st.GROUPED_CACHE:
         return
-    
+
     chat_messages_map = st.GROUPED_CACHE[grouped_id]
-    
+
     for chat_id, messages in chat_messages_map.items():
         if chat_id not in config.from_to:
             continue
-        
+
         dest = config.from_to.get(chat_id)
-        
-        # 应用插件，获取处理后的 NbMessage 列表
+
         tms = await apply_plugins_to_group(messages)
         if not tms:
-            logging.warning(f"媒体组 {grouped_id} 所有消息被过滤")
+            logging.warning(f"[grouped] {grouped_id} 所有消息被过滤")
             continue
-        
-        # 关键修复：确保 messages 和 tms 对齐
-        # 如果插件过滤了消息，用 tm.message 重建对应关系
-        if len(tms) != len(messages):
-            logging.debug(f"插件过滤: {len(messages)} -> {len(tms)}")
-            # 使用 tm 中保存的原始 message
-            aligned_messages = [tm.message for tm in tms]
-        else:
-            aligned_messages = messages
 
-        # 验证对齐
-        if len(aligned_messages) != len(tms):
-            logging.error(f"对齐失败: messages={len(aligned_messages)}, tms={len(tms)}")
-            continue
+        aligned_messages = _align_messages_and_tms(messages, tms)
+
+        logging.debug(
+            f"[grouped] id={grouped_id} aligned={len(aligned_messages)} tms={len(tms)} "
+            f"types=[{', '.join(tm.file_type for tm in tms)}] "
+            f"texts=[{', '.join(repr(tm.text[:30]) if tm.text else 'None' for tm in tms)}]"
+        )
 
         for d in dest:
             try:
-                # 传递对齐后的数据
                 fwded_msgs = await send_message(
-                    d, tms[0],  # 第一个 tm 作为代表（包含 client 等信息）
+                    d, tms[0],
                     grouped_messages=aligned_messages,
                     grouped_tms=tms,
                 )
-                
-                # 记录每条消息的映射
+
                 if fwded_msgs:
                     fwded_list = fwded_msgs if isinstance(fwded_msgs, list) else [fwded_msgs]
-                    
-                    # 为每条原始消息建立映射
+
                     for i, msg in enumerate(aligned_messages):
                         uid = st.EventUid(st.DummyEvent(chat_id, msg.id))
                         if uid not in st.stored:
@@ -74,25 +72,20 @@ async def _send_grouped_messages(grouped_id):
                         if i < len(fwded_list):
                             st.stored[uid][d] = fwded_list[i]
                         else:
-                            # 如果返回数量少于预期，用最后一个
                             st.stored[uid][d] = fwded_list[-1] if fwded_list else None
-                    
-                    # 记录帖子映射（用第一条转发消息的 ID）
+
                     if fwded_list:
                         fid = extract_msg_id(fwded_list[0])
                         if fid:
-                            # 为组内每条消息都建立映射
                             for msg in aligned_messages:
                                 st.add_post_mapping(chat_id, msg.id, d, fid)
-                
+
             except Exception as e:
-                logging.error(f"媒体组发送失败: {e}", exc_info=True)
-        
-        # 清理资源
+                logging.error(f"[grouped] 发送失败: {e}", exc_info=True)
+
         for tm in tms:
             tm.clear()
-    
-    # 清理缓存
+
     st.GROUPED_CACHE.pop(grouped_id, None)
     st.GROUPED_TIMERS.pop(grouped_id, None)
     st.GROUPED_MAPPING.pop(grouped_id, None)
@@ -186,8 +179,6 @@ async def deleted_message_handler(event):
 
 
 async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
-    """解析评论对应的频道帖子 ID — 增强版"""
-    # 方式1: 通过 reply_to_top_id
     top_id = _get_reply_to_top_id(message)
     if top_id:
         cp = st.get_channel_post_id(chat_id, top_id)
@@ -203,7 +194,6 @@ async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
         except Exception as e:
             logging.debug(f"获取 top_msg 失败: {e}")
 
-    # 方式2: 通过 reply_to_msg_id
     reply_id = _get_reply_to_msg_id(message)
     if reply_id:
         cp = st.get_channel_post_id(chat_id, reply_id)
@@ -219,11 +209,9 @@ async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
         except Exception as e:
             logging.debug(f"获取 reply_msg 失败: {e}")
 
-    # 方式3: 向上搜索找到帖子头消息
     if reply_id or top_id:
         search_id = top_id or reply_id
         try:
-            # 向前搜索一小段范围寻找帖子头消息
             async for msg in client.iter_messages(chat_id, min_id=max(1, search_id - 5), max_id=search_id + 1):
                 fwd = _extract_channel_post(msg)
                 if fwd:
@@ -236,7 +224,6 @@ async def _resolve_channel_post_id(client, chat_id, message) -> Optional[int]:
 
 
 async def _get_dest_targets(client, src_channel_id, src_post_id, forward):
-    """获取评论目标 — 增强版"""
     dest_targets = {}
     for dest_ch in forward.dest:
         dest_resolved = dest_ch
@@ -253,11 +240,8 @@ async def _get_dest_targets(client, src_channel_id, src_post_id, forward):
             disc_msg = await get_discussion_message(client, dest_resolved, dest_post_id)
             if disc_msg:
                 dest_targets[disc_msg.chat_id] = disc_msg.id
-                logging.debug(f"评论目标(讨论): {disc_msg.chat_id}/{disc_msg.id}")
             else:
-                # 降级：直接回复到频道帖子
                 dest_targets[dest_resolved] = dest_post_id
-                logging.debug(f"评论目标(直接): {dest_resolved}/{dest_post_id}")
         else:
             for dg in forward.comments.dest_discussion_groups:
                 try:
@@ -269,7 +253,6 @@ async def _get_dest_targets(client, src_channel_id, src_post_id, forward):
 
 
 async def _send_single_comment(client, message, dest_targets, chat_id):
-    """发送单条评论 — 增强错误处理"""
     tm = await apply_plugins(message)
     if not tm:
         return
@@ -297,21 +280,12 @@ async def _send_single_comment(client, message, dest_targets, chat_id):
 
 
 async def _send_grouped_comments(client, messages, dest_targets, chat_id):
-    """发送评论媒体组 — 增强版"""
     if not messages:
         return
-    
-    # 关键修复：应用插件并保持对齐
     tms = await apply_plugins_to_group(messages)
-    if not tms or not tms[0]:
+    if not tms:
         return
-    
-    # 对齐
-    if len(tms) != len(messages):
-        aligned_messages = [tm.message for tm in tms]
-    else:
-        aligned_messages = messages
-    
+    aligned_messages = _align_messages_and_tms(messages, tms)
     try:
         for dest_chat_id, dest_reply_to in dest_targets.items():
             for attempt in range(3):
@@ -391,12 +365,10 @@ async def comment_message_handler(event):
     forward = config.comment_forward_map.get(chat_id)
     if not forward or not forward.comments.enabled:
         return
-    # 检查是否是帖子头消息（自动转发到讨论组的）
     cp = _extract_channel_post(message)
     if cp:
         st.add_discussion_mapping(chat_id, message.id, cp)
         return
-    # 过滤选项
     if forward.comments.only_media and not message.media:
         return
     if not forward.comments.include_text_comments and not message.media:
@@ -408,11 +380,9 @@ async def comment_message_handler(event):
                 return
         except Exception:
             pass
-    # 媒体组处理
     if message.grouped_id is not None:
         _add_comment_to_group_cache(chat_id, message.grouped_id, message)
         return
-    # 单条评论
     src_post_id = await _resolve_channel_post_id(event.client, chat_id, message)
     if not src_post_id:
         logging.warning(f"无法解析评论帖子: {chat_id}/{message.id}")
