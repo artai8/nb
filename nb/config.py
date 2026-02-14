@@ -6,7 +6,8 @@ import sys
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, validator
+# ✅ Pydantic v2 导入
+from pydantic import BaseModel, Field, field_validator
 from pymongo import MongoClient
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -30,7 +31,8 @@ class CommentsConfig(BaseModel):
     source_discussion_group: Optional[Union[int, str]] = None
 
     dest_mode: str = "comments"
-    dest_discussion_groups: List[Union[int, str]] = []
+    # ✅ v2 写法：使用 default_factory 防止可变对象副作用
+    dest_discussion_groups: List[Union[int, str]] = Field(default_factory=list)
 
     only_media: bool = False
     include_text_comments: bool = True
@@ -38,7 +40,7 @@ class CommentsConfig(BaseModel):
     skip_admin_comments: bool = False
 
     post_mapping_mode: str = "auto"
-    manual_post_mapping: Dict[str, str] = {}
+    manual_post_mapping: Dict[str, str] = Field(default_factory=dict)
     manual_post_mapping_raw: str = ""
 
 
@@ -48,10 +50,10 @@ class Forward(BaseModel):
     con_name: str = ""
     use_this: bool = True
     source: Union[int, str] = ""
-    dest: List[Union[int, str]] = []
+    dest: List[Union[int, str]] = Field(default_factory=list)
     offset: int = 0
     end: Optional[int] = None
-    comments: CommentsConfig = CommentsConfig()
+    comments: CommentsConfig = Field(default_factory=CommentsConfig)
 
 
 class LiveSettings(BaseModel):
@@ -67,7 +69,9 @@ class PastSettings(BaseModel):
 
     delay: int = 0
 
-    @validator("delay")
+    # ✅ v2 写法：@field_validator + @classmethod
+    @field_validator("delay")
+    @classmethod
     def validate_delay(cls, val):
         if val not in range(0, 101):
             logging.warning("delay must be within 0 to 100 seconds")
@@ -99,21 +103,22 @@ class Config(BaseModel):
 
     pid: int = 0
     theme: str = "light"
-    login: LoginConfig = LoginConfig()
-    admins: List[Union[int, str]] = []
-    forwards: List[Forward] = []
+    login: LoginConfig = Field(default_factory=LoginConfig)
+    admins: List[Union[int, str]] = Field(default_factory=list)
+    forwards: List[Forward] = Field(default_factory=list)
     show_forwarded_from: bool = False
     mode: int = 0
-    live: LiveSettings = LiveSettings()
-    past: PastSettings = PastSettings()
+    live: LiveSettings = Field(default_factory=LiveSettings)
+    past: PastSettings = Field(default_factory=PastSettings)
 
-    plugins: PluginConfig = PluginConfig()
-    bot_messages: BotMessages = BotMessages()
+    plugins: PluginConfig = Field(default_factory=PluginConfig)
+    bot_messages: BotMessages = Field(default_factory=BotMessages)
 
 
 def write_config_to_file(config: Config):
     with open(CONFIG_FILE_NAME, "w", encoding="utf8") as file:
-        file.write(config.json())
+        # ✅ v2 变更: .json() -> .model_dump_json()
+        file.write(config.model_dump_json(indent=4))
 
 
 def detect_config_type() -> int:
@@ -145,7 +150,8 @@ def read_config(count=1) -> Config:
     try:
         if stg.CONFIG_TYPE == 1:
             with open(CONFIG_FILE_NAME, encoding="utf8") as file:
-                return Config.parse_raw(file.read())
+                # ✅ v2 变更: parse_raw -> model_validate_json
+                return Config.model_validate_json(file.read())
         elif stg.CONFIG_TYPE == 2:
             return read_db()
         else:
@@ -212,17 +218,20 @@ def setup_mongo(client):
     mydb = client[MONGO_DB_NAME]
     mycol = mydb[MONGO_COL_NAME]
     if not mycol.find_one({"_id": 0}):
-        mycol.insert_one({"_id": 0, "author": "nb", "config": Config().dict()})
+        # ✅ v2 变更: .dict() -> .model_dump()
+        mycol.insert_one({"_id": 0, "author": "nb", "config": Config().model_dump()})
     return mycol
 
 
 def update_db(cfg):
-    stg.mycol.update_one({"_id": 0}, {"$set": {"config": cfg.dict()}})
+    # ✅ v2 变更: .dict() -> .model_dump()
+    stg.mycol.update_one({"_id": 0}, {"$set": {"config": cfg.model_dump()}})
 
 
 def read_db():
     obj = stg.mycol.find_one({"_id": 0})
-    cfg = Config(**obj["config"])
+    # ✅ v2 变更: 推荐使用 model_validate
+    cfg = Config.model_validate(obj["config"])
     return cfg
 
 
