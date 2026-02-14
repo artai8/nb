@@ -1,7 +1,8 @@
 from enum import Enum
 from typing import Any, Dict, List
 
-from pydantic import BaseModel
+# ✅ Pydantic v2 导入 Field
+from pydantic import BaseModel, Field
 from watermark import Position
 
 
@@ -18,13 +19,14 @@ class FileType(str, Enum):
 
 
 class FilterList(BaseModel):
-    blacklist: List[str] = []
-    whitelist: List[str] = []
+    # ✅ v2 写法: default_factory=list
+    blacklist: List[str] = Field(default_factory=list)
+    whitelist: List[str] = Field(default_factory=list)
 
 
 class FilesFilterList(BaseModel):
-    blacklist: List[FileType] = []
-    whitelist: List[FileType] = []
+    blacklist: List[FileType] = Field(default_factory=list)
+    whitelist: List[FileType] = Field(default_factory=list)
 
 
 class TextFilter(FilterList):
@@ -49,9 +51,9 @@ STYLE_CODES = {"bold": "**", "italics": "__", "code": "`", "strike": "~~", "plai
 
 class Filters(BaseModel):
     check: bool = False
-    users: FilterList = FilterList()
-    files: FilesFilterList = FilesFilterList()
-    text: TextFilter = TextFilter()
+    users: FilterList = Field(default_factory=FilterList)
+    files: FilesFilterList = Field(default_factory=FilesFilterList)
+    text: TextFilter = Field(default_factory=TextFilter)
 
 
 class Format(BaseModel):
@@ -72,7 +74,8 @@ class OcrConfig(BaseModel):
 
 class Replace(BaseModel):
     check: bool = False
-    text: Dict[str, str] = {}
+    # ✅ v2 写法: default_factory=dict
+    text: Dict[str, str] = Field(default_factory=dict)
     text_raw: str = ""
     regex: bool = False
 
@@ -103,21 +106,21 @@ class InlineButtonMode(str, Enum):
 class InlineButtonConfig(BaseModel):
     check: bool = False
     mode: InlineButtonMode = InlineButtonMode.REMOVE
-    url_replacements: Dict[str, str] = {}       # 旧URL片段 -> 新URL片段
+    url_replacements: Dict[str, str] = Field(default_factory=dict)       # 旧URL片段 -> 新URL片段
     url_replacements_raw: str = ""               # Web UI 用的原始文本
-    text_replacements: Dict[str, str] = {}       # 旧按钮文字 -> 新按钮文字
+    text_replacements: Dict[str, str] = Field(default_factory=dict)       # 旧按钮文字 -> 新按钮文字
     text_replacements_raw: str = ""              # Web UI 用的原始文本
 
 
 class PluginConfig(BaseModel):
-    filter: Filters = Filters()
-    fmt: Format = Format()
-    mark: MarkConfig = MarkConfig()
-    ocr: OcrConfig = OcrConfig()
-    replace: Replace = Replace()
-    caption: Caption = Caption()
-    sender: Sender = Sender()
-    inline: InlineButtonConfig = InlineButtonConfig()
+    filter: Filters = Field(default_factory=Filters)
+    fmt: Format = Field(default_factory=Format)
+    mark: MarkConfig = Field(default_factory=MarkConfig)
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
+    replace: Replace = Field(default_factory=Replace)
+    caption: Caption = Field(default_factory=Caption)
+    sender: Sender = Field(default_factory=Sender)
+    inline: InlineButtonConfig = Field(default_factory=InlineButtonConfig)
 
 
 # List of plugins that need to load asynchronously
