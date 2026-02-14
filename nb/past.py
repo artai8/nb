@@ -1,4 +1,4 @@
-# nb/past.py 完整代码
+# nb/past.py
 
 import asyncio
 import logging
@@ -7,6 +7,7 @@ from collections import defaultdict
 from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError
 from telethon.tl.patched import MessageService
+
 from nb import config, storage as st
 from nb.config import CONFIG, get_SESSION, write_config
 from nb.plugins import apply_plugins, apply_plugins_to_group, load_async_plugins
@@ -15,25 +16,28 @@ from nb.utils import clean_session_files, send_message, _get_reply_to_msg_id, _e
 async def _send_past_grouped(client, src, dest, messages, forward_cfg, is_comm=False, is_first=False, is_last=False):
     tms = await apply_plugins_to_group(messages, is_comm, is_first, is_last)
     if not tms: return False
+    
     tm_template = tms[0]
     for d in dest:
         reply_to_id = None
         if is_comm:
-            parent_uid = st.EventUid(st.DummyEvent(src, messages[0].reply_to_msg_id))
-            reply_to_id = _extract_msg_id(st.stored.get(parent_uid, {}).get(d))
+            p_id = messages[0].reply_to_msg_id
+            reply_to_id = _extract_msg_id(st.stored.get(st.EventUid(st.DummyEvent(src, p_id)), {}).get(d))
         else:
             reply_to_id = tm_template.reply_to
+        
         tm_template.reply_to = reply_to_id
         try:
             fwded = await send_message(d, tm_template, [tm.message for tm in tms], tms)
             uid = st.EventUid(st.DummyEvent(src, messages[0].id))
             if uid not in st.stored: st.stored[uid] = {}
             st.stored[uid][d] = fwded
-        except Exception as e: logging.error(f"❌ 组播失败: {e}")
+        except Exception as e:
+            logging.error(f"❌ 组播失败: {e}")
     return True
 
 async def _process_replies(client, src, dest, parent_id, forward_cfg):
-    logging.info(f"💬 正在抓取主贴 {parent_id} 的评论...")
+    logging.info(f"💬 正在抓取 ID {parent_id} 的评论...")
     pool = []
     text_count = 0
     async for r in client.iter_messages(src, reply_to=parent_id, reverse=True):
@@ -52,43 +56,41 @@ async def _process_replies(client, src, dest, parent_id, forward_cfg):
         if grouped_buffer and (gid is None or gid not in grouped_buffer):
             await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward_cfg, True, is_first, is_last)
             grouped_buffer.clear()
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
+
         if gid is not None:
             grouped_buffer[gid].append(reply)
             continue
+
         tm = await apply_plugins(reply, True, is_first, is_last)
         if not tm: continue
         uid = st.EventUid(st.DummyEvent(src, reply.id))
         st.stored[uid] = {}
         for d in dest:
-            p_uid = st.EventUid(st.DummyEvent(src, parent_id))
-            tm.reply_to = _extract_msg_id(st.stored.get(p_uid, {}).get(d))
+            tm.reply_to = _extract_msg_id(st.stored.get(st.EventUid(st.DummyEvent(src, parent_id)), {}).get(d))
             st.stored[uid][d] = await send_message(d, tm)
         tm.clear()
         await asyncio.sleep(1)
+        
     if grouped_buffer:
         await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward_cfg, True, False, True)
 
 async def forward_job() -> None:
-    logging.info("🚀 Past 模式任务启动...")
+    logging.info("🚀 Past 模式启动...")
     clean_session_files()
     await load_async_plugins()
-    if CONFIG.login.user_type != 1:
-        logging.critical("❌ Past 模式仅支持 User 账号！请在登录页面切换。")
-        return
-
+    
     async with TelegramClient(get_SESSION(), CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
         if not config.from_to:
-            logging.warning("⚠️ 没有有效的转发任务，请检查 Connection 设置及 ID/链接是否正确。")
+            logging.warning("⚠️ 任务列表为空，请检查配置。")
             return
 
         for src, dest in config.from_to.items():
-            # 找到对应的 forward 配置
             forward = next((f for f in CONFIG.forwards if f.use_this), None)
             if not forward: continue
             
-            logging.info(f"📂 开始处理源: {src} -> 目的地: {dest}")
+            logging.info(f"📂 开始同步源 {src} 到 {dest}")
             grouped_buffer = defaultdict(list)
 
             async for message in client.iter_messages(src, reverse=True, offset_id=forward.offset):
@@ -99,12 +101,12 @@ async def forward_job() -> None:
                 try:
                     gid = message.grouped_id
                     if grouped_buffer and (gid is None or gid not in grouped_buffer):
-                        first_msg = list(grouped_buffer.values())[0][0]
+                        f_msg = list(grouped_buffer.values())[0][0]
                         await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward)
                         grouped_buffer.clear()
                         if forward.forward_comments:
-                            await _process_replies(client, src, dest, first_msg.id, forward)
-                        await asyncio.sleep(forward.past.delay or 5)
+                            await _process_replies(client, src, dest, f_msg.id, forward)
+                        await asyncio.sleep(5)
 
                     if gid is not None:
                         grouped_buffer[gid].append(message)
@@ -124,10 +126,10 @@ async def forward_job() -> None:
 
                     forward.offset = message.id
                     write_config(CONFIG, persist=False)
-                    await asyncio.sleep(forward.past.delay or 5)
+                    await asyncio.sleep(5)
 
                 except FloodWaitError as e:
-                    logging.warning(f"⏳ 触发 FloodWait，等待 {e.seconds} 秒...")
+                    logging.warning(f"⏳ FloodWait: 等待 {e.seconds}s")
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
-                    logging.exception(f"❌ 运行异常: {e}")
+                    logging.exception(f"❌ 错误: {e}")
