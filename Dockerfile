@@ -10,7 +10,7 @@ RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/nu
 RUN pip install --no-cache-dir \
     altair==4.2.2 streamlit==1.15.2 pymongo==4.3.3 pydantic==1.10.2 \
     python-dotenv==0.21.0 "PyYAML>=6.0,<7.0" requests==2.28.1 typer==0.7.0 \
-    Telethon==1.26.0 cryptg==0.4.0 "Pillow>=9.3,<11.0" hachoir==3.1.3 \
+    Telethon==1.42.0 cryptg==0.4.0 "Pillow>=9.3,<11.0" hachoir==3.1.3 \
     aiohttp==3.8.3 tg-login==0.0.4 watermark.py==0.0.3 pytesseract==0.3.7 \
     rich==12.6.0 verlat==0.1.0
 RUN printf '#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, "/app")\nfrom nb.cli import app\nif __name__ == "__main__":\n    app()\n' > /usr/local/bin/nb && chmod +x /usr/local/bin/nb
