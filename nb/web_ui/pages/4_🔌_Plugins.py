@@ -1,64 +1,128 @@
 import os
+
 import streamlit as st
 import yaml
+
 from nb.config import CONFIG, read_config, write_config
 from nb.plugin_models import FileType, Replace, Style, InlineButtonMode
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import get_list, get_string, hide_st, switch_theme
 
 CONFIG = read_config()
-st.set_page_config(page_title="插件", page_icon="🔌")
+
+st.set_page_config(
+    page_title="Plugins",
+    page_icon="🔌",
+)
+
 hide_st(st)
 switch_theme(st, CONFIG)
-
 if check_password(st):
-    with st.expander("过滤器"):
-        CONFIG.plugins.filter.check = st.checkbox("启用过滤器插件", value=CONFIG.plugins.filter.check, key="filter_check")
-        st.write("通过黑名单或白名单过滤特定内容。")
-        text_tab, users_tab, files_tab = st.tabs(["文本", "用户", "文件"])
+
+    with st.expander("Filter"):
+        CONFIG.plugins.filter.check = st.checkbox(
+            "Use this plugin: filter", value=CONFIG.plugins.filter.check
+        )
+        st.write("Blacklist or whitelist certain text items.")
+        text_tab, users_tab, files_tab = st.tabs(["Text", "Users", "Files"])
+
         with text_tab:
-            CONFIG.plugins.filter.text.case_sensitive = st.checkbox("区分大小写", value=CONFIG.plugins.filter.text.case_sensitive, key="filter_case")
-            CONFIG.plugins.filter.text.regex = st.checkbox("使用正则表达式", value=CONFIG.plugins.filter.text.regex, key="filter_regex")
-            st.write("每行输入一个表达式")
-            CONFIG.plugins.filter.text.whitelist = get_list(st.text_area("文本白名单", value=get_string(CONFIG.plugins.filter.text.whitelist), key="filter_text_wl"))
-            CONFIG.plugins.filter.text.blacklist = get_list(st.text_area("文本黑名单", value=get_string(CONFIG.plugins.filter.text.blacklist), key="filter_text_bl"))
+            CONFIG.plugins.filter.text.case_sensitive = st.checkbox(
+                "Case Sensitive", value=CONFIG.plugins.filter.text.case_sensitive
+            )
+            CONFIG.plugins.filter.text.regex = st.checkbox(
+                "Interpret filters as regex", value=CONFIG.plugins.filter.text.regex
+            )
+
+            st.write("Enter one text expression per line")
+            CONFIG.plugins.filter.text.whitelist = get_list(
+                st.text_area(
+                    "Text Whitelist",
+                    value=get_string(CONFIG.plugins.filter.text.whitelist),
+                )
+            )
+            CONFIG.plugins.filter.text.blacklist = get_list(
+                st.text_area(
+                    "Text Blacklist",
+                    value=get_string(CONFIG.plugins.filter.text.blacklist),
+                )
+            )
+
         with users_tab:
-            st.write("每行输入一个用户名或 ID")
-            CONFIG.plugins.filter.users.whitelist = get_list(st.text_area("用户白名单", value=get_string(CONFIG.plugins.filter.users.whitelist), key="filter_users_wl"))
-            CONFIG.plugins.filter.users.blacklist = get_list(st.text_area("用户黑名单", value=get_string(CONFIG.plugins.filter.users.blacklist), key="filter_users_bl"))
+            st.write("Enter one username/id per line")
+            CONFIG.plugins.filter.users.whitelist = get_list(
+                st.text_area(
+                    "Users Whitelist",
+                    value=get_string(CONFIG.plugins.filter.users.whitelist),
+                )
+            )
+            CONFIG.plugins.filter.users.blacklist = get_list(
+                st.text_area(
+                    "Users Blacklist", get_string(CONFIG.plugins.filter.users.blacklist)
+                )
+            )
+
         flist = [item.value for item in FileType]
         with files_tab:
-            CONFIG.plugins.filter.files.whitelist = st.multiselect("文件白名单", flist, default=CONFIG.plugins.filter.files.whitelist, key="filter_files_wl")
-            CONFIG.plugins.filter.files.blacklist = st.multiselect("文件黑名单", flist, default=CONFIG.plugins.filter.files.blacklist, key="filter_files_bl")
+            CONFIG.plugins.filter.files.whitelist = st.multiselect(
+                "Files Whitelist", flist, default=CONFIG.plugins.filter.files.whitelist
+            )
+            CONFIG.plugins.filter.files.blacklist = st.multiselect(
+                "Files Blacklist", flist, default=CONFIG.plugins.filter.files.blacklist
+            )
 
-    with st.expander("格式化"):
-        CONFIG.plugins.fmt.check = st.checkbox("启用格式化插件", value=CONFIG.plugins.fmt.check, key="fmt_check")
-        st.write("为文本添加样式，如 **粗体**、_斜体_、~~删除线~~、`等宽` 等。")
+    with st.expander("Format"):
+        CONFIG.plugins.fmt.check = st.checkbox(
+            "Use this plugin: format", value=CONFIG.plugins.fmt.check
+        )
+        st.write(
+            "Add style to text like **bold**, _italics_, ~~strikethrough~~, `monospace` etc."
+        )
         style_list = [item.value for item in Style]
-        CONFIG.plugins.fmt.style = st.selectbox("格式", style_list, index=style_list.index(CONFIG.plugins.fmt.style), key="fmt_style")
+        CONFIG.plugins.fmt.style = st.selectbox(
+            "Format", style_list, index=style_list.index(CONFIG.plugins.fmt.style)
+        )
 
-    with st.expander("水印"):
+    with st.expander("Watermark"):
         if os.system("ffmpeg -version >> /dev/null 2>&1") != 0:
-            st.warning("未找到 `ffmpeg`，使用此插件需要安装 `ffmpeg`。")
-        CONFIG.plugins.mark.check = st.checkbox("为媒体添加水印（图片和视频）", value=CONFIG.plugins.mark.check, key="mark_check")
-        uploaded_file = st.file_uploader("上传水印图片(png)", type=["png"], key="mark_upload")
+            st.warning(
+                "Could not find `ffmpeg`. Make sure to have `ffmpeg` installed in server to use this plugin."
+            )
+        CONFIG.plugins.mark.check = st.checkbox(
+            "Apply watermark to media (images and videos).",
+            value=CONFIG.plugins.mark.check,
+        )
+        uploaded_file = st.file_uploader("Upload watermark image(png)", type=["png"])
         if uploaded_file is not None:
             with open("image.png", "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
     with st.expander("OCR"):
-        st.write("光学字符识别")
+        st.write("Optical Character Recognition.")
         if os.system("tesseract --version >> /dev/null 2>&1") != 0:
-            st.warning("未找到 `tesseract`，使用此插件需要安装 `tesseract`。")
-        CONFIG.plugins.ocr.check = st.checkbox("对图片启用 OCR", value=CONFIG.plugins.ocr.check, key="ocr_check")
-        st.write("识别出的文本将添加到图片描述中。")
+            st.warning(
+                "Could not find `tesseract`. Make sure to have `tesseract` installed in server to use this plugin."
+            )
+        CONFIG.plugins.ocr.check = st.checkbox(
+            "Activate OCR for images", value=CONFIG.plugins.ocr.check
+        )
+        st.write("The text will be added in desciption of image while forwarding.")
 
-    with st.expander("替换"):
-        CONFIG.plugins.replace.check = st.checkbox("启用文本替换", value=CONFIG.plugins.replace.check, key="replace_check")
-        CONFIG.plugins.replace.regex = st.checkbox("使用正则表达式", value=CONFIG.plugins.replace.regex, key="replace_regex")
-        CONFIG.plugins.replace.text_raw = st.text_area("替换规则", value=CONFIG.plugins.replace.text_raw, key="replace_text_raw")
+    with st.expander("Replace"):
+        CONFIG.plugins.replace.check = st.checkbox(
+            "Apply text replacement", value=CONFIG.plugins.replace.check
+        )
+        CONFIG.plugins.replace.regex = st.checkbox(
+            "Interpret as regex", value=CONFIG.plugins.replace.regex
+        )
+
+        CONFIG.plugins.replace.text_raw = st.text_area(
+            "Replacements", value=CONFIG.plugins.replace.text_raw
+        )
         try:
-            replace_dict = yaml.safe_load(CONFIG.plugins.replace.text_raw)
+            replace_dict = yaml.safe_load(
+                CONFIG.plugins.replace.text_raw
+            )
             if not replace_dict:
                 replace_dict = {}
             temp = Replace(text=replace_dict)
@@ -68,86 +132,166 @@ if check_password(st):
             CONFIG.plugins.replace.text = {}
         else:
             CONFIG.plugins.replace.text = replace_dict
-        if st.checkbox("显示用法说明", key="replace_usage"):
+
+        if st.checkbox("Show rules and usage"):
             st.markdown(
-                "将一个词或表达式替换为另一个。\n\n"
-                "- 每行写一条替换规则\n"
-                "- 格式: `'原文': '新文本'`\n"
-                "- 建议使用**单引号**\n"
-                "- 包含空格或特殊字符时必须使用引号\n\n"
-                "```\n'原文': '新文本'\n```"
+                """
+                Replace one word or expression with another.
+
+                - Write every replacement in a new line.
+                - The original text then **a colon `:`** and then **a space** and then the new text.
+                - Its recommended to use **single quotes**. Quotes are must when your string contain spaces or special characters.
+                - Double quotes wont work if your regex has the character: `\` .
+                    ```
+                    'orginal': 'new'
+
+                    ```
+                - View [docs](https://github.com/artai8/nb/wiki/Replace-Plugin) for advanced usage."""
             )
 
-    with st.expander("标题"):
-        CONFIG.plugins.caption.check = st.checkbox("启用标题插件", value=CONFIG.plugins.caption.check, key="caption_check")
-        CONFIG.plugins.caption.header = st.text_area("页眉", value=CONFIG.plugins.caption.header, key="caption_header")
-        CONFIG.plugins.caption.footer = st.text_area("页脚", value=CONFIG.plugins.caption.footer, key="caption_footer")
-        st.write("页眉和页脚中可以包含空行，以增加与原文之间的间距。")
+    with st.expander("Caption"):
+        CONFIG.plugins.caption.check = st.checkbox(
+            "Apply Captions", value=CONFIG.plugins.caption.check
+        )
+        CONFIG.plugins.caption.header = st.text_area(
+            "Header", value=CONFIG.plugins.caption.header
+        )
+        CONFIG.plugins.caption.footer = st.text_area(
+            "Footer", value=CONFIG.plugins.caption.footer
+        )
+        st.write(
+            "You can have blank lines inside header and footer, to make space between the orignal message and captions."
+        )
 
-    with st.expander("发送者"):
-        st.write("使用其他账号发送转发的消息")
-        st.warning('必须禁用"显示转发来源"选项，否则消息将无法发送', icon="⚠️")
-        CONFIG.plugins.sender.check = st.checkbox("设置发送者:", value=CONFIG.plugins.sender.check, key="sender_check")
+    with st.expander("Sender"):
+        st.write("Modify the sender of forwarded messages other than the current user/bot")
+        st.warning("Show 'Forwarded from' option must be disabled or else messages will not be sent", icon="⚠️")
+        CONFIG.plugins.sender.check = st.checkbox(
+            "Set sender to:", value=CONFIG.plugins.sender.check
+        )
         leftpad, content, rightpad = st.columns([0.05, 0.9, 0.05])
         with content:
-            user_type = st.radio("账号类型", ["Bot", "User"], index=CONFIG.plugins.sender.user_type, horizontal=True, key="sender_type")
+            user_type = st.radio("Account Type", ["Bot", "User"], index=CONFIG.plugins.sender.user_type, horizontal=True)
             if user_type == "Bot":
                 CONFIG.plugins.sender.user_type = 0
-                CONFIG.plugins.sender.BOT_TOKEN = st.text_input("Bot Token", value=CONFIG.plugins.sender.BOT_TOKEN, type="password", key="sender_bot_token")
+                CONFIG.plugins.sender.BOT_TOKEN = st.text_input(
+                    "Bot Token", value=CONFIG.plugins.sender.BOT_TOKEN, type="password"
+                )
             else:
                 CONFIG.plugins.sender.user_type = 1
-                CONFIG.plugins.sender.SESSION_STRING = st.text_input("Session String", CONFIG.plugins.sender.SESSION_STRING, type="password", key="sender_session")
-                with st.expander("如何获取 Session String？"):
-                    st.markdown("链接: https://replit.com/@artai8/tg-login?v=1\n\n在上述链接中输入 API ID、API HASH 和手机号生成 Session String。")
+                CONFIG.plugins.sender.SESSION_STRING = st.text_input(
+                    "Session String", CONFIG.plugins.sender.SESSION_STRING, type="password"
+                )
+                st.markdown(
+                    """
+                ###### How to get session string?
 
-    with st.expander("内联按钮"):
-        st.write("控制转发消息时如何处理内联按钮。")
-        CONFIG.plugins.inline.check = st.checkbox("启用内联按钮处理", value=CONFIG.plugins.inline.check, key="inline_check")
+                Link to repl: https://replit.com/@artai8/tg-login?v=1
+
+                <p style="line-height:0px;margin-bottom:2em">
+                    <i>Click on the above link and enter api id, api hash, and phone no to generate session string.</i>
+                </p>
+
+
+                > <small>**Note from developer:**<small>
+                >
+                > <small>Due some issues logging in with a user account using a phone no is not supported in this web interface.</small>
+                >
+                > <small>I have built a command-line program named tg-login (https://github.com/artai8/tg-login) that can generate the session string for you.</small>
+                >
+                > <small>You can run tg-login on your computer, or securely in this repl. tg-login is open source, and you can also inspect the bash script running in the repl.</small>
+                >
+                > <small>What is a session string?</small>
+                > <small>https://docs.telethon.dev/en/stable/concepts/sessions.html#string-sessions</small>
+                """,
+                    unsafe_allow_html=True,
+                )
+
+    # ==================== 新增: Inline Buttons ====================
+    with st.expander("Inline Buttons"):
+        st.write("Control how inline buttons are handled when forwarding messages.")
+
+        CONFIG.plugins.inline.check = st.checkbox(
+            "Enable Inline Button processing",
+            value=CONFIG.plugins.inline.check,
+        )
+
         if CONFIG.plugins.inline.check:
             mode_options = [item.value for item in InlineButtonMode]
-            mode_labels = {"remove": "🗑️ 移除 — 完全去除所有内联按钮", "replace_url": "🔗 替换URL — 保留按钮，仅替换URL", "replace_all": "✏️ 全部替换 — 替换按钮文本和URL"}
+            mode_labels = {
+                "remove": "🗑️ Remove — completely strip all inline buttons",
+                "replace_url": "🔗 Replace URL — keep buttons, only replace URLs",
+                "replace_all": "✏️ Replace All — replace both button text and URLs",
+            }
+
             current_mode = CONFIG.plugins.inline.mode
             if hasattr(current_mode, 'value'):
                 current_mode = current_mode.value
             current_index = mode_options.index(current_mode) if current_mode in mode_options else 0
-            selected_mode = st.selectbox("按钮处理模式", mode_options, index=current_index, format_func=lambda x: mode_labels.get(x, x), key="inline_mode")
+
+            selected_mode = st.selectbox(
+                "Button handling mode",
+                mode_options,
+                index=current_index,
+                format_func=lambda x: mode_labels.get(x, x),
+            )
             CONFIG.plugins.inline.mode = selected_mode
+
             if selected_mode in ("replace_url", "replace_all"):
                 st.markdown("---")
-                st.markdown("##### URL 替换")
-                st.write("替换按钮URL中的部分内容，YAML格式: `'旧URL': '新URL'`")
-                CONFIG.plugins.inline.url_replacements_raw = st.text_area("URL 替换规则", value=CONFIG.plugins.inline.url_replacements_raw, key="inline_url_repl")
+                st.markdown("##### URL Replacements")
+                st.write("Replace parts of button URLs. Write in YAML format: `'old_url_part': 'new_url_part'`")
+                CONFIG.plugins.inline.url_replacements_raw = st.text_area(
+                    "URL Replacements",
+                    value=CONFIG.plugins.inline.url_replacements_raw,
+                    key="inline_url_repl",
+                )
                 try:
                     url_repl = yaml.safe_load(CONFIG.plugins.inline.url_replacements_raw)
                     if not url_repl:
                         url_repl = {}
                     if not isinstance(url_repl, dict):
-                        raise ValueError("必须是 YAML 字典格式")
-                    CONFIG.plugins.inline.url_replacements = {str(k): str(v) for k, v in url_repl.items()}
+                        raise ValueError("Must be a YAML dictionary")
+                    CONFIG.plugins.inline.url_replacements = {
+                        str(k): str(v) for k, v in url_repl.items()
+                    }
                 except Exception as err:
-                    st.error(f"URL 替换规则错误: {err}")
+                    st.error(f"URL replacements error: {err}")
                     CONFIG.plugins.inline.url_replacements = {}
-                st.caption("示例:")
+
+                st.caption("Example:")
                 st.code("'https://old-domain.com': 'https://new-domain.com'\n'?ref=abc': '?ref=xyz'", language="yaml")
+
             if selected_mode == "replace_all":
                 st.markdown("---")
-                st.markdown("##### 按钮文本替换")
-                st.write("替换按钮文本，YAML格式: `'旧文本': '新文本'`")
-                CONFIG.plugins.inline.text_replacements_raw = st.text_area("文本替换规则", value=CONFIG.plugins.inline.text_replacements_raw, key="inline_text_repl")
+                st.markdown("##### Button Text Replacements")
+                st.write("Replace button text. Write in YAML format: `'old text': 'new text'`")
+                CONFIG.plugins.inline.text_replacements_raw = st.text_area(
+                    "Text Replacements",
+                    value=CONFIG.plugins.inline.text_replacements_raw,
+                    key="inline_text_repl",
+                )
                 try:
                     text_repl = yaml.safe_load(CONFIG.plugins.inline.text_replacements_raw)
                     if not text_repl:
                         text_repl = {}
                     if not isinstance(text_repl, dict):
-                        raise ValueError("必须是 YAML 字典格式")
-                    CONFIG.plugins.inline.text_replacements = {str(k): str(v) for k, v in text_repl.items()}
+                        raise ValueError("Must be a YAML dictionary")
+                    CONFIG.plugins.inline.text_replacements = {
+                        str(k): str(v) for k, v in text_repl.items()
+                    }
                 except Exception as err:
-                    st.error(f"文本替换规则错误: {err}")
+                    st.error(f"Text replacements error: {err}")
                     CONFIG.plugins.inline.text_replacements = {}
-                st.caption("示例:")
-                st.code("'Buy Now': '立即购买'\n'Subscribe': '订阅'", language="yaml")
-        else:
-            st.info("禁用时，内联按钮将被自动移除以防止转发错误。")
 
-    if st.button("保存", key="plugins_save"):
+                st.caption("Example:")
+                st.code("'Buy Now': 'Shop Here'\n'Subscribe': 'Follow'", language="yaml")
+
+        else:
+            st.info(
+                "When disabled, inline buttons are **automatically removed** "
+                "to prevent forwarding errors."
+            )
+
+    if st.button("Save"):
         write_config(CONFIG)
