@@ -10,6 +10,7 @@ class NbCaption(NbPlugin):
         self._footer = data.footer if data.footer else ""
 
     def modify(self, tm):
+        """处理单条消息"""
         if not self._header and not self._footer:
             return tm
         original = tm.text if tm.text else ""
@@ -21,44 +22,44 @@ class NbCaption(NbPlugin):
         if self._footer:
             parts.append(self._footer)
         tm.text = "\n\n".join(parts) if parts else original
+        tm._caption_applied = True  # 标记已处理
         return tm
 
     def modify_group(self, tms):
-        """媒体组标题处理 — 修复版
+        """处理媒体组 — 修复版
         
         关键修复：
-        1. 只在第一条消息上添加 header/footer，不合并所有文本到第一条
-        2. 保留每条消息自己的原始文本不变
-        3. 通过标记 _caption_applied 防止 send_message 阶段重复处理
+        1. 仅在第一条消息添加 header/footer
+        2. 保留其他所有消息的原始文本（不再清空！）
+        3. 所有消息标记 _caption_applied=True 防止 send_message 重复处理
         """
         if not tms:
             return tms
         if not self._header and not self._footer:
+            # 即使没有 header/footer，也要标记避免 send_message 错误合并
+            for tm in tms:
+                tm._caption_applied = True
             return tms
 
-        # 收集所有非空文本
-        all_texts = []
-        for tm in tms:
-            if tm.text and tm.text.strip():
-                all_texts.append(tm.text.strip())
-
-        # 构建最终的组合文本
+        # === 仅处理第一条消息 ===
+        first_tm = tms[0]
+        original_text = first_tm.text or ""
         parts = []
         if self._header:
             parts.append(self._header)
-        if all_texts:
-            parts.extend(all_texts)
+        if original_text.strip():
+            parts.append(original_text)
         if self._footer:
             parts.append(self._footer)
+        
+        if parts:
+            first_tm.text = "\n\n".join(parts)
+        # 如果没有文本且无 header/footer，保持原样
+        
+        first_tm._caption_applied = True
 
-        combined = "\n\n".join(parts) if parts else ""
-
-        # 只在第一条设置合并文本，其余清空
-        tms[0].text = combined
-        # 标记已经处理过 caption，防止 send_message 再次收集
-        tms[0]._caption_applied = True
+        # === 其他消息：保留原始文本，仅标记已处理 ===
         for i in range(1, len(tms)):
-            tms[i].text = ""
             tms[i]._caption_applied = True
 
         return tms
