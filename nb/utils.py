@@ -305,66 +305,99 @@ async def _send_single_message(client, recipient, message, caption, reply_to):
     return None
 
 
-async def _send_media_group(client, recipient, messages, caption, reply_to):
-    """发送媒体组 — 完全重写版
+async def _send_media_group_aligned(client, recipient, aligned_pairs, caption, reply_to):
+    """发送媒体组 — 对齐版本
+    
+    aligned_pairs: [(message, tm), ...] 保持一一对应
     
     关键修复：
-    1. 正确处理图片+视频混合媒体组
-    2. caption 限制 1024 字符
-    3. 多层降级策略
-    4. 确保不丢失任何媒体
+    1. 正确识别哪些 message 有媒体
+    2. 确保 caption 附加到第一个有媒体的消息上
+    3. 保持原始顺序或重新排序（caption 媒体必须在第一个）
     """
-    media_msgs = [m for m in messages if _msg_has_media(m)]
-    text_only_msgs = [m for m in messages if not _msg_has_media(m)]
+    if not aligned_pairs:
+        return None
 
-    if not media_msgs:
-        # 只有文本
+    # 分离媒体和纯文字，但保留对应关系
+    media_pairs = [(m, tm) for m, tm in aligned_pairs if _msg_has_media(m)]
+    text_pairs = [(m, tm) for m, tm in aligned_pairs if not _msg_has_media(m)]
+
+    if not media_pairs:
+        # 只有文本，直接发送 caption
         if caption and caption.strip():
             return await client.send_message(recipient, caption, reply_to=reply_to)
         return None
+
+    # Telegram 限制：caption 只能放在第一个媒体
+    # 找到应该带 caption 的媒体对
+    caption_pair = None
+    
+    # 优先：tm 有 _caption_applied 且 text 非空
+    for m, tm in media_pairs:
+        if (getattr(tm, '_caption_applied', False) and tm.text):
+            caption_pair = (m, tm)
+            break
+    
+    # 其次：任意有 text 的媒体
+    if not caption_pair:
+        for m, tm in media_pairs:
+            if tm.text:
+                caption_pair = (m, tm)
+                break
+    
+    # 最后：第一个媒体
+    if not caption_pair:
+        caption_pair = media_pairs[0]
+
+    # 重新排序：caption 媒体放第一个
+    ordered_pairs = [caption_pair]
+    for pair in media_pairs:
+        if pair is not caption_pair:
+            ordered_pairs.append(pair)
+
+    # 提取发送参数
+    ordered_messages = [p[0] for p in ordered_pairs]
+    ordered_tms = [p[1] for p in ordered_pairs]
 
     # Telegram caption 限制 1024 字符
     safe_caption = caption
     if safe_caption and len(safe_caption) > 1024:
         safe_caption = safe_caption[:1021] + "..."
 
-    for attempt in range(MAX_RETRIES):
-        # ===== 策略1: 用 message.media 列表发送（保持相册效果）=====
-        try:
-            media_list = [m.media for m in media_msgs]
-            result = await client.send_file(
-                recipient, media_list,
-                caption=safe_caption if safe_caption else None,
-                reply_to=reply_to,
-                supports_streaming=True,
-                force_document=False,
-            )
-            if result:
-                return result if isinstance(result, list) else [result]
-        except Exception as e:
-            err_str = str(e).upper()
-            if "FLOOD" in err_str:
-                wait_match = re.search(r"\d+", str(e))
-                wait_time = int(wait_match.group()) + 10 if wait_match else 60
-                logging.warning(f"FloodWait {wait_time}s (媒体组策略1)")
-                await asyncio.sleep(wait_time)
-                continue
-            logging.warning(f"媒体组策略1失败 ({attempt+1}): {e}")
+    # 调用底层发送
+    return await _send_media_group_impl(
+        client, recipient, ordered_messages, ordered_tms,
+        caption=safe_caption, reply_to=reply_to
+    )
 
-        # ===== 策略2: 下载为 bytes 后重新上传 =====
-        files_data = []
-        file_names = []
-        for msg in media_msgs:
-            data = await _download_media_bytes(client, msg)
-            files_data.append(data)
-            file_names.append(_get_file_name(msg))
 
-        valid_files = [d for d in files_data if d]
-        if valid_files:
+async def _send_media_group_impl(client, recipient, media_messages, tms, caption, reply_to):
+    """底层媒体组实现 — 使用 message.media 或下载重传"""
+    
+    # 策略1: 直接用 message.media 列表发送（保持相册效果）
+    try:
+        media_list = [m.media for m in media_messages]
+        result = await client.send_file(
+            recipient, media_list,
+            caption=caption if caption else None,
+            reply_to=reply_to,
+            supports_streaming=True,
+            force_document=False,
+        )
+        if result:
+            return result if isinstance(result, list) else [result]
+    except Exception as e:
+        err_str = str(e).upper()
+        if "FLOOD" in err_str:
+            wait_match = re.search(r"\d+", str(e))
+            wait_time = int(wait_match.group()) + 10 if wait_match else 60
+            logging.warning(f"FloodWait {wait_time}s (媒体组策略1)")
+            await asyncio.sleep(wait_time)
+            # 重试策略1
             try:
                 result = await client.send_file(
-                    recipient, valid_files,
-                    caption=safe_caption if safe_caption else None,
+                    recipient, media_list,
+                    caption=caption if caption else None,
                     reply_to=reply_to,
                     supports_streaming=True,
                     force_document=False,
@@ -372,83 +405,62 @@ async def _send_media_group(client, recipient, messages, caption, reply_to):
                 if result:
                     return result if isinstance(result, list) else [result]
             except Exception as e2:
-                logging.warning(f"媒体组策略2失败 ({attempt+1}): {e2}")
+                logging.warning(f"媒体组策略1重试失败: {e2}")
+        else:
+            logging.warning(f"媒体组策略1失败: {e}")
 
-        # ===== 策略3: 逐条发送 =====
-        sent_list = []
-        for i, msg in enumerate(media_msgs):
-            msg_cap = safe_caption if i == 0 else ""
-            msg_reply = reply_to if i == 0 else None
-            sent = None
+    # 策略2: 下载为 bytes 后重新上传
+    files_data = []
+    file_names = []
+    for msg, tm in zip(media_messages, tms):
+        data = await _download_media_bytes(client, msg)
+        files_data.append(data)
+        file_names.append(_get_file_name(msg))
 
-            # 3a: send_message + file=media
-            try:
-                sent = await client.send_message(
-                    recipient, msg_cap if msg_cap else "",
-                    file=msg.media,
-                    reply_to=msg_reply,
-                    link_preview=False,
-                )
-            except Exception as e3a:
-                logging.debug(f"逐条 media 引用失败 ({i}): {e3a}")
-
-                # 3b: send_file + media
-                try:
-                    sent = await client.send_file(
-                        recipient, msg.media,
-                        caption=msg_cap if msg_cap else None,
-                        reply_to=msg_reply,
-                        supports_streaming=True,
-                        force_document=False,
-                    )
-                except Exception as e3b:
-                    logging.debug(f"逐条 send_file media 失败 ({i}): {e3b}")
-
-                    # 3c: send_file + bytes
-                    if i < len(files_data) and files_data[i]:
-                        try:
-                            sent = await client.send_file(
-                                recipient, files_data[i],
-                                caption=msg_cap if msg_cap else None,
-                                reply_to=msg_reply,
-                                file_name=file_names[i],
-                                supports_streaming=True,
-                                force_document=False,
-                            )
-                        except Exception as e3c:
-                            logging.error(f"逐条 bytes 也失败 ({i}): {e3c}")
-
-            if sent:
-                sent_list.append(sent)
-            else:
-                logging.error(f"媒体组第 {i} 条消息所有方式均失败")
-
-            # 逐条发送之间加小延迟避免 flood
-            if i < len(media_msgs) - 1:
-                await asyncio.sleep(1)
-
-        if sent_list:
-            return sent_list
-
-        await asyncio.sleep(5 * (attempt + 1))
-
-    # 全部失败，降级发文本
-    logging.error("媒体组所有发送方式均失败，降级为纯文本")
-    if safe_caption and safe_caption.strip():
+    valid_files = [(d, n) for d, n in zip(files_data, file_names) if d]
+    if valid_files:
         try:
-            return await client.send_message(recipient, safe_caption, reply_to=reply_to)
-        except Exception:
-            pass
-    return None
+            result = await client.send_file(
+                recipient, [d for d, n in valid_files],
+                caption=caption if caption else None,
+                reply_to=reply_to,
+                supports_streaming=True,
+                force_document=False,
+            )
+            if result:
+                return result if isinstance(result, list) else [result]
+        except Exception as e2:
+            logging.warning(f"媒体组策略2失败: {e2}")
+
+    # 策略3: 逐条发送（保底）
+    logging.warning("媒体组降级为逐条发送")
+    sent_list = []
+    for i, (msg, tm) in enumerate(zip(media_messages, tms)):
+        msg_caption = caption if i == 0 else ""
+        msg_reply = reply_to if i == 0 else None
+        
+        sent = await _send_single_message(
+            client, recipient, msg,
+            caption=msg_caption,
+            reply_to=msg_reply,
+        )
+        if sent:
+            sent_list.append(sent)
+        
+        # 逐条发送之间加延迟避免 flood
+        if i < len(media_messages) - 1:
+            await asyncio.sleep(1)
+
+    return sent_list if sent_list else None
 
 
 async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, comment_to_post=None):
-    """发送消息主函数 — 修复版
+    """发送消息主函数 — 完全修复版
     
     关键修复：
-    1. 媒体组 caption 处理：检查 _caption_applied 标记，避免重复拼接
-    2. 正确处理 comment_to_post 作为 reply_to
-    3. 增强错误处理
+    1. 正确处理 _caption_applied 标记
+    2. 确保 caption 和 media 正确对应
+    3. 混合媒体组中，找到真正有 caption 的媒体
     """
     CONFIG = _get_config()
     client = tm.client
@@ -475,24 +487,61 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
 
     # ========== 媒体组 ==========
     if grouped_messages and grouped_tms:
+        # 关键修复：对齐检查
+        if len(grouped_messages) != len(grouped_tms):
+            logging.warning(f"消息数量不匹配: messages={len(grouped_messages)}, tms={len(grouped_tms)}")
+            # 尝试用 tm.message 重建对应关系
+            grouped_messages = [tm.message for tm in grouped_tms]
+
         # 检查 caption 插件是否已经处理过
         caption_already_applied = any(
             getattr(gtm, '_caption_applied', False) for gtm in grouped_tms
         )
 
         if caption_already_applied:
-            # caption 插件已经处理过，直接使用 tms[0].text
-            combined_caption = grouped_tms[0].text if grouped_tms[0].text else None
+            # 关键修复：找到设置了 caption 的媒体消息
+            # 优先找：有媒体 + text 非空 + _caption_applied
+            caption_tm = None
+            for gtm in grouped_tms:
+                if (gtm.file_type != "nofile" and 
+                    gtm.text and 
+                    getattr(gtm, '_caption_applied', False)):
+                    caption_tm = gtm
+                    break
+            
+            # 如果没找到，找任意有 text 且 _caption_applied 的
+            if not caption_tm:
+                for gtm in grouped_tms:
+                    if gtm.text and getattr(gtm, '_caption_applied', False):
+                        caption_tm = gtm
+                        break
+            
+            # 最后兜底：第一个有媒体或有 text 的
+            if not caption_tm:
+                for gtm in grouped_tms:
+                    if gtm.file_type != "nofile" or gtm.text:
+                        caption_tm = gtm
+                        break
+            
+            combined_caption = caption_tm.text if caption_tm else None
+            
+            # 调试日志
+            logging.debug(f"Caption applied: target={caption_tm.file_type if caption_tm else 'None'}, "
+                         f"text_len={len(combined_caption) if combined_caption else 0}")
         else:
             # 未经 caption 插件处理，正常收集所有文本
             all_texts = []
             for gtm in grouped_tms:
-                if gtm.text and gtm.text.strip():
-                    all_texts.append(gtm.text.strip())
+                content = gtm.text or gtm.raw_text or ""
+                if content.strip():
+                    all_texts.append(content.strip())
             combined_caption = "\n\n".join(all_texts) if all_texts else None
 
-        return await _send_media_group(
-            client, recipient, grouped_messages,
+        # 关键修复：构建对齐的 (message, tm) 对，用于发送
+        aligned_pairs = list(zip(grouped_messages, grouped_tms))
+        
+        return await _send_media_group_aligned(
+            client, recipient, aligned_pairs,
             caption=combined_caption,
             reply_to=effective_reply_to,
         )
