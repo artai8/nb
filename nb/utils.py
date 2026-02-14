@@ -1,4 +1,4 @@
-# nb/utils.py —— 支持评论区转发
+# nb/utils.py —— 支持评论区转发 + 媒体引用过期自动重下载
 
 import logging
 import asyncio
@@ -111,7 +111,7 @@ async def get_discussion_group_id(
 
 
 # =====================================================================
-#  Spoiler 检测与发送（不变）
+#  Spoiler 检测与发送
 # =====================================================================
 
 def _has_spoiler(message: Message) -> bool:
@@ -240,7 +240,115 @@ async def _send_album_with_spoiler(
 
 
 # =====================================================================
-#  主发送函数（增加 comment_to_post 参数）
+#  判断是否为 file_reference / media invalid 错误
+# =====================================================================
+
+def _is_media_invalid_error(e: Exception) -> bool:
+    """判断异常是否属于媒体引用失效类错误"""
+    error_str = str(e).lower()
+    keywords = [
+        "file reference",
+        "file_reference",
+        "media object is invalid",
+        "the provided media object is invalid",
+        "sendmediarequest",
+        "photo_invalid_dimensions",
+        "media_invalid",
+    ]
+    return any(kw in error_str for kw in keywords)
+
+
+# =====================================================================
+#  重新下载媒体后发送（降级方案）
+# =====================================================================
+
+async def _redownload_and_send(
+    client: TelegramClient,
+    recipient: EntityLike,
+    tm: "NbMessage",
+    reply_to: Optional[int] = None,
+    buttons=None,
+) -> Optional[Message]:
+    """当 file_reference 过期时，重新下载媒体文件再上传发送。"""
+    logging.info("🔄 file_reference 过期，重新下载媒体...")
+    try:
+        file_bytes = await tm.message.download_media(file=bytes)
+        if not file_bytes:
+            logging.error("❌ 下载媒体返回空")
+            return None
+
+        # 先尝试带按钮发送
+        if buttons is not None:
+            try:
+                result = await client.send_file(
+                    recipient,
+                    file_bytes,
+                    caption=tm.text,
+                    reply_to=reply_to,
+                    supports_streaming=True,
+                    buttons=buttons,
+                )
+                logging.info("✅ 重新下载后带按钮发送成功")
+                return result
+            except Exception as e_btn:
+                logging.warning(f"⚠️ 重新下载后带按钮发送失败，去掉按钮重试: {e_btn}")
+
+        # 不带按钮发送
+        result = await client.send_file(
+            recipient,
+            file_bytes,
+            caption=tm.text,
+            reply_to=reply_to,
+            supports_streaming=True,
+        )
+        logging.info("✅ 重新下载后发送成功")
+        return result
+
+    except Exception as e2:
+        logging.error(f"❌ 重新下载后发送仍然失败: {e2}")
+        return None
+
+
+async def _redownload_album_and_send(
+    client: TelegramClient,
+    recipient: EntityLike,
+    grouped_messages: List[Message],
+    caption: Optional[str] = None,
+    reply_to: Optional[int] = None,
+) -> Optional[List[Message]]:
+    """媒体组 file_reference 过期时，重新下载所有文件后发送。"""
+    logging.info("🔄 媒体组 file_reference 过期，重新下载所有媒体...")
+    try:
+        downloaded_files = []
+        for msg in grouped_messages:
+            if msg.media:
+                file_bytes = await msg.download_media(file=bytes)
+                if file_bytes:
+                    downloaded_files.append(file_bytes)
+
+        if not downloaded_files:
+            logging.error("❌ 没有成功下载任何媒体")
+            return None
+
+        result = await client.send_file(
+            recipient,
+            downloaded_files,
+            caption=caption or None,
+            reply_to=reply_to,
+            supports_streaming=True,
+            force_document=False,
+            allow_cache=False,
+        )
+        logging.info(f"✅ 重新下载后媒体组发送成功 ({len(downloaded_files)} 项)")
+        return result
+
+    except Exception as e2:
+        logging.error(f"❌ 重新下载后媒体组发送仍然失败: {e2}")
+        return None
+
+
+# =====================================================================
+#  主发送函数（增加 comment_to_post 参数 + 媒体降级）
 # =====================================================================
 
 def platform_info():
@@ -353,6 +461,17 @@ async def send_message(
                     wait_sec = int(wait_match.group()) if wait_match else 30
                     logging.critical(f"⛔ FloodWait: 等待 {wait_sec} 秒")
                     await asyncio.sleep(wait_sec + 10)
+                elif _is_media_invalid_error(e):
+                    # ★ 媒体引用失效，降级为重新下载
+                    logging.warning(f"⚠️ 媒体组引用失效 (attempt {attempt+1}): {e}")
+                    redownload_result = await _redownload_album_and_send(
+                        client, recipient, grouped_messages,
+                        caption=combined_caption or None,
+                        reply_to=effective_reply_to,
+                    )
+                    if redownload_result is not None:
+                        return redownload_result
+                    # 重下载也失败，继续重试循环
                 else:
                     logging.error(f"❌ 媒体组发送失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
                 attempt += 1
@@ -399,10 +518,21 @@ async def send_message(
             logging.info("✅ 带 spoiler 单条消息发送成功")
             return result
         except Exception as e:
+            if _is_media_invalid_error(e):
+                logging.warning(f"⚠️ Spoiler 媒体引用失效，降级为重新下载: {e}")
+                redownload_result = await _redownload_and_send(
+                    client, recipient, tm,
+                    reply_to=effective_reply_to,
+                    buttons=processed_markup,
+                )
+                if redownload_result is not None:
+                    return redownload_result
             logging.warning(f"⚠️ spoiler 发送失败，回退普通模式: {e}")
 
     # 3c: 普通消息
-    try:
+
+    async def _try_send_normal() -> Message:
+        """尝试直接用 media 引用发送（原始逻辑）"""
         if processed_markup is not None:
             try:
                 return await client.send_message(
@@ -444,9 +574,21 @@ async def send_message(
                     tm.text,
                     reply_to=effective_reply_to,
                 )
+
+    # ★ 先尝试直接发送，如果媒体引用失效则降级重新下载
+    try:
+        return await _try_send_normal()
     except Exception as e:
-        logging.error(f"❌ 消息发送失败: {e}")
-        return None
+        if _is_media_invalid_error(e) and tm.message.media:
+            logging.warning(f"⚠️ 媒体引用失效，降级为重新下载: {e}")
+            return await _redownload_and_send(
+                client, recipient, tm,
+                reply_to=effective_reply_to,
+                buttons=processed_markup,
+            )
+        else:
+            logging.error(f"❌ 消息发送失败: {e}")
+            return None
 
 
 # =====================================================================
