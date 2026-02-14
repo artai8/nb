@@ -29,7 +29,11 @@ class Forward(BaseModel):
     source: Union[int, str] = ""
     dest: List[Union[int, str]] = []
     offset: int = 0
-    end: Optional[int] = None  # 修复：默认值改为 None，语义更清晰
+    end: Optional[int] = None
+    # --- 评论区功能 ---
+    forward_comments: bool = False   # 是否转发回复
+    comm_only_media: bool = False    # 仅转发带媒体的回复
+    comm_max_text: int = 5           # 纯文本回复最大转发数
 
 
 class LiveSettings(BaseModel):
@@ -86,7 +90,7 @@ class Config(BaseModel):
     past: PastSettings = PastSettings()
 
     plugins: PluginConfig = PluginConfig()
-    bot_messages: BotMessages = BotMessages()  # 修复：添加类型注解使其参与序列化
+    bot_messages: BotMessages = BotMessages()
 
 
 def write_config_to_file(config: Config):
@@ -213,12 +217,6 @@ MONGO_COL_NAME = os.getenv("MONGO_COL_NAME", "nb-instance-0")
 
 stg.CONFIG_TYPE = detect_config_type()
 CONFIG = read_config()
-
-if PASSWORD == "nb":
-    logging.warning(
-        "You have not set a password to protect the web access to nb.\n"
-        "The default password `nb` is used."
-    )
 
 from_to = {}
 is_bot: Optional[bool] = None
