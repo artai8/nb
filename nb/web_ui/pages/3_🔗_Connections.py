@@ -1,150 +1,66 @@
+# nb/web_ui/pages/3_🔗_Connections.py
+
 import time
-
 import streamlit as st
-
 from nb.config import CONFIG, Forward, read_config, write_config
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import get_list, get_string, hide_st, switch_theme
 
 CONFIG = read_config()
 
-st.set_page_config(
-    page_title="Connections",
-    page_icon="🔗",
-)
+st.set_page_config(page_title="Connections", page_icon="🔗")
 hide_st(st)
 switch_theme(st, CONFIG)
 
-# 添加兼容性处理
 def rerun():
-    """兼容不同版本的 Streamlit rerun 方法"""
-    if hasattr(st, 'rerun'):
-        st.rerun()
-    elif hasattr(st, 'experimental_rerun'):
-        st.experimental_rerun()
-    else:
-        # 对于非常旧的版本
-        raise st.script_runner.StopException
-
+    if hasattr(st, 'rerun'): st.rerun()
+    else: st.experimental_rerun()
 
 def _parse_id(value: str):
-    """尝试将字符串转为 int，失败则保持字符串。"""
-    value = value.strip()
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
-def _safe_int(value, default=0):
-    """安全地将值转为 int，处理 None 和非数字字符串。"""
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
+    try: return int(value.strip())
+    except: return value.strip()
 
 if check_password(st):
-    add_new = st.button("Add new connection")
-    if add_new:
+    if st.button("Add new connection"):
         CONFIG.forwards.append(Forward())
         write_config(CONFIG)
+        rerun()
 
     num = len(CONFIG.forwards)
-
-    if num == 0:
-        st.write(
-            "No connections found. Click on Add new connection above to create one!"
-        )
-    else:
-        tab_strings = []
-        for i in range(num):
-            if CONFIG.forwards[i].con_name:
-                label = CONFIG.forwards[i].con_name
-            else:
-                label = f"Connection {i+1}"
-            if CONFIG.forwards[i].use_this:
-                status = "🟢"
-            else:
-                status = "🟡"
-
-            tab_strings.append(f"{status} {label}")
-
-        tabs = st.tabs(list(tab_strings))
-
+    if num > 0:
+        tabs = st.tabs([f"{'🟢' if f.use_this else '🟡'} {f.con_name or f'Con {i+1}'}" for i, f in enumerate(CONFIG.forwards)])
         for i in range(num):
             with tabs[i]:
                 con = i + 1
-                name = CONFIG.forwards[i].con_name
-                if name:
-                    label = f"{con} [{name}]"
-                else:
-                    label = con
-                with st.expander("Modify Metadata"):
-                    st.write(f"Connection ID: **{con}**")
-                    CONFIG.forwards[i].con_name = st.text_input(
-                        "Name of this connection",
-                        value=CONFIG.forwards[i].con_name,
-                        key=con,
-                    )
+                with st.expander("Metadata"):
+                    CONFIG.forwards[i].con_name = st.text_input("Name", value=CONFIG.forwards[i].con_name, key=f"n{con}")
+                    CONFIG.forwards[i].use_this = st.checkbox("Active", value=CONFIG.forwards[i].use_this, key=f"u{con}")
+                
+                with st.expander("Source & Dest"):
+                    src = st.text_input("Source ID", value=str(CONFIG.forwards[i].source), key=f"s{con}")
+                    CONFIG.forwards[i].source = _parse_id(src)
+                    dest_list = get_list(st.text_area("Destinations", value=get_string(CONFIG.forwards[i].dest), key=f"d{con}"))
+                    CONFIG.forwards[i].dest = [_parse_id(d) for d in dest_list]
 
-                    st.info(
-                        "You can untick the below checkbox to suspend this connection."
-                    )
-                    CONFIG.forwards[i].use_this = st.checkbox(
-                        "Use this connection",
-                        value=CONFIG.forwards[i].use_this,
-                        key=f"use {con}",
-                    )
-                with st.expander("Source and Destination"):
-                    st.write(f"Configure connection {label}")
-
-                    source_input = st.text_input(
-                        "Source",
-                        value=str(CONFIG.forwards[i].source),
-                        key=f"source {con}",
-                    ).strip()
-                    CONFIG.forwards[i].source = _parse_id(source_input)
-                    st.write("only one source is allowed in a connection")
-
-                    raw_dest = get_list(
-                        st.text_area(
-                            "Destinations",
-                            value=get_string(CONFIG.forwards[i].dest),
-                            key=f"dest {con}",
-                        )
-                    )
-                    CONFIG.forwards[i].dest = [_parse_id(item) for item in raw_dest]
-                    st.write("Write destinations one item per line")
+                with st.expander("💬 评论区 (Comments)"):
+                    f = CONFIG.forwards[i]
+                    f.forward_comments = st.checkbox("转发该消息下的评论", value=f.forward_comments, key=f"fc{con}")
+                    if f.forward_comments:
+                        f.comm_only_media = st.toggle("仅转发带媒体的评论", value=f.comm_only_media, key=f"com{con}")
+                        if not f.comm_only_media:
+                            f.comm_max_text = st.number_input("每个帖子转发纯文本评论上限", 0, 100, f.comm_max_text, key=f"cmt{con}")
 
                 with st.expander("Past Mode Settings"):
-                    CONFIG.forwards[i].offset = _safe_int(  # 修复：安全转换
-                        st.text_input(
-                            "Offset",
-                            value=str(CONFIG.forwards[i].offset),
-                            key=f"offset {con}",
-                        ),
-                        default=0,
-                    )
-                    end_input = st.text_input(  # 修复：安全处理 None
-                        "End",
-                        value=str(CONFIG.forwards[i].end) if CONFIG.forwards[i].end is not None else "",
-                        key=f"end {con}",
-                    )
-                    CONFIG.forwards[i].end = _safe_int(end_input, default=None) if end_input.strip() else None
-                with st.expander("Delete this connection"):
-                    st.warning(
-                        f"Clicking the 'Remove' button will **delete** connection **{label}**. This action cannot be reversed once done.",
-                        icon="⚠️",
-                    )
+                    CONFIG.forwards[i].offset = int(st.text_input("Offset ID", value=str(CONFIG.forwards[i].offset), key=f"o{con}") or 0)
+                    end = st.text_input("End ID (Optional)", value=str(CONFIG.forwards[i].end) if CONFIG.forwards[i].end else "", key=f"e{con}")
+                    CONFIG.forwards[i].end = int(end) if end else None
 
-                    if st.button(f"Remove connection **{label}**"):
-                        del CONFIG.forwards[i]
-                        write_config(CONFIG)
-                        rerun()  # 使用兼容性函数替代 st.rerun()
+                if st.button(f"Delete Connection {con}", key=f"del{con}"):
+                    del CONFIG.forwards[i]
+                    write_config(CONFIG)
+                    rerun()
 
-    if st.button("Save"):
+    if st.button("Save All Settings"):
         write_config(CONFIG)
-        rerun()  # 使用兼容性函数替代 st.rerun()
+        st.success("Saved!")
+        rerun()
