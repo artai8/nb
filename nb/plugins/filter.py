@@ -1,7 +1,3 @@
-import logging
-from typing import List
-
-from nb.plugin_models import TextFilter
 from nb.plugins import NbMessage, NbPlugin
 from nb.utils import match
 
@@ -9,79 +5,103 @@ from nb.utils import match
 class NbFilter(NbPlugin):
     id_ = "filter"
 
-    def __init__(self, data) -> None:
+    def __init__(self, data):
         self.filters = data
-        self.case_correct()
-        logging.info(self.filters)
+        textf = self.filters.text
+        if not textf.case_sensitive and not textf.regex:
+            textf.blacklist = [i.lower() for i in textf.blacklist]
+            textf.whitelist = [i.lower() for i in textf.whitelist]
 
-    def case_correct(self) -> None:
-        textf: TextFilter = self.filters.text
-
-        if textf.case_sensitive is False and textf.regex is False:
-            textf.blacklist = [item.lower() for item in textf.blacklist]
-            textf.whitelist = [item.lower() for item in textf.whitelist]
-
-    def modify(self, tm: NbMessage) -> NbMessage:
-        if self.users_safe(tm):
-            logging.info("Message passed users filter")
-            if self.files_safe(tm):
-                logging.info("Message passed files filter")
-                if self.text_safe(tm):
-                    logging.info("Message passed text filter")
-                    return tm
+    def modify(self, tm):
+        if self.users_safe(tm) and self.files_safe(tm) and self.text_safe(tm):
+            return tm
         return None
 
-    def modify_group(self, tms: List[NbMessage]) -> List[NbMessage]:
-        """Apply filter to each message in the group."""
-        filtered = []
+    def modify_group(self, tms):
+        """媒体组过滤 — 修复版：基于整组文本判断，不逐条过滤文本"""
+        if not tms:
+            return tms
+
+        # 收集整个媒体组的合并文本用于文本过滤判断
+        combined_text = " ".join(
+            tm.text for tm in tms if tm.text and tm.text.strip()
+        )
+
+        # 用合并文本做一次文本安全检查
+        group_text_safe = self._check_text_safe(combined_text)
+
+        result = []
         for tm in tms:
-            if self.modify(tm):
-                filtered.append(tm)
-        return filtered
+            # 用户过滤和文件过滤仍然逐条检查
+            if not self.users_safe(tm):
+                continue
+            if not self.files_safe(tm):
+                continue
+            # 文本过滤：使用整组的判断结果，而不是逐条判断
+            # 这样没有文字的图片/视频不会被误删
+            if not group_text_safe:
+                continue
+            result.append(tm)
+        return result
 
-    def text_safe(self, tm: NbMessage) -> bool:
+    def _check_text_safe(self, text):
+        """检查文本是否安全（用于整组判断）"""
         flist = self.filters.text
-
-        text = tm.text
         if not flist.case_sensitive:
-            text = text.lower()
-        if not text and flist.whitelist == []:
+            text = text.lower() if text else ""
+
+        # 没有文本且没有白名单 → 安全
+        if not text and not flist.whitelist:
             return True
+        # 没有文本但有白名单 → 看白名单是否要求有内容
+        if not text and flist.whitelist:
+            return False
 
-        for forbidden in flist.blacklist:
-            if match(forbidden, text, self.filters.text.regex):
+        # 黑名单检查
+        for f in flist.blacklist:
+            if match(f, text, flist.regex):
                 return False
-
+        # 白名单检查
         if not flist.whitelist:
             return True
+        return any(match(a, text, flist.regex) for a in flist.whitelist)
 
-        for allowed in flist.whitelist:
-            if match(allowed, text, self.filters.text.regex):
+    def text_safe(self, tm):
+        """单条消息文本安全检查 — 修复版：有媒体但无文本的消息直接放行"""
+        flist = self.filters.text
+        text = tm.text if flist.case_sensitive else tm.text.lower()
+
+        # 关键修复：没有文本但有媒体文件 → 放行（不要因为缺少文本就删掉图片/视频）
+        if not text:
+            if tm.file_type != "nofile":
                 return True
+            if not flist.whitelist:
+                return True
+            return False
 
-        return False
+        for f in flist.blacklist:
+            if match(f, text, flist.regex):
+                return False
+        if not flist.whitelist:
+            return True
+        return any(match(a, text, flist.regex) for a in flist.whitelist)
 
-    def users_safe(self, tm: NbMessage) -> bool:
+    def users_safe(self, tm):
         flist = self.filters.users
         sender = str(tm.sender_id)
         if sender in flist.blacklist:
             return False
         if not flist.whitelist:
             return True
-        if sender in flist.whitelist:
-            return True
-        return False
+        return sender in flist.whitelist
 
-    def files_safe(self, tm: NbMessage) -> bool:
+    def files_safe(self, tm):
         flist = self.filters.files
-        fl_type = tm.file_type
-        # 统一用 .value 比较，避免 str 与 Enum 隐式匹配
-        bl_values = [f.value if hasattr(f, 'value') else f for f in flist.blacklist]
-        wl_values = [f.value if hasattr(f, 'value') else f for f in flist.whitelist]
-        if fl_type in bl_values:
+        ft = tm.file_type
+        bl = [f.value if hasattr(f, 'value') else f for f in flist.blacklist]
+        wl = [f.value if hasattr(f, 'value') else f for f in flist.whitelist]
+        if ft in bl:
             return False
-        if not wl_values:
+        if not wl:
             return True
-        if fl_type in wl_values:
-            return True
-        return False
+        return ft in wl
