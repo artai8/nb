@@ -1,55 +1,99 @@
 import os
+from typing import Dict, List
+
 from streamlit.components.v1 import html
 from nb.config import write_config
 
-package_dir = os.path.dirname(os.path.abspath(__file__))
+
+def _get_package_dir() -> str:
+    """获取 web_ui 包的实际文件系统路径"""
+    return os.path.dirname(os.path.abspath(__file__))
 
 
-def get_list(string):
-    return [line.strip() for line in string.splitlines() if line.strip()]
+package_dir = _get_package_dir()
 
 
-def get_string(my_list):
-    return "".join(f"{item}\n" for item in my_list)
+def get_list(string: str):
+    my_list = []
+    for line in string.splitlines():
+        clean_line = line.strip()
+        if clean_line != "":
+            my_list.append(clean_line)
+    return my_list
 
 
-def dict_to_list(d):
-    return [f"{k}: {v}" for k, v in d.items()]
+def get_string(my_list: List):
+    string = ""
+    for item in my_list:
+        string += f"{item}\n"
+    return string
 
 
-def list_to_dict(my_list):
+def dict_to_list(dict: Dict):
+    my_list = []
+    for key, val in dict.items():
+        my_list.append(f"{key}: {val}")
+    return my_list
+
+
+def list_to_dict(my_list: List):
     my_dict = {}
     for item in my_list:
-        k, v = item.split(":")
-        my_dict[k.strip()] = v.strip()
+        key, val = item.split(":")
+        my_dict[key.strip()] = val.strip()
     return my_dict
 
 
 def apply_theme(st, CONFIG, hidden_container):
+    """Apply theme using browser's local storage"""
     if st.session_state.theme == "☀️":
-        theme, CONFIG.theme = "Light", "light"
+        theme = "Light"
+        CONFIG.theme = "light"
     else:
-        theme, CONFIG.theme = "Dark", "dark"
+        theme = "Dark"
+        CONFIG.theme = "dark"
     write_config(CONFIG)
+
     script = f"<script>localStorage.setItem('stActiveTheme-/-v1', '{{\"name\":\"{theme}\"}}');"
+
     pages_dir = os.path.join(package_dir, "pages")
     if os.path.isdir(pages_dir):
-        for page in os.listdir(pages_dir):
+        pages = os.listdir(pages_dir)
+        for page in pages:
             if page.endswith(".py"):
-                script += f"localStorage.setItem('stActiveTheme-/{page[4:-3]}-v1', '{{\"name\":\"{theme}\"}}');"
+                page_name = page[4:-3]  # 去掉序号前缀和 .py 后缀
+                script += f"localStorage.setItem('stActiveTheme-/{page_name}-v1', '{{\"name\":\"{theme}\"}}');"
+
     script += "parent.location.reload()</script>"
     with hidden_container:
         html(script, height=0, width=0)
 
 
 def switch_theme(st, CONFIG):
+    """Display the option to change theme (Light/Dark)"""
     with st.sidebar:
-        _, content, _ = st.columns([0.27, 0.46, 0.27])
+        leftpad, content, rightpad = st.columns([0.27, 0.46, 0.27])
         with content:
-            st.radio("主题:", ["☀️", "🌒"], horizontal=True, label_visibility="collapsed", index=CONFIG.theme == "dark", on_change=apply_theme, key="theme", args=[st, CONFIG, _])
+            st.radio(
+                "Theme:",
+                ["☀️", "🌒"],
+                horizontal=True,
+                label_visibility="collapsed",
+                index=CONFIG.theme == "dark",
+                on_change=apply_theme,
+                key="theme",
+                args=[st, CONFIG, leftpad],
+            )
 
 
 def hide_st(st):
-    if os.getenv("DEV"):
+    dev = os.getenv("DEV")
+    if dev:
         return
-    st.markdown("<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
+    hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            </style>
+            """
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
