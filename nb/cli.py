@@ -45,14 +45,13 @@ def verbosity_callback(value: bool):
         level = logging.WARNING
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
+        format="%(message)s",
         handlers=[
             RichHandler(
                 rich_tracebacks=True,
                 markup=True,
             )
         ],
-        force=True,
     )
     topper()
     logging.info("Verbosity turned on! This is suitable for debugging")
@@ -67,18 +66,15 @@ def version_callback(value: bool):
 
 
 def version_check():
-    try:
-        latver = latest_release("nb").version
-        if __version__ != latver:
-            con.print(
-                f"nb has a newer release {latver} available!\n"
-                "Visit http://bit.ly/update-nb",
-                style="bold yellow",
-            )
-        else:
-            con.print(f"Running latest nb version {__version__}", style="bold green")
-    except Exception:
-        con.print(f"Running nb version {__version__}", style="bold green")
+    latver = latest_release("nb").version
+    if __version__ != latver:
+        con.print(  # 修复：统一缩进
+            f"nb has a newer release {latver} available!\n"  # 修复：拼写 available
+            "Visit http://bit.ly/update-nb",
+            style="bold yellow",
+        )
+    else:
+        con.print(f"Running latest nb version {__version__}", style="bold green")
 
 
 @app.command()
@@ -86,7 +82,7 @@ def main(
     mode: Mode = typer.Argument(
         ..., help="Choose the mode in which you want to run nb.", envvar="NB_MODE"
     ),
-    verbose: Optional[bool] = typer.Option(
+    verbose: Optional[bool] = typer.Option(  # pylint: disable=unused-argument
         None,
         "--loud",
         "-l",
@@ -94,7 +90,7 @@ def main(
         envvar="LOUD",
         help="Increase output verbosity.",
     ),
-    version: Optional[bool] = typer.Option(
+    version: Optional[bool] = typer.Option(  # pylint: disable=unused-argument
         None,
         "--version",
         "-v",
@@ -115,15 +111,10 @@ def main(
         sys.exit(1)
 
     if mode == Mode.PAST:
-        from nb.past import forward_job
+        from nb.past import forward_job  # pylint: disable=import-outside-toplevel
 
         asyncio.run(forward_job())
     else:
-        from nb.live import start_sync
+        from nb.live import start_sync  # pylint: disable=import-outside-toplevel
 
         asyncio.run(start_sync())
-
-
-# ★ 关键：允许 python -m nb.cli live --loud 直接运行
-if __name__ == "__main__":
-    app()
