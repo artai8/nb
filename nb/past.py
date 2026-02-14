@@ -8,6 +8,7 @@ from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError
 from telethon.tl.custom.message import Message
 from telethon.tl.patched import MessageService
+from telethon.tl.types import MessageMediaGame, MessageMediaPoll, MessageMediaDice
 
 from nb import config
 from nb import storage as st
@@ -20,12 +21,11 @@ from nb.utils import (
     _get_reply_to_top_id,
     get_discussion_message,
     get_discussion_group_id,
-    _is_unsupported_media,
-    _get_media_type_name,
 )
 
 
 def _extract_msg_id(fwded) -> Optional[int]:
+    """从转发结果中提取消息 ID"""
     if fwded is None:
         return None
     if isinstance(fwded, int):
@@ -37,6 +37,38 @@ def _extract_msg_id(fwded) -> Optional[int]:
     if hasattr(fwded, 'id'):
         return fwded.id
     return None
+
+
+def _is_unsupported_media(message: Message) -> bool:
+    """检测不支持转发的媒体类型"""
+    if not message or not message.media:
+        return False
+    
+    media = message.media
+    
+    # 游戏消息：用户账号无法发送
+    if isinstance(media, MessageMediaGame):
+        return True
+    
+    # 投票消息：需要特殊处理
+    if isinstance(media, MessageMediaPoll):
+        return True
+    
+    # 骰子消息
+    if isinstance(media, MessageMediaDice):
+        return True
+    
+    return False
+
+
+def _get_media_type_name(message: Message) -> str:
+    """获取媒体类型名称用于日志"""
+    if not message or not message.media:
+        return "text"
+    
+    media = message.media
+    media_type = type(media).__name__
+    return media_type.replace("MessageMedia", "").lower()
 
 
 async def _get_comments_method_a(
@@ -81,7 +113,7 @@ async def _get_comments_method_b(
         discussion_id = disc_msg.chat_id
         top_id = disc_msg.id
 
-        # ★ 记录映射
+        # 记录映射
         st.add_discussion_post_mapping(discussion_id, top_id, msg_id)
 
         async for msg in client.iter_messages(
@@ -189,7 +221,7 @@ def _group_comments(comments: List[Message]) -> List[List[Message]]:
 async def _send_past_grouped(
     client: TelegramClient, src: int, dest: List[int], messages: List[Message]
 ) -> Dict[int, Optional[int]]:
-    """★ 修复：返回每个目标的发送结果"""
+    """发送媒体组并返回每个目标的发送结果"""
     tms = await apply_plugins_to_group(messages)
     if not tms:
         return {}
@@ -203,6 +235,12 @@ async def _send_past_grouped(
 
     for d in dest:
         try:
+            # ★ 调试：媒体组发送前
+            logging.info(
+                f"📤 准备发送媒体组: src={src}, first_msg_id={first_msg_id}, "
+                f"dest={d}, group_size={len(messages)}"
+            )
+            
             fwded_msgs = await send_message(
                 d, tm_template,
                 grouped_messages=[tm.message for tm in tms],
@@ -217,10 +255,15 @@ async def _send_past_grouped(
                 if fwded_id is not None:
                     st.add_post_mapping(src, first_msg_id, d, fwded_id)
                     results[d] = fwded_id
+                    logging.info(
+                        f"✅ 媒体组映射建立: ({src}, {first_msg_id}) → ({d}, {fwded_id})"
+                    )
                 else:
                     results[d] = None
+                    logging.warning(f"⚠️ 媒体组发送成功但无法提取 ID")
             else:
                 results[d] = None
+                logging.warning(f"⚠️ 媒体组发送返回 None")
 
         except Exception as e:
             logging.error(f"🚨 组播失败 ({src} → {d}): {e}")
@@ -250,7 +293,7 @@ async def _flush_grouped_buffer(
         forward.offset = group_last_id
         write_config(CONFIG, persist=False)
 
-        # ★ 检查是否有成功的发送
+        # 检查是否有成功的发送
         success_count = sum(1 for v in results.values() if v is not None)
         
         delay_seconds = random.randint(60, 300)
@@ -272,7 +315,7 @@ async def _forward_comments_for_post(
     dest_list: List[int],
     forward: config.Forward,
 ) -> None:
-    """★ 修复：转发帖子的评论"""
+    """转发帖子的评论"""
     comments_cfg = forward.comments
 
     logging.info(f"💬 ═══ 开始处理帖子 {src_post_id} 的评论 ═══")
@@ -328,7 +371,7 @@ async def _forward_comments_for_post(
         f"{len(send_units)} 单元 ({single_count} 单条 + {group_count} 组)"
     )
 
-    # ★ 修复：构建评论目标
+    # 构建评论目标
     dest_targets = {}
 
     for dest_ch in dest_list:
@@ -339,17 +382,23 @@ async def _forward_comments_for_post(
             except Exception:
                 continue
 
-        # ★ 修复：使用增强的映射查找
+        # 使用增强的映射查找（支持多种 ID 格式）
         dest_post_id = st.get_dest_post_id(
             src_channel_id, src_post_id, dest_resolved
         )
         
         if dest_post_id is None:
-            # ★ 调试输出
+            # ★ 详细的调试输出
             logging.warning(
                 f"⚠️ 帖子 {src_post_id} → 目标 {dest_resolved}: 没有帖子映射\n"
+                f"   源: {src_channel_id}, 目标: {dest_resolved}\n"
                 f"   当前映射数量: {len(st.post_id_mapping)}"
             )
+            # 打印前5个映射用于调试
+            if st.post_id_mapping:
+                sample_mappings = list(st.post_id_mapping.items())[:5]
+                for (src_ch, src_msg), dest_map in sample_mappings:
+                    logging.debug(f"   样本映射: ({src_ch}, {src_msg}) → {dest_map}")
             continue
 
         if comments_cfg.dest_mode == "comments":
@@ -411,7 +460,7 @@ async def _forward_comments_for_post(
                     )
                     if fwded:
                         sent_count += 1
-                        # ★ 修复：使用源讨论组 ID（不是源频道 ID）
+                        # 使用源讨论组 ID（不是源频道 ID）
                         src_discussion_id = unit_msgs[0].chat_id
                         fwded_id = _extract_msg_id(fwded)
                         if fwded_id:
@@ -456,7 +505,7 @@ async def _forward_comments_for_post(
                     )
                     if fwded:
                         sent_count += 1
-                        # ★ 修复：使用评论所在的讨论组 ID
+                        # 使用评论所在的讨论组 ID
                         src_discussion_id = comment.chat_id
                         fwded_id = _extract_msg_id(fwded)
                         if fwded_id:
@@ -494,7 +543,7 @@ async def _forward_comments_for_post(
 
 
 async def forward_job() -> None:
-    """★ 修复：past 模式主函数"""
+    """past 模式主函数"""
     clean_session_files()
     await load_async_plugins()
 
@@ -531,7 +580,7 @@ async def forward_job() -> None:
             logging.error("❌ 没有有效的转发连接")
             return
 
-        # ★ 修复：建立源频道 ID → Forward 对象的映射
+        # 建立源频道 ID → Forward 对象的映射
         resolved_forwards: Dict[int, config.Forward] = {}
         for forward in CONFIG.forwards:
             if not forward.use_this:
@@ -543,17 +592,18 @@ async def forward_job() -> None:
                 src_id = await config.get_id(client, forward.source)
                 resolved_forwards[src_id] = forward
                 
-                # ★ 同时保存标准化格式的映射
+                # 同时保存标准化格式的映射
                 normalized_id = st._normalize_channel_id(src_id)
                 if normalized_id != src_id:
                     resolved_forwards[normalized_id] = forward
-            except Exception:
+            except Exception as e:
+                logging.error(f"❌ 无法解析源 {forward.source}: {e}")
                 continue
 
         for src, dest in config.from_to.items():
             forward = resolved_forwards.get(src)
             if forward is None:
-                # ★ 尝试用标准化 ID 查找
+                # 尝试用标准化 ID 查找
                 normalized_src = st._normalize_channel_id(src)
                 forward = resolved_forwards.get(normalized_src)
             
@@ -603,20 +653,41 @@ async def forward_job() -> None:
                             if flushed:
                                 last_id = max(last_id, flushed)
 
+                    # 媒体组消息：添加到缓冲区
                     if current_gid is not None:
                         grouped_buffer[current_gid].append(message)
                         continue
 
-                    # ★ 检测不支持的媒体类型
+                    # 检测不支持的媒体类型
                     if _is_unsupported_media(message):
                         media_type = _get_media_type_name(message)
                         logging.warning(
                             f"⚠️ 跳过不支持的媒体类型 (msg={message.id}): {media_type}"
                         )
+                        
+                        # ★ 即使媒体不支持，也要尝试只发送文字（如果有的话）
+                        if message.text and message.text.strip():
+                            try:
+                                for d in dest:
+                                    fallback_msg = await client.send_message(
+                                        d,
+                                        f"[原消息包含 {media_type}，无法转发]\n\n{message.text}"
+                                    )
+                                    if fallback_msg:
+                                        # 建立映射，以便评论可以找到
+                                        st.add_post_mapping(src, message.id, d, fallback_msg.id)
+                                        logging.info(
+                                            f"✅ 替代文本发送成功并建立映射: "
+                                            f"({src}, {message.id}) → ({d}, {fallback_msg.id})"
+                                        )
+                            except Exception as e:
+                                logging.error(f"❌ 替代文本发送失败: {e}")
+                        
                         forward.offset = message.id
                         write_config(CONFIG, persist=False)
                         continue
 
+                    # 应用插件
                     tm = await apply_plugins(message)
                     if not tm:
                         forward.offset = message.id
@@ -628,7 +699,7 @@ async def forward_job() -> None:
                     )
                     st.stored[event_uid] = {}
 
-                    # ★ 修复：记录每个目标的发送结果
+                    # 记录每个目标的发送结果
                     any_success = False
                     
                     for d in dest:
@@ -649,27 +720,61 @@ async def forward_job() -> None:
                         tm.reply_to = reply_to_id
 
                         try:
+                            # ★★★ 调试：打印发送前信息 ★★★
+                            logging.info(
+                                f"📤 准备发送: src={src}, msg_id={message.id}, dest={d}, "
+                                f"media_type={tm.file_type}, has_text={bool(tm.text)}"
+                            )
+                            
                             fwded_msg = await send_message(d, tm)
+                            
+                            # ★★★ 调试：打印发送结果 ★★★
+                            if fwded_msg is None:
+                                logging.warning(
+                                    f"⚠️ send_message 返回 None: "
+                                    f"src={src}, msg_id={message.id}, dest={d}"
+                                )
+                            else:
+                                logging.info(
+                                    f"📨 发送成功: type={type(fwded_msg).__name__}, "
+                                    f"id={_extract_msg_id(fwded_msg)}"
+                                )
+                            
                             if fwded_msg is not None:
                                 st.stored[event_uid][d] = fwded_msg
                                 fwded_id = _extract_msg_id(fwded_msg)
                                 if fwded_id is not None:
-                                    st.add_post_mapping(
-                                        src, message.id, d, fwded_id
-                                    )
+                                    # ★ 关键：建立帖子映射
+                                    st.add_post_mapping(src, message.id, d, fwded_id)
                                     any_success = True
-                                    logging.info(
-                                        f"✅ 帖子映射建立: ({src}, {message.id}) → ({d}, {fwded_id})"
+                                    
+                                    # ★ 验证映射是否建立成功
+                                    verify = st.get_dest_post_id(src, message.id, d)
+                                    if verify == fwded_id:
+                                        logging.info(
+                                            f"✅ 映射验证成功: src({src}, {message.id}) → dest({d}, {verify})"
+                                        )
+                                    else:
+                                        logging.error(
+                                            f"❌ 映射验证失败: 期望 {fwded_id}, 实际 {verify}"
+                                        )
+                                else:
+                                    logging.warning(
+                                        f"⚠️ 无法提取消息 ID: fwded_msg={fwded_msg}"
                                     )
+                                    
                         except Exception as e:
-                            logging.error(f"❌ 发送失败 ({src}/{message.id} → {d}): {e}")
+                            logging.error(
+                                f"❌ 发送异常: {src}/{message.id} → {d}: {e}",
+                                exc_info=True
+                            )
 
                     tm.clear()
                     last_id = message.id
                     forward.offset = last_id
                     write_config(CONFIG, persist=False)
 
-                    # ★ 修复：只有主帖发送成功才处理评论
+                    # 只有主帖发送成功才处理评论
                     if forward.comments.enabled and any_success:
                         logging.info(f"💬 准备转发帖子 {message.id} 的评论...")
                         try:
@@ -686,7 +791,8 @@ async def forward_job() -> None:
                             f"⚠️ 帖子 {message.id} 发送失败，跳过评论转发"
                         )
 
-                    delay = random.randint(60, 300)
+                    # 延迟
+                    delay = CONFIG.past.delay if CONFIG.past.delay > 0 else random.randint(60, 300)
                     logging.info(f"⏸️ 休息 {delay}s (msg {message.id})")
                     await asyncio.sleep(delay)
 
@@ -694,7 +800,7 @@ async def forward_job() -> None:
                     logging.warning(f"⛔ FloodWait: {fwe.seconds}s")
                     await asyncio.sleep(fwe.seconds)
                 except Exception as err:
-                    logging.exception(err)
+                    logging.exception(f"处理消息 {message.id} 时出错: {err}")
 
             # 处理剩余的媒体组
             if grouped_buffer:
@@ -706,3 +812,6 @@ async def forward_job() -> None:
                     logging.exception(f"🚨 刷新剩余组失败: {e}")
 
         logging.info("🏁 past 模式完成")
+        
+        # ★ 最后输出映射统计
+        logging.info(f"📊 最终统计: 共建立 {len(st.post_id_mapping)} 个帖子映射")
