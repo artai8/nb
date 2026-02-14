@@ -74,12 +74,6 @@ def _extract_channel_post(msg) -> Optional[int]:
         cp = getattr(msg.fwd_from, "channel_post", None)
         if cp:
             return cp
-    # 方式2: reply_to.reply_to_top_id（讨论组自动转发消息有时用这个）
-    reply_to = getattr(msg, "reply_to", None)
-    if reply_to:
-        # 如果消息是讨论组中的头消息（自动转发），通常 reply_to 为空但 fwd_from 有值
-        # 这里主要靠 fwd_from，但作为备用检查
-        pass
     return None
 
 
@@ -446,9 +440,9 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
     """发送消息主函数 — 修复版
     
     关键修复：
-    1. 媒体组 caption 处理：检查 _caption_applied 标记，避免重复拼接
-    2. 正确处理 comment_to_post 作为 reply_to
-    3. 增强错误处理
+    1. 媒体组 caption 处理：正确处理 _caption_applied 标记
+    2. 避免重复拼接文本
+    3. 保留每条消息的原始内容
     """
     CONFIG = _get_config()
     client = tm.client
@@ -481,15 +475,16 @@ async def send_message(recipient, tm, grouped_messages=None, grouped_tms=None, c
         )
 
         if caption_already_applied:
-            # caption 插件已经处理过，直接使用 tms[0].text
+            # caption 插件已处理：直接使用第一条的文本（可能包含 header/footer）
             combined_caption = grouped_tms[0].text if grouped_tms[0].text else None
         else:
-            # 未经 caption 插件处理，正常收集所有文本
-            all_texts = []
-            for gtm in grouped_tms:
-                if gtm.text and gtm.text.strip():
-                    all_texts.append(gtm.text.strip())
-            combined_caption = "\n\n".join(all_texts) if all_texts else None
+            # 未处理：安全收集所有非空文本，避免多余换行
+            non_empty_texts = [
+                gtm.text.strip() 
+                for gtm in grouped_tms 
+                if gtm.text and gtm.text.strip()
+            ]
+            combined_caption = "\n\n".join(non_empty_texts) if non_empty_texts else None
 
         return await _send_media_group(
             client, recipient, grouped_messages,
