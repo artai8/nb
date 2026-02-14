@@ -1,15 +1,18 @@
-FROM python:3.11-slim
+# 回退到 3.10-slim，这是最稳的底座
+FROM python:3.10-slim
 WORKDIR /app
 
-# 1. 安装系统依赖 (新增 build-essential 和 python3-dev 用于编译)
+# 1. 安装编译工具和 Pillow 所需的图像库
+# build-essential: 提供 GCC 编译器
+# zlib1g-dev, libjpeg-dev: Pillow 必须
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \
     tesseract-ocr \
     procps \
     build-essential \
-    python3-dev \
-    libffi-dev \
+    zlib1g-dev \
+    libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
@@ -21,11 +24,12 @@ RUN printf '"""Package nb."""\ntry:\n    from importlib.metadata import version\
 RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then mv nb/web_ui/page nb/web_ui/pages; fi
 RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/null || true
 
-# 2. 升级 pip 核心工具 (极大提高构建成功率)
+# 2. 升级 pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# 3. 安装项目依赖
-# ⚠️ 已移除 'cryptg' 以避免 Rust 编译错误
+# 3. 安装依赖（关键修改！）
+# - 移除了 cryptg (GitHub Actions 构建失败的主要原因)
+# - Streamlit 和 Pydantic 保持新版
 RUN pip install --no-cache-dir \
     "altair>=5.2.0" \
     "streamlit>=1.33.0" \
