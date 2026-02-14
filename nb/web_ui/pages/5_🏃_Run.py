@@ -5,6 +5,9 @@ import signal
 import subprocess
 import sys
 import time
+# ✅ 新增：导入 html 库用于转义特殊字符
+import html
+
 import streamlit as st
 from nb.config import CONFIG, read_config, write_config
 from nb.web_ui.password import check_password
@@ -16,7 +19,7 @@ PID_FILE = os.path.join(os.getcwd(), "nb.pid")
 LOG_FILE = os.path.join(os.getcwd(), "logs.txt")
 OLD_LOG_FILE = os.path.join(os.getcwd(), "old_logs.txt")
 
-# --- Process Utils (Keep Original Logic) ---
+# --- Process Utils (保持不变) ---
 def rerun():
     if hasattr(st, 'rerun'): st.rerun()
     elif hasattr(st, 'experimental_rerun'): st.experimental_rerun()
@@ -70,7 +73,6 @@ def kill_process(pid: int) -> bool:
     if not is_process_alive(pid):
         _remove_pid_file()
         return True
-    # Try SIGTERM
     try:
         os.kill(pid, signal.SIGTERM)
         time.sleep(2)
@@ -163,6 +165,7 @@ if check_password(st):
         overflow-y: auto;
         border: 1px solid #334155;
         border-top: none;
+        white-space: pre-wrap; /* 保持换行 */
     }
     .terminal-head {
         background: #0f172a;
@@ -218,7 +221,8 @@ if check_password(st):
         st.write("---")
         
         if pid == 0:
-            if st.button("▶️ Start Process", type="primary", use_container_width=True):
+            # 修复：移除 use_container_width=True
+            if st.button("▶️ Start Process", type="primary"):
                 new_pid = start_nb_process(mode)
                 if new_pid > 0:
                     CONFIG.pid = new_pid
@@ -230,13 +234,15 @@ if check_password(st):
         else:
             k1, k2 = st.columns([3, 1])
             with k1:
-                if st.button("⏹️ Stop Process", type="primary", use_container_width=True):
+                # 修复：移除 use_container_width=True
+                if st.button("⏹️ Stop Process", type="primary"):
                     if kill_process(pid):
                         termination()
                         time.sleep(1)
                         rerun()
             with k2:
-                if st.button("🔴 Kill", type="secondary", use_container_width=True):
+                # 修复：移除 use_container_width=True
+                if st.button("🔴 Kill", type="secondary"):
                     os.system(f"kill -9 {pid}")
                     termination()
                     time.sleep(1)
@@ -254,7 +260,8 @@ if check_password(st):
         </div>
         """, unsafe_allow_html=True)
     with c_log_r:
-        if st.button("🔄 Refresh Logs", use_container_width=True):
+        # 修复：移除 use_container_width=True
+        if st.button("🔄 Refresh Logs"):
             rerun()
 
     log_content = "No logs available."
@@ -262,7 +269,10 @@ if check_password(st):
         try:
             with open(LOG_FILE, "r") as f:
                 lines = f.readlines()
-                log_content = "".join(lines[-100:]) if lines else "Waiting for output..."
+                raw_content = "".join(lines[-100:]) if lines else "Waiting for output..."
+                # ✅ 关键修复：转义 HTML 字符，防止破坏 DOM 结构
+                log_content = html.escape(raw_content)
         except: pass
     
+    # 使用安全的 log_content
     st.markdown(f'<div class="terminal">{log_content}</div>', unsafe_allow_html=True)
