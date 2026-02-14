@@ -15,182 +15,160 @@ from nb import config
 from nb import storage as st
 from nb.config import CONFIG, get_SESSION, write_config
 from nb.plugins import apply_plugins, apply_plugins_to_group, load_async_plugins
-from nb.utils import clean_session_files, send_message, _get_reply_to_msg_id
+from nb.utils import clean_session_files, send_message, _get_reply_to_msg_id, _extract_msg_id
 
 
 async def _send_past_grouped(
-    client: TelegramClient, src: int, dest: List[int], messages: List[Message]
-) -> bool:
-    """强制发送整组消息"""
-    tms = await apply_plugins_to_group(messages)
-    if not tms:
-        logging.warning("⚠️ 所有消息被插件过滤，跳过该媒体组")
-        return False  # 修复：不再强制发送被全部过滤的组
-
+    client, src, dest, messages, forward_cfg, 
+    is_comm=False, is_first=False, is_last=False
+):
+    tms = await apply_plugins_to_group(messages, is_comm, is_first, is_last)
+    if not tms: return False
+    
     tm_template = tms[0]
-    if tm_template is None:
-        logging.warning("⚠️ 模板消息为 None，跳过该媒体组")
-        return False
-
     for d in dest:
+        # 寻找评论的回复目标
+        reply_to_id = None
+        if is_comm:
+            parent_uid = st.EventUid(st.DummyEvent(src, messages[0].reply_to_msg_id))
+            if parent_uid in st.stored:
+                fwded_parent = st.stored[parent_uid].get(d)
+                reply_to_id = _extract_msg_id(fwded_parent)
+        else:
+            reply_to_id = tm_template.reply_to
+
+        tm_template.reply_to = reply_to_id
         try:
             fwded_msgs = await send_message(
-                d,
-                tm_template,
-                grouped_messages=[tm.message for tm in tms],
+                d, tm_template, 
+                grouped_messages=[tm.message for tm in tms], 
                 grouped_tms=tms
             )
-
-            first_msg_id = messages[0].id
-            event_uid = st.EventUid(st.DummyEvent(src, first_msg_id))
-            st.stored[event_uid] = {d: fwded_msgs}
-
+            event_uid = st.EventUid(st.DummyEvent(src, messages[0].id))
+            if event_uid not in st.stored: st.stored[event_uid] = {}
+            st.stored[event_uid][d] = fwded_msgs
         except Exception as e:
-            logging.critical(f"🚨 组播失败但将继续重试（不中断）: {e}")
-
+            logging.error(f"🚨 组播失败: {e}")
     return True
 
 
-async def _flush_grouped_buffer(
-    client: TelegramClient,
-    src: int,
-    dest: List[int],
-    grouped_buffer: Dict[int, List[Message]],
-    forward,
-) -> int:
-    """
-    刷新所有已缓存的媒体组，逐组发送并在每组之间 sleep。
-    返回最后处理的消息 ID（用于更新 offset）。
-    """
-    last_id = 0
-    for gid, msgs in list(grouped_buffer.items()):
-        if not msgs:
+async def _process_replies(client, src, dest, parent_id, forward_cfg):
+    """处理并转发某条消息的评论区"""
+    logging.info(f"🔎 抓取消息 {parent_id} 的评论...")
+    replies_pool = []
+    text_count = 0
+    
+    async for r in client.iter_messages(src, reply_to=parent_id, reverse=True):
+        if isinstance(r, MessageService): continue
+        is_media = bool(r.media)
+        if not is_media:
+            if forward_cfg.comm_only_media: continue
+            if text_count >= forward_cfg.comm_max_text: continue
+            text_count += 1
+        replies_pool.append(r)
+    
+    if not replies_pool: return
+    
+    total = len(replies_pool)
+    grouped_buffer = defaultdict(list)
+    
+    for i, reply in enumerate(replies_pool):
+        is_first = (i == 0)
+        is_last = (i == total - 1)
+        
+        gid = reply.grouped_id
+        if grouped_buffer and (gid is None or gid not in grouped_buffer):
+            await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward_cfg, True, is_first, is_last)
+            grouped_buffer.clear()
+            await asyncio.sleep(random.randint(2, 5))
+
+        if gid is not None:
+            grouped_buffer[gid].append(reply)
             continue
+            
+        # 单条处理
+        tm = await apply_plugins(reply, is_comment=True, is_first=is_first, is_last=is_last)
+        if not tm: continue
+        
+        event_uid = st.EventUid(st.DummyEvent(src, reply.id))
+        st.stored[event_uid] = {}
+        
+        for d in dest:
+            parent_uid = st.EventUid(st.DummyEvent(src, parent_id))
+            reply_to_id = None
+            if parent_uid in st.stored:
+                fwded_parent = st.stored[parent_uid].get(d)
+                reply_to_id = _extract_msg_id(fwded_parent)
+            
+            tm.reply_to = reply_to_id
+            try:
+                fwded = await send_message(d, tm)
+                st.stored[event_uid][d] = fwded
+            except: pass
+        
+        tm.clear()
+        await asyncio.sleep(random.randint(1, 3))
 
-        await _send_past_grouped(client, src, dest, msgs)
-
-        group_last_id = max(m.id for m in msgs)
-        last_id = max(last_id, group_last_id)
-
-        forward.offset = group_last_id
-        write_config(CONFIG, persist=False)
-
-        logging.info(f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}")
-
-        delay_seconds = random.randint(60, 300)
-        logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
-        await asyncio.sleep(delay_seconds)
-
-    grouped_buffer.clear()
-    return last_id
+    if grouped_buffer:
+        await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward_cfg, True, False, True)
 
 
 async def forward_job() -> None:
     clean_session_files()
     await load_async_plugins()
+    if CONFIG.login.user_type != 1: return
 
-    if CONFIG.login.user_type != 1:
-        logging.warning("⚠️ past 模式仅支持用户账号")
-        return
-
-    SESSION = get_SESSION()
-    async with TelegramClient(SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
+    async with TelegramClient(get_SESSION(), CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
-
+        
         for from_to, forward in zip(config.from_to.items(), CONFIG.forwards):
             src, dest = from_to
-            last_id = 0
-            grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
-            prev_grouped_id: Optional[int] = None
+            grouped_buffer = defaultdict(list)
 
             async for message in client.iter_messages(src, reverse=True, offset_id=forward.offset):
-                if isinstance(message, MessageService):
-                    continue
-
-                if forward.end and message.id > forward.end:
-                    logging.info(f"📍 到达 end={forward.end}, 停止")
-                    break
+                if isinstance(message, MessageService): continue
+                if forward.end and message.id > forward.end: break
 
                 try:
-                    current_grouped_id = message.grouped_id
+                    gid = message.grouped_id
+                    if grouped_buffer and (gid is None or gid not in grouped_buffer):
+                        await _send_past_grouped(client, src, dest, list(grouped_buffer.values())[0], forward)
+                        grouped_buffer.clear()
+                        # 发送完组后，如果开启评论，处理组内第一条的评论
+                        if forward.forward_comments:
+                            await _process_replies(client, src, dest, message.id - 1, forward) 
+                        await asyncio.sleep(random.randint(5, 15))
 
-                    if grouped_buffer and (
-                        current_grouped_id is None
-                        or (current_grouped_id is not None
-                            and current_grouped_id not in grouped_buffer)
-                    ):
-                        try:
-                            flushed_last = await _flush_grouped_buffer(
-                                client, src, dest, grouped_buffer, forward
-                            )
-                            if flushed_last:
-                                last_id = max(last_id, flushed_last)
-                        except FloodWaitError as fwe:
-                            logging.warning(f"⛔ FloodWait (组刷新): 等待 {fwe.seconds} 秒")
-                            await asyncio.sleep(fwe.seconds)
-                            flushed_last = await _flush_grouped_buffer(
-                                client, src, dest, grouped_buffer, forward
-                            )
-                            if flushed_last:
-                                last_id = max(last_id, flushed_last)
-
-                    if current_grouped_id is not None:
-                        grouped_buffer[current_grouped_id].append(message)
-                        prev_grouped_id = current_grouped_id
+                    if gid is not None:
+                        grouped_buffer[gid].append(message)
                         continue
 
-                    prev_grouped_id = None
-
+                    # 单条消息
                     tm = await apply_plugins(message)
-                    if not tm:
-                        continue
+                    if tm:
+                        event_uid = st.EventUid(st.DummyEvent(src, message.id))
+                        st.stored[event_uid] = {}
+                        for d in dest:
+                            # 处理原生回复（如果是回复别人）
+                            r_id = _get_reply_to_msg_id(message)
+                            reply_to = None
+                            if r_id:
+                                r_uid = st.EventUid(st.DummyEvent(src, r_id))
+                                if r_uid in st.stored:
+                                    reply_to = _extract_msg_id(st.stored[r_uid].get(d))
+                            tm.reply_to = reply_to
+                            st.stored[event_uid][d] = await send_message(d, tm)
+                        tm.clear()
+                        
+                        # 处理评论
+                        if forward.forward_comments:
+                            await _process_replies(client, src, dest, message.id, forward)
 
-                    event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
-                    st.stored[event_uid] = {}
-
-                    for d in dest:
-                        reply_to_id = None
-                        if message.is_reply:
-                            reply_msg_id = _get_reply_to_msg_id(message)  # 修复：兼容新旧 Telethon
-                            if reply_msg_id is not None:
-                                r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                r_event_uid = st.EventUid(r_event)
-                                if r_event_uid in st.stored:
-                                    fwded_reply = st.stored[r_event_uid].get(d)  # 修复：每个 dest 使用对应的 reply_to
-                                    if fwded_reply is not None:
-                                        if isinstance(fwded_reply, int):
-                                            reply_to_id = fwded_reply
-                                        elif hasattr(fwded_reply, 'id'):
-                                            reply_to_id = fwded_reply.id
-                        tm.reply_to = reply_to_id
-
-                        try:
-                            fwded_msg = await send_message(d, tm)
-                            if fwded_msg is not None:
-                                st.stored[event_uid][d] = fwded_msg
-                            else:
-                                logging.warning(f"⚠️ 发送返回 None, dest={d}, msg={message.id}")
-                        except Exception as e:
-                            logging.error(f"❌ 单条发送失败: {e}")
-
-                    tm.clear()
-                    last_id = message.id
-                    forward.offset = last_id
+                    forward.offset = message.id
                     write_config(CONFIG, persist=False)
-
-                    delay_seconds = random.randint(60, 300)
-                    logging.info(f"⏸️ 休息 {delay_seconds} 秒 (单条消息 {message.id})")
-                    await asyncio.sleep(delay_seconds)
+                    await asyncio.sleep(random.randint(10, 30))
 
                 except FloodWaitError as fwe:
-                    logging.warning(f"⛔ FloodWait: 等待 {fwe.seconds} 秒")
                     await asyncio.sleep(fwe.seconds)
-                except Exception as err:
-                    logging.exception(err)
-
-            if grouped_buffer:
-                logging.info(f"📦 刷新剩余 {len(grouped_buffer)} 个媒体组")
-                try:
-                    await _flush_grouped_buffer(client, src, dest, grouped_buffer, forward)
                 except Exception as e:
-                    logging.exception(f"🚨 刷新剩余组失败: {e}")
+                    logging.exception(e)
