@@ -1,4 +1,8 @@
-"""Package nb."""
+"""Package nb.
+
+The ultimate tool to automate custom telegram message forwarding.
+https://github.com/artai8/nb
+"""
 
 try:
     from importlib.metadata import version
