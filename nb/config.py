@@ -1,8 +1,9 @@
-"""Load all user defined config and env vars."""
+# nb/config.py 完整代码
 
 import logging
 import os
 import sys
+import re
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
@@ -17,222 +18,154 @@ from nb.plugin_models import PluginConfig
 
 pwd = os.getcwd()
 env_file = os.path.join(pwd, ".env")
-
 load_dotenv(env_file)
 
-
 class Forward(BaseModel):
-    """Blueprint for the forward object."""
-
     con_name: str = ""
     use_this: bool = True
     source: Union[int, str] = ""
     dest: List[Union[int, str]] = []
     offset: int = 0
     end: Optional[int] = None
-    # --- 评论区功能 ---
-    forward_comments: bool = False   # 是否转发回复
-    comm_only_media: bool = False    # 仅转发带媒体的回复
-    comm_max_text: int = 5           # 纯文本回复最大转发数
-
+    forward_comments: bool = False
+    comm_only_media: bool = False
+    comm_max_text: int = 5
 
 class LiveSettings(BaseModel):
-    """Settings to configure how nb operates in live mode."""
-
     sequential_updates: bool = False
     delete_sync: bool = False
     delete_on_edit: Optional[str] = ".deleteMe"
 
-
 class PastSettings(BaseModel):
-    """Configuration for past mode."""
-
     delay: int = 0
-
     @validator("delay")
     def validate_delay(cls, val):
-        if val not in range(0, 101):
-            logging.warning("delay must be within 0 to 100 seconds")
-            if val > 100:
-                val = 100
-            if val < 0:
-                val = 0
-        return val
-
+        return max(0, min(100, val))
 
 class LoginConfig(BaseModel):
-
     API_ID: int = 0
     API_HASH: str = ""
-    user_type: int = 0  # 0:bot, 1:user
+    user_type: int = 0
     phone_no: int = 91
     USERNAME: str = ""
     SESSION_STRING: str = ""
     BOT_TOKEN: str = ""
 
-
 class BotMessages(BaseModel):
     start: str = "Hi! I am alive"
     bot_help: str = "For details visit github.com/artai8/nb"
 
-
 class Config(BaseModel):
-    """The blueprint for nb's whole config."""
-
     pid: int = 0
     theme: str = "light"
     login: LoginConfig = LoginConfig()
     admins: List[Union[int, str]] = []
     forwards: List[Forward] = []
     show_forwarded_from: bool = False
-    mode: int = 0  # 0: live, 1:past
+    mode: int = 0
     live: LiveSettings = LiveSettings()
     past: PastSettings = PastSettings()
-
     plugins: PluginConfig = PluginConfig()
     bot_messages: BotMessages = BotMessages()
-
 
 def write_config_to_file(config: Config):
     with open(CONFIG_FILE_NAME, "w", encoding="utf8") as file:
         file.write(config.json())
 
-
 def detect_config_type() -> int:
-    if MONGO_CON_STR:
-        logging.info("Using mongo db for storing config!")
-        client = MongoClient(MONGO_CON_STR)
-        stg.mycol = setup_mongo(client)
+    if os.getenv("MONGO_CON_STR"):
         return 2
     if CONFIG_FILE_NAME in os.listdir():
-        logging.info(f"{CONFIG_FILE_NAME} detected!")
         return 1
-    else:
-        logging.info(
-            "config file not found. mongo not found. creating local config file."
-        )
-        cfg = Config()
-        write_config_to_file(cfg)
-        logging.info(f"{CONFIG_FILE_NAME} created!")
-        return 1
-
+    cfg = Config()
+    write_config_to_file(cfg)
+    return 1
 
 def read_config(count=1) -> Config:
-    """Load the configuration defined by user."""
-    if count > 3:
-        logging.warning("Failed to read config, returning default config")
-        return Config()
-    if count != 1:
-        logging.info(f"Trying to read config time:{count}")
     try:
         if stg.CONFIG_TYPE == 1:
             with open(CONFIG_FILE_NAME, encoding="utf8") as file:
                 return Config.parse_raw(file.read())
         elif stg.CONFIG_TYPE == 2:
             return read_db()
-        else:
-            return Config()
-    except Exception as err:
-        logging.warning(err)
-        stg.CONFIG_TYPE = detect_config_type()
-        return read_config(count=count + 1)
-
+        return Config()
+    except Exception as e:
+        logging.error(f"Config Read Error: {e}")
+        return Config()
 
 def write_config(config: Config, persist=True):
-    """Write changes in config back to file."""
-    if stg.CONFIG_TYPE == 1 or stg.CONFIG_TYPE == 0:
+    if stg.CONFIG_TYPE in [0, 1]:
         write_config_to_file(config)
-    elif stg.CONFIG_TYPE == 2:
-        if persist:
-            update_db(config)
-
-
-def get_env_var(name: str, optional: bool = False) -> str:
-    """Fetch an env var."""
-    var = os.getenv(name, "")
-
-    while not var:
-        if optional:
-            return ""
-        var = input(f"Enter {name}: ")
-    return var
-
+    elif stg.CONFIG_TYPE == 2 and persist:
+        update_db(config)
 
 async def get_id(client: TelegramClient, peer):
-    return await client.get_peer_id(peer)
+    """
+    核心增强：支持数字 ID、@用户名、https://t.me/ 链接、t.me/ 链接
+    """
+    if not peer: return None
+    if isinstance(peer, int): return peer
+    
+    peer_str = str(peer).strip()
+    # 处理链接格式
+    if "t.me/" in peer_str:
+        # 移除 https://, http://, 以及末尾的斜杠
+        peer_str = peer_str.replace("https://", "").replace("http://", "").replace("t.me/", "")
+        # 处理私有群组链接 t.me/c/123456/1 -> 取中间的数字
+        if peer_str.startswith("c/"):
+            parts = peer_str.split('/')
+            if len(parts) > 1:
+                try:
+                    # 私有频道 ID 在链接中通常需要加 -100
+                    peer_str = f"-100{parts[1]}"
+                except: pass
+        else:
+            # 普通公开频道链接 t.me/channelname -> 取 channelname
+            peer_str = peer_str.split('/')[0]
 
+    # 尝试转为数字 ID
+    if peer_str.replace('-', '').isdigit():
+        return int(peer_str)
 
-async def load_from_to(
-    client: TelegramClient, forwards: List[Forward]
-) -> Dict[int, List[int]]:
-    """Convert a list of Forward objects to a mapping."""
+    # 尝试通过 Telethon 获取实体 ID
+    try:
+        entity = await client.get_entity(peer_str)
+        return client.get_peer_id(entity)
+    except Exception as e:
+        logging.error(f"❌ 无法解析 ID '{peer}': {e}")
+        return None
+
+async def load_from_to(client: TelegramClient, forwards: List[Forward]) -> Dict[int, List[int]]:
     from_to_dict = {}
-
-    async def _(peer):
-        return await get_id(client, peer)
-
     for forward in forwards:
-        if not forward.use_this:
-            continue
-        source = forward.source
-        if not isinstance(source, int) and source.strip() == "":
-            continue
-        src = await _(forward.source)
-        from_to_dict[src] = [await _(dest) for dest in forward.dest]
-    logging.info(f"From to dict is {from_to_dict}")
+        if not forward.use_this: continue
+        src_id = await get_id(client, forward.source)
+        if src_id:
+            dests = []
+            for d in forward.dest:
+                did = await get_id(client, d)
+                if did: dests.append(did)
+            if dests: from_to_dict[src_id] = dests
+    logging.info(f"✅ 加载转发映射: {from_to_dict}")
     return from_to_dict
 
-
 async def load_admins(client: TelegramClient):
+    admins = []
     for admin in CONFIG.admins:
-        ADMINS.append(await get_id(client, admin))
-    logging.info(f"Loaded admins are {ADMINS}")
-    return ADMINS
-
-
-def setup_mongo(client):
-    mydb = client[MONGO_DB_NAME]
-    mycol = mydb[MONGO_COL_NAME]
-    if not mycol.find_one({"_id": 0}):
-        mycol.insert_one({"_id": 0, "author": "nb", "config": Config().dict()})
-    return mycol
-
-
-def update_db(cfg):
-    stg.mycol.update_one({"_id": 0}, {"$set": {"config": cfg.dict()}})
-
-
-def read_db():
-    obj = stg.mycol.find_one({"_id": 0})
-    cfg = Config(**obj["config"])
-    return cfg
-
+        aid = await get_id(client, admin)
+        if aid: admins.append(aid)
+    return admins
 
 PASSWORD = os.getenv("PASSWORD", "nb")
-ADMINS = []
-
 MONGO_CON_STR = os.getenv("MONGO_CON_STR")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "nb-config")
-MONGO_COL_NAME = os.getenv("MONGO_COL_NAME", "nb-instance-0")
-
 stg.CONFIG_TYPE = detect_config_type()
 CONFIG = read_config()
-
+ADMINS = []
 from_to = {}
-is_bot: Optional[bool] = None
-logging.info("config.py got executed")
+is_bot = None
 
-
-def get_SESSION(section: Any = None, default: str = "nb_bot"):
-    if section is None:
-        section = CONFIG.login
-    if section.SESSION_STRING and section.user_type == 1:
-        logging.info("using session string")
-        SESSION = StringSession(section.SESSION_STRING)
-    elif section.BOT_TOKEN and section.user_type == 0:
-        logging.info("using bot account")
-        SESSION = default
-    else:
-        logging.warning("Login information not set!")
-        sys.exit()
-    return SESSION
+def get_SESSION(section=None, default="nb_bot"):
+    sec = section or CONFIG.login
+    if sec.SESSION_STRING and sec.user_type == 1:
+        return StringSession(sec.SESSION_STRING)
+    return default
