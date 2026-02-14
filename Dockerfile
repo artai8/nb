@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.14-slim
 WORKDIR /app
 
 # 1. 安装系统依赖 (补全了所有可能的编译需求)
@@ -34,7 +34,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # Step A: 安装核心框架 (Streamlit, Pydantic)
 # 使用 --prefer-binary 优先使用预编译包，避免强制编译
 RUN pip install --no-cache-dir --prefer-binary \
-    "streamlit>=1.33.0" \
+    "streamlit>=1.54.0" \
     "altair>=5.2.0" \
     "pydantic>=2.7.0" \
     "pymongo>=4.6.3" \
@@ -48,7 +48,7 @@ RUN pip install --no-cache-dir --prefer-binary \
 # Step B: 安装网络与媒体库 (最容易报错的部分)
 # 单独一层，如果有问题会直接在这里停下
 RUN pip install --no-cache-dir --prefer-binary \
-    "Telethon>=1.34.0" \
+    "Telethon>=1.42.0" \
     "aiohttp>=3.9.5" \
     "Pillow>=10.3.0" \
     "hachoir>=3.3.0" \
