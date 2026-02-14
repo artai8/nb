@@ -1,138 +1,61 @@
+# nb/web_ui/pages/5_🏃_Run.py 完整代码
+
 import os
 import signal
 import subprocess
 import sys
 import time
-
 import streamlit as st
-
 from nb.config import CONFIG, read_config, write_config
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import hide_st, switch_theme
 
 CONFIG = read_config()
 
-
-def termination():
-    st.code("process terminated!")
-    try:
-        os.rename("logs.txt", "old_logs.txt")
-        with open("old_logs.txt", "r") as f:
-            st.download_button(
-                "Download last logs", data=f.read(), file_name="nb_logs.txt"
-            )
-    except FileNotFoundError:
-        pass
-
-    CONFIG = read_config()
-    CONFIG.pid = 0
-    write_config(CONFIG)
-    st.button("Refresh page")
-
-
-def rerun():
-    """兼容不同版本的 Streamlit rerun"""
-    if hasattr(st, 'rerun'):
-        st.rerun()
-    elif hasattr(st, 'experimental_rerun'):
-        st.experimental_rerun()
-    else:
-        st.warning("Please refresh the page manually.")
-
-
-st.set_page_config(
-    page_title="Run",
-    page_icon="🏃",
-)
+st.set_page_config(page_title="Run", page_icon="🏃")
 hide_st(st)
 switch_theme(st, CONFIG)
+
 if check_password(st):
-    with st.expander("Configure Run"):
-        CONFIG.show_forwarded_from = st.checkbox(
-            "Show 'Forwarded from'", value=CONFIG.show_forwarded_from
-        )
-        mode = st.radio("Choose mode", ["live", "past"], index=CONFIG.mode)
-        if mode == "past":
-            CONFIG.mode = 1
-            st.warning(
-                "Only User Account can be used in Past mode. Telegram does not allow bot account to go through history of a chat!"
-            )
-            CONFIG.past.delay = st.slider(
-                "Delay in seconds", 0, 100, value=CONFIG.past.delay
-            )
-        else:
-            CONFIG.mode = 0
-            CONFIG.live.delete_sync = st.checkbox(
-                "Sync when a message is deleted", value=CONFIG.live.delete_sync
-            )
-
-        if st.button("Save"):
+    with st.expander("运行配置"):
+        CONFIG.show_forwarded_from = st.checkbox("保留 'Forwarded from'", value=CONFIG.show_forwarded_from)
+        m = st.radio("选择模式", ["live", "past"], index=CONFIG.mode)
+        CONFIG.mode = 0 if m == "live" else 1
+        if st.button("保存并更新配置"):
             write_config(CONFIG)
-
-    check = False
+            st.success("配置已保存")
 
     if CONFIG.pid == 0:
-        check = st.button("Run", type="primary")
-
-    if CONFIG.pid != 0:
-        st.warning(
-            "You must click stop and then re-run nb to apply changes in config."
-        )
-        # check if process is running using pid
-        try:
-            os.kill(CONFIG.pid, signal.SIGCONT)
-        except Exception as err:
-            st.code("The process has stopped.")
-            st.code(err)
-            CONFIG.pid = 0
+        if st.button("🚀 启动 nb", type="primary"):
+            logs = open("logs.txt", "w")
+            # 使用 -u 参数确保 python 输出不带缓存，实时写入日志
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-m", "nb.cli", "past" if CONFIG.mode==1 else "live", "--loud"],
+                stdout=logs, stderr=subprocess.STDOUT
+            )
+            CONFIG.pid = process.pid
             write_config(CONFIG)
-            time.sleep(1)
-            rerun()
-
-        stop = st.button("Stop", type="primary")
-        if stop:
+            st.info(f"正在启动进程 (PID: {CONFIG.pid})...")
+            time.sleep(2)
+            st.experimental_rerun()
+    else:
+        st.success(f"✅ nb 正在运行 (PID: {CONFIG.pid})")
+        if st.button("🛑 停止 nb", type="primary"):
             try:
                 os.kill(CONFIG.pid, signal.SIGTERM)
-                time.sleep(2)
-                # 确保进程已终止
-                try:
-                    os.kill(CONFIG.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # 进程已退出
-            except Exception as err:
-                st.code(err)
-                CONFIG.pid = 0
-                write_config(CONFIG)
-                st.button("Refresh Page")
-            else:
-                termination()
+            except: pass
+            CONFIG.pid = 0
+            write_config(CONFIG)
+            st.warning("进程已停止")
+            st.experimental_rerun()
 
-    if check:
-        with open("logs.txt", "w") as logs:
-            # ✅ 修复：使用 sys.executable + "-m" 替代直接调用 "nb" 命令
-            process = subprocess.Popen(
-                [sys.executable, "-m", "nb.cli", mode, "--loud"],
-                stdout=logs,
-                stderr=subprocess.STDOUT,
-            )
-        CONFIG.pid = process.pid
-        write_config(CONFIG)
-        time.sleep(2)
-
-        rerun()
-
-    try:
-        lines = st.slider(
-            "Lines of logs to show", min_value=100, max_value=1000, step=100
-        )
-        temp_logs = "logs_n_lines.txt"
-        os.system(f"rm -f {temp_logs}")
-        with open("logs.txt", "r") as file:
-            pass
-
-        os.system(f"tail -n {lines} logs.txt >> {temp_logs}")
-        with open(temp_logs, "r") as file:
-            st.code(file.read())
-    except FileNotFoundError as err:
-        st.write("No present logs found")
-    st.button("Load more logs")
+    st.markdown("### 实时日志 (最新 100 行)")
+    if os.path.exists("logs.txt"):
+        with open("logs.txt", "r") as f:
+            lines = f.readlines()
+            st.code("".join(lines[-100:]))
+    else:
+        st.write("暂无日志文件")
+    
+    if st.button("刷新日志"):
+        st.experimental_rerun()
