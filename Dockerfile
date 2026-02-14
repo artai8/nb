@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.10-slim
 WORKDIR /app
 
 # 1. 安装系统依赖 (补全了所有可能的编译需求)
