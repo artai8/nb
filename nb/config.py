@@ -1,4 +1,4 @@
-# nb/config.py 完整代码
+# nb/config.py
 
 import logging
 import os
@@ -73,10 +73,8 @@ def write_config_to_file(config: Config):
         file.write(config.json())
 
 def detect_config_type() -> int:
-    if os.getenv("MONGO_CON_STR"):
-        return 2
-    if CONFIG_FILE_NAME in os.listdir():
-        return 1
+    if os.getenv("MONGO_CON_STR"): return 2
+    if CONFIG_FILE_NAME in os.listdir(): return 1
     cfg = Config()
     write_config_to_file(cfg)
     return 1
@@ -90,7 +88,6 @@ def read_config(count=1) -> Config:
             return read_db()
         return Config()
     except Exception as e:
-        logging.error(f"Config Read Error: {e}")
         return Config()
 
 def write_config(config: Config, persist=True):
@@ -100,59 +97,55 @@ def write_config(config: Config, persist=True):
         update_db(config)
 
 async def get_id(client: TelegramClient, peer):
-    """
-    核心增强：支持数字 ID、@用户名、https://t.me/ 链接、t.me/ 链接
-    """
+    """支持数字 ID, @username, 和 t.me 链接"""
     if not peer: return None
     if isinstance(peer, int): return peer
     
     peer_str = str(peer).strip()
-    # 处理链接格式
+    # 解析链接
     if "t.me/" in peer_str:
-        # 移除 https://, http://, 以及末尾的斜杠
-        peer_str = peer_str.replace("https://", "").replace("http://", "").replace("t.me/", "")
-        # 处理私有群组链接 t.me/c/123456/1 -> 取中间的数字
-        if peer_str.startswith("c/"):
-            parts = peer_str.split('/')
-            if len(parts) > 1:
-                try:
-                    # 私有频道 ID 在链接中通常需要加 -100
-                    peer_str = f"-100{parts[1]}"
-                except: pass
-        else:
-            # 普通公开频道链接 t.me/channelname -> 取 channelname
-            peer_str = peer_str.split('/')[0]
+        peer_str = peer_str.split('/')[-1]
+        if peer_str.isdigit() or (peer_str.startswith('-100') and peer_str[4:].isdigit()):
+            pass # 已经是 ID 格式
+        elif "t.me/c/" in str(peer):
+            # 处理私有频道链接 https://t.me/c/12345678/123
+            try:
+                parts = str(peer).split('/')
+                peer_str = f"-100{parts[parts.index('c')+1]}"
+            except: pass
 
-    # 尝试转为数字 ID
-    if peer_str.replace('-', '').isdigit():
+    # 尝试纯数字转换
+    try:
         return int(peer_str)
+    except:
+        pass
 
-    # 尝试通过 Telethon 获取实体 ID
+    # 尝试通过 Telethon 解析
     try:
         entity = await client.get_entity(peer_str)
-        return client.get_peer_id(entity)
+        # ✅ 关键修复：添加 await
+        return await client.get_peer_id(entity)
     except Exception as e:
-        logging.error(f"❌ 无法解析 ID '{peer}': {e}")
+        logging.error(f"❌ 解析 ID 失败 '{peer}': {e}")
         return None
 
 async def load_from_to(client: TelegramClient, forwards: List[Forward]) -> Dict[int, List[int]]:
     from_to_dict = {}
-    for forward in forwards:
-        if not forward.use_this: continue
-        src_id = await get_id(client, forward.source)
-        if src_id:
+    for f in forwards:
+        if not f.use_this: continue
+        sid = await get_id(client, f.source)
+        if sid:
             dests = []
-            for d in forward.dest:
+            for d in f.dest:
                 did = await get_id(client, d)
                 if did: dests.append(did)
-            if dests: from_to_dict[src_id] = dests
-    logging.info(f"✅ 加载转发映射: {from_to_dict}")
+            if dests: from_to_dict[sid] = dests
     return from_to_dict
 
 async def load_admins(client: TelegramClient):
     admins = []
-    for admin in CONFIG.admins:
-        aid = await get_id(client, admin)
+    for a in CONFIG.admins:
+        aid = await get_id(client, a)
         if aid: admins.append(aid)
     return admins
 
