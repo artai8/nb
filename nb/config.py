@@ -26,37 +26,19 @@ class CommentsConfig(BaseModel):
 
     enabled: bool = False
 
-    # 源：从哪里获取评论
     source_mode: str = "comments"
-    # "comments"  — 从源频道帖子的评论区获取媒体
-    # "discussion" — 直接监听源讨论组（需手动指定 discussion group id）
-
     source_discussion_group: Optional[Union[int, str]] = None
-    # 当 source_mode="discussion" 时，手动指定源讨论组 ID
-    # 当 source_mode="comments" 时，自动通过 API 获取
 
-    # 目标：转发到哪里
     dest_mode: str = "comments"
-    # "comments" — 转发到目标频道帖子的评论区（需要帖子映射）
-    # "discussion" — 直接发送到目标讨论组（需手动指定）
-
     dest_discussion_groups: List[Union[int, str]] = []
-    # 当 dest_mode="discussion" 时使用
 
-    # 过滤选项
-    only_media: bool = False          # 仅转发包含媒体的评论
-    include_text_comments: bool = True  # 是否也转发纯文本评论
-    skip_bot_comments: bool = False     # 跳过机器人发的评论
-    skip_admin_comments: bool = False   # 跳过管理员发的评论
+    only_media: bool = False
+    include_text_comments: bool = True
+    skip_bot_comments: bool = False
+    skip_admin_comments: bool = False
 
-    # 帖子映射模式
     post_mapping_mode: str = "auto"
-    # "auto"   — 自动映射（当主消息转发时自动记录 src_post_id → dest_post_id）
-    # "by_order" — 按顺序映射（源第N条帖子 → 目标第N条帖子）
-    # "manual" — 手动指定映射关系
-
     manual_post_mapping: Dict[str, str] = {}
-    # 手动映射: {"src_post_id": "dest_post_id"}
     manual_post_mapping_raw: str = ""
 
 
@@ -100,7 +82,7 @@ class LoginConfig(BaseModel):
 
     API_ID: int = 0
     API_HASH: str = ""
-    user_type: int = 0  # 0:bot, 1:user
+    user_type: int = 0
     phone_no: int = 91
     USERNAME: str = ""
     SESSION_STRING: str = ""
@@ -121,7 +103,7 @@ class Config(BaseModel):
     admins: List[Union[int, str]] = []
     forwards: List[Forward] = []
     show_forwarded_from: bool = False
-    mode: int = 0  # 0: live, 1:past
+    mode: int = 0
     live: LiveSettings = LiveSettings()
     past: PastSettings = PastSettings()
 
@@ -261,12 +243,8 @@ if PASSWORD == "nb":
     )
 
 from_to = {}
-# 评论区相关的映射
 comment_sources: Dict[int, int] = {}
-# discussion_group_id → source_channel_id 的反向映射
-
 comment_forward_map: Dict[int, "Forward"] = {}
-# discussion_group_id → Forward 对象的映射
 
 is_bot: Optional[bool] = None
 logging.info("config.py got executed")
