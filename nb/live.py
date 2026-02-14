@@ -21,43 +21,78 @@ COMMENT_GROUPED_TIMEOUT = 3.0
 
 
 async def _send_grouped_messages(grouped_id):
+    """发送缓冲的媒体组消息 — 修复版"""
     if grouped_id not in st.GROUPED_CACHE:
         return
+    
     chat_messages_map = st.GROUPED_CACHE[grouped_id]
+    
     for chat_id, messages in chat_messages_map.items():
         if chat_id not in config.from_to:
             continue
+        
         dest = config.from_to.get(chat_id)
+        
+        # 应用插件，获取处理后的 NbMessage 列表
         tms = await apply_plugins_to_group(messages)
         if not tms:
+            logging.warning(f"媒体组 {grouped_id} 所有消息被过滤")
             continue
+        
+        # 关键修复：确保 messages 和 tms 对齐
+        # 如果插件过滤了消息，用 tm.message 重建对应关系
+        if len(tms) != len(messages):
+            logging.debug(f"插件过滤: {len(messages)} -> {len(tms)}")
+            # 使用 tm 中保存的原始 message
+            aligned_messages = [tm.message for tm in tms]
+        else:
+            aligned_messages = messages
+
+        # 验证对齐
+        if len(aligned_messages) != len(tms):
+            logging.error(f"对齐失败: messages={len(aligned_messages)}, tms={len(tms)}")
+            continue
+
         for d in dest:
             try:
+                # 传递对齐后的数据
                 fwded_msgs = await send_message(
-                    d, tms[0],
-                    grouped_messages=[tm.message for tm in tms],
+                    d, tms[0],  # 第一个 tm 作为代表（包含 client 等信息）
+                    grouped_messages=aligned_messages,
                     grouped_tms=tms,
                 )
+                
                 # 记录每条消息的映射
                 if fwded_msgs:
                     fwded_list = fwded_msgs if isinstance(fwded_msgs, list) else [fwded_msgs]
-                    for i, msg in enumerate(messages):
+                    
+                    # 为每条原始消息建立映射
+                    for i, msg in enumerate(aligned_messages):
                         uid = st.EventUid(st.DummyEvent(chat_id, msg.id))
                         if uid not in st.stored:
                             st.stored[uid] = {}
                         if i < len(fwded_list):
                             st.stored[uid][d] = fwded_list[i]
-                    # 记录帖子映射（用第一条消息的ID）
-                    fid = extract_msg_id(fwded_list[0])
-                    if fid:
-                        st.add_post_mapping(chat_id, messages[0].id, d, fid)
-                        # 同时为每条消息都建立映射，确保评论能找到对应关系
-                        for msg in messages[1:]:
-                            st.add_post_mapping(chat_id, msg.id, d, fid)
+                        else:
+                            # 如果返回数量少于预期，用最后一个
+                            st.stored[uid][d] = fwded_list[-1] if fwded_list else None
+                    
+                    # 记录帖子映射（用第一条转发消息的 ID）
+                    if fwded_list:
+                        fid = extract_msg_id(fwded_list[0])
+                        if fid:
+                            # 为组内每条消息都建立映射
+                            for msg in aligned_messages:
+                                st.add_post_mapping(chat_id, msg.id, d, fid)
+                
             except Exception as e:
-                logging.error(f"媒体组发送失败: {e}")
+                logging.error(f"媒体组发送失败: {e}", exc_info=True)
+        
+        # 清理资源
         for tm in tms:
             tm.clear()
+    
+    # 清理缓存
     st.GROUPED_CACHE.pop(grouped_id, None)
     st.GROUPED_TIMERS.pop(grouped_id, None)
     st.GROUPED_MAPPING.pop(grouped_id, None)
@@ -265,16 +300,25 @@ async def _send_grouped_comments(client, messages, dest_targets, chat_id):
     """发送评论媒体组 — 增强版"""
     if not messages:
         return
+    
+    # 关键修复：应用插件并保持对齐
     tms = await apply_plugins_to_group(messages)
     if not tms or not tms[0]:
         return
+    
+    # 对齐
+    if len(tms) != len(messages):
+        aligned_messages = [tm.message for tm in tms]
+    else:
+        aligned_messages = messages
+    
     try:
         for dest_chat_id, dest_reply_to in dest_targets.items():
             for attempt in range(3):
                 try:
                     fwded = await send_message(
                         dest_chat_id, tms[0],
-                        grouped_messages=[tm.message for tm in tms],
+                        grouped_messages=aligned_messages,
                         grouped_tms=tms,
                         comment_to_post=dest_reply_to,
                     )
