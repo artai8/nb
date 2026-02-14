@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+import atexit
 
 import streamlit as st
 
@@ -13,6 +14,11 @@ from nb.web_ui.password import check_password
 from nb.web_ui.utils import hide_st, switch_theme
 
 CONFIG = read_config()
+
+# PID 文件路径（独立于 Streamlit session）
+PID_FILE = os.path.join(os.getcwd(), "nb.pid")
+LOG_FILE = os.path.join(os.getcwd(), "logs.txt")
+OLD_LOG_FILE = os.path.join(os.getcwd(), "old_logs.txt")
 
 
 def rerun():
@@ -24,7 +30,36 @@ def rerun():
         st.warning("Please refresh the page manually.")
 
 
+def _read_pid_file() -> int:
+    """从 PID 文件读取进程 ID"""
+    try:
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE, "r") as f:
+                pid_str = f.read().strip()
+                if pid_str:
+                    return int(pid_str)
+    except (ValueError, IOError):
+        pass
+    return 0
+
+
+def _write_pid_file(pid: int):
+    """写入 PID 到文件"""
+    with open(PID_FILE, "w") as f:
+        f.write(str(pid))
+
+
+def _remove_pid_file():
+    """删除 PID 文件"""
+    try:
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+    except Exception:
+        pass
+
+
 def is_process_alive(pid: int) -> bool:
+    """跨平台检查进程是否存活"""
     if pid <= 0:
         return False
     try:
@@ -38,22 +73,59 @@ def is_process_alive(pid: int) -> bool:
         return False
 
 
+def get_running_pid() -> int:
+    """获取当前运行中的 nb 进程 PID。
+    同时检查 PID 文件和 CONFIG，以两者中实际存活的为准。
+    """
+    # 优先检查 PID 文件
+    file_pid = _read_pid_file()
+    config_pid = CONFIG.pid
+
+    # 检查 PID 文件中的进程
+    if file_pid > 0 and is_process_alive(file_pid):
+        # 同步到 CONFIG
+        if config_pid != file_pid:
+            CONFIG.pid = file_pid
+            write_config(CONFIG)
+        return file_pid
+
+    # 检查 CONFIG 中的进程
+    if config_pid > 0 and is_process_alive(config_pid):
+        _write_pid_file(config_pid)
+        return config_pid
+
+    # 都不存活，清理
+    if file_pid > 0 or config_pid > 0:
+        _remove_pid_file()
+        if config_pid > 0:
+            CONFIG.pid = 0
+            write_config(CONFIG)
+
+    return 0
+
+
 def kill_process(pid: int) -> bool:
+    """安全终止进程"""
     if not is_process_alive(pid):
+        _remove_pid_file()
         return True
     try:
         os.kill(pid, signal.SIGTERM)
         for _ in range(10):
             time.sleep(0.5)
             if not is_process_alive(pid):
+                _remove_pid_file()
                 return True
+        # 强制终止
         try:
             os.kill(pid, signal.SIGKILL)
             time.sleep(1)
         except ProcessLookupError:
             pass
+        _remove_pid_file()
         return not is_process_alive(pid)
     except ProcessLookupError:
+        _remove_pid_file()
         return True
     except Exception as e:
         st.error(f"终止进程失败: {e}")
@@ -61,78 +133,148 @@ def kill_process(pid: int) -> bool:
 
 
 def start_nb_process(mode: str) -> int:
-    """启动 nb 进程，确保脱离 Streamlit 进程组，浏览器关闭也不会停止。"""
-    log_file = os.path.join(os.getcwd(), "logs.txt")
+    """启动 nb 进程，完全脱离 Streamlit。
 
+    使用 shell 脚本方式启动，确保：
+    1. 进程完全独立于 Streamlit
+    2. stdout/stderr 写入日志文件
+    3. PID 写入文件
+    4. 浏览器关闭/刷新不影响进程
+    """
     # 备份旧日志
-    if os.path.exists(log_file):
-        old_log = os.path.join(os.getcwd(), "old_logs.txt")
+    if os.path.exists(LOG_FILE):
         try:
-            os.rename(log_file, old_log)
+            os.rename(LOG_FILE, OLD_LOG_FILE)
         except Exception:
             pass
+
+    cwd = os.getcwd()
+    python = sys.executable
+
+    if sys.platform == "win32":
+        # Windows: 用 CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS
+        return _start_windows(python, mode, cwd)
+    else:
+        # Linux/Mac: 用 shell nohup + 双 fork 脱离
+        return _start_unix(python, mode, cwd)
+
+
+def _start_unix(python: str, mode: str, cwd: str) -> int:
+    """Unix/Linux/Mac: 用 nohup + setsid 启动完全独立的后台进程"""
+
+    # 写一个临时启动脚本，确保进程完全脱离
+    launcher_script = os.path.join(cwd, "_nb_launcher.sh")
+
+    script_content = f"""#!/bin/bash
+cd "{cwd}"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="{cwd}"
+nohup "{python}" -u -m nb.cli {mode} --loud > "{LOG_FILE}" 2>&1 &
+NB_PID=$!
+echo $NB_PID > "{PID_FILE}"
+# 等一下确认进程启动成功
+sleep 2
+if kill -0 $NB_PID 2>/dev/null; then
+    echo "nb started with PID $NB_PID" >> "{LOG_FILE}"
+else
+    echo "nb failed to start" >> "{LOG_FILE}"
+    rm -f "{PID_FILE}"
+fi
+"""
+
+    try:
+        with open(launcher_script, "w") as f:
+            f.write(script_content)
+        os.chmod(launcher_script, 0o755)
+
+        # 执行启动脚本（脚本本身会立即返回，nb 在后台运行）
+        subprocess.run(
+            ["/bin/bash", launcher_script],
+            cwd=cwd,
+            timeout=10,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # 清理启动脚本
+        try:
+            os.remove(launcher_script)
+        except Exception:
+            pass
+
+        # 等待 PID 文件生成
+        for _ in range(10):
+            time.sleep(0.5)
+            pid = _read_pid_file()
+            if pid > 0 and is_process_alive(pid):
+                return pid
+
+        # 如果 PID 文件没生成，检查日志
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r") as f:
+                content = f.read()
+            if content.strip():
+                st.code(content[-2000:])
+
+        return 0
+
+    except Exception as e:
+        st.error(f"启动失败: {e}")
+        try:
+            os.remove(launcher_script)
+        except Exception:
+            pass
+        return 0
+
+
+def _start_windows(python: str, mode: str, cwd: str) -> int:
+    """Windows: 用 CREATE_NEW_PROCESS_GROUP 启动"""
+    import subprocess
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env["PYTHONPATH"] = os.getcwd()
+    env["PYTHONPATH"] = cwd
 
-    cmd = [
-        sys.executable, "-u",
-        "-m", "nb.cli",
-        mode,
-        "--loud",
-    ]
+    cmd = [python, "-u", "-m", "nb.cli", mode, "--loud"]
 
     try:
-        # ★ 关键修复：
-        # 1. stdout/stderr 重定向到文件（用 os.open 获取持久的 fd）
-        # 2. start_new_session=True 使进程脱离 Streamlit 进程组
-        # 3. stdin 设为 DEVNULL 避免依赖终端
-        # 4. close_fds=False 确保子进程继承日志文件 fd
+        log_handle = open(LOG_FILE, "w")
 
-        log_fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        # Windows 特有标志
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
 
         process = subprocess.Popen(
             cmd,
-            stdout=log_fd,
-            stderr=log_fd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            cwd=os.getcwd(),
+            cwd=cwd,
             env=env,
-            start_new_session=True,
-            close_fds=False,
+            creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
         )
 
-        # 父进程关闭自己持有的 fd 副本（子进程已继承）
-        os.close(log_fd)
+        log_handle.close()
 
-        # 等一下检查是否立刻崩溃
         time.sleep(2)
         if process.poll() is not None:
-            with open(log_file, "r") as f:
-                error_output = f.read()
-            st.error(f"进程启动后立即退出 (code={process.returncode})")
-            if error_output.strip():
-                st.code(error_output[-2000:])
+            with open(LOG_FILE, "r") as f:
+                st.code(f.read()[-2000:])
             return 0
 
+        _write_pid_file(process.pid)
         return process.pid
 
     except Exception as e:
-        try:
-            os.close(log_fd)
-        except Exception:
-            pass
         st.error(f"启动失败: {e}")
         return 0
 
 
 def termination():
     st.success("进程已终止")
-    log_file = os.path.join(os.getcwd(), "logs.txt")
-    old_log = os.path.join(os.getcwd(), "old_logs.txt")
+    _remove_pid_file()
 
-    for fname, label in [(log_file, "当前日志"), (old_log, "上次日志")]:
+    for fname, label in [(LOG_FILE, "当前日志"), (OLD_LOG_FILE, "上次日志")]:
         try:
             with open(fname, "r") as f:
                 content = f.read()
@@ -146,7 +288,6 @@ def termination():
         except FileNotFoundError:
             pass
 
-    CONFIG = read_config()
     CONFIG.pid = 0
     write_config(CONFIG)
 
@@ -189,14 +330,8 @@ if check_password(st):
             write_config(CONFIG)
             st.success("配置已保存")
 
-    # ---------- 进程状态检查 ----------
-    pid = CONFIG.pid
-
-    if pid != 0 and not is_process_alive(pid):
-        st.warning(f"记录的进程 (PID={pid}) 已不存在，重置状态")
-        CONFIG.pid = 0
-        write_config(CONFIG)
-        pid = 0
+    # ---------- 进程状态检查（用 PID 文件，不依赖 session） ----------
+    pid = get_running_pid()
 
     # ---------- 启动/停止控制 ----------
     if pid == 0:
@@ -232,9 +367,7 @@ if check_password(st):
     st.markdown("---")
     st.markdown("### 📋 Logs")
 
-    log_file = os.path.join(os.getcwd(), "logs.txt")
-
-    if os.path.exists(log_file):
+    if os.path.exists(LOG_FILE):
         lines = st.slider(
             "显示日志行数",
             min_value=50, max_value=2000, value=200, step=50,
@@ -242,7 +375,7 @@ if check_password(st):
         )
 
         try:
-            with open(log_file, "r") as f:
+            with open(LOG_FILE, "r") as f:
                 all_lines = f.readlines()
 
             display_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
