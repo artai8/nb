@@ -1,4 +1,4 @@
-# nb/utils.py
+# nb/utils.py — Telethon >= 1.34 兼容版
 
 import logging
 import asyncio
@@ -23,6 +23,7 @@ from telethon.tl.types import (
     InputPhoto,
     InputDocument,
     InputSingleMedia,
+    InputReplyToMessage,
     MessageMediaPhoto,
     MessageMediaDocument,
 )
@@ -45,23 +46,40 @@ RETRY_BASE_DELAY = 5
 
 
 # =====================================================================
-#  reply_to 兼容辅助
+#  reply_to 兼容辅助（兼容 1.26 和 1.34+）
 # =====================================================================
 
 def _get_reply_to_msg_id(message) -> Optional[int]:
-    if hasattr(message, 'reply_to_msg_id') and message.reply_to_msg_id is not None:
-        return message.reply_to_msg_id
+    """兼容所有版本获取 reply_to_msg_id。"""
+    # 新版: message.reply_to.reply_to_msg_id
     if hasattr(message, 'reply_to') and message.reply_to is not None:
         if hasattr(message.reply_to, 'reply_to_msg_id'):
             return message.reply_to.reply_to_msg_id
+    # 旧版: message.reply_to_msg_id
+    if hasattr(message, 'reply_to_msg_id') and message.reply_to_msg_id is not None:
+        return message.reply_to_msg_id
     return None
 
 
 def _get_reply_to_top_id(message) -> Optional[int]:
+    """获取评论所属的顶层帖子 ID。"""
     reply_to = getattr(message, 'reply_to', None)
     if reply_to is None:
         return None
     return getattr(reply_to, 'reply_to_top_id', None)
+
+
+def _make_reply_to(msg_id: Optional[int]):
+    """构造 reply_to 参数，兼容新旧 Telethon。
+    新版 Telethon 底层 API 需要 InputReplyToMessage 对象，
+    而高层 API (send_message/send_file) 仍接受 int。
+    """
+    if msg_id is None:
+        return None
+    try:
+        return InputReplyToMessage(reply_to_msg_id=msg_id)
+    except Exception:
+        return msg_id
 
 
 async def get_discussion_message(
@@ -69,6 +87,7 @@ async def get_discussion_message(
     channel_id: Union[int, str],
     msg_id: int,
 ) -> Optional[Message]:
+    """获取频道帖子在讨论组中的副本消息。"""
     try:
         result = await client(GetDiscussionMessageRequest(
             peer=channel_id, msg_id=msg_id,
@@ -84,6 +103,7 @@ async def get_discussion_group_id(
     client: TelegramClient,
     channel_id: Union[int, str],
 ) -> Optional[int]:
+    """获取频道关联的讨论组 ID。"""
     try:
         full = await client.get_entity(channel_id)
         if hasattr(full, 'linked_chat_id') and full.linked_chat_id:
@@ -114,7 +134,7 @@ async def _handle_flood_wait(e: Exception) -> int:
 
 
 # =====================================================================
-#  Spoiler 检测与发送
+#  Spoiler 检测与发送（底层 API 用 InputReplyToMessage）
 # =====================================================================
 
 def _has_spoiler(message: Message) -> bool:
@@ -130,6 +150,7 @@ async def _send_single_with_spoiler(
     caption: Optional[str] = None,
     reply_to: Optional[int] = None,
 ) -> Message:
+    """通过底层 API 发送单条带 spoiler 的媒体消息。"""
     media = message.media
     peer = await client.get_input_entity(recipient)
 
@@ -156,13 +177,17 @@ async def _send_single_with_spoiler(
     else:
         raise ValueError(f"不支持的媒体类型: {type(media)}")
 
-    result = await client(SendMediaRequest(
-        peer=peer,
-        media=input_media,
-        message=caption or '',
-        random_id=random.randrange(-2**63, 2**63),
-        reply_to_msg_id=reply_to,
-    ))
+    # ★ Telethon 1.34+ 底层 API 用 reply_to 参数 (InputReplyToMessage)
+    kwargs = {
+        'peer': peer,
+        'media': input_media,
+        'message': caption or '',
+        'random_id': random.randrange(-2**63, 2**63),
+    }
+    if reply_to is not None:
+        kwargs['reply_to'] = _make_reply_to(reply_to)
+
+    result = await client(SendMediaRequest(**kwargs))
 
     if hasattr(result, 'updates'):
         for update in result.updates:
@@ -178,6 +203,7 @@ async def _send_album_with_spoiler(
     caption: Optional[str] = None,
     reply_to: Optional[int] = None,
 ) -> List[Message]:
+    """通过底层 SendMultiMedia API 发送媒体组，保留 spoiler 属性。"""
     peer = await client.get_input_entity(recipient)
     multi_media = []
 
@@ -223,12 +249,13 @@ async def _send_album_with_spoiler(
     if not multi_media:
         raise ValueError("没有有效的媒体可发送")
 
+    # ★ Telethon 1.34+ 底层 API 用 reply_to 参数
     kwargs = {
         'peer': peer,
         'multi_media': multi_media,
     }
     if reply_to is not None:
-        kwargs['reply_to_msg_id'] = reply_to
+        kwargs['reply_to'] = _make_reply_to(reply_to)
 
     result = await client(SendMultiMediaRequest(**kwargs))
 
@@ -275,12 +302,11 @@ async def send_message(
 ) -> Union[Message, List[Message], None]:
     """发送消息的统一入口。
 
-    核心逻辑（学习 tgcf）：
-    - 单条消息：修改 message.text 后直接 send_message(entity, message_object)
-      Telethon 会自动复制消息（含媒体），不带 "Forwarded from"，不需要 file_reference
-    - 媒体组：用 send_file 传入消息对象列表
-    - show_forwarded_from=True：用 forward_messages
-    - 评论区：通过 reply_to=comment_to_post 让消息出现在评论区
+    策略（学习 tgcf，Telethon 1.34+ 支持）：
+    - show_forwarded_from=True → forward_messages（保留来源）
+    - 其他 → 修改 message.text 后 send_message(entity, message_object)
+      Telethon 1.34+ 会自动复制消息，不带 "Forwarded from"
+    - 评论区 → reply_to=comment_to_post
     """
     client: TelegramClient = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
@@ -288,7 +314,6 @@ async def send_message(
     # === 情况 1: 直接转发（保留 "Forwarded from"） ===
     if CONFIG.show_forwarded_from:
         if grouped_messages:
-            # 媒体组直接转发
             attempt = 0
             delay = 5
             while attempt < MAX_RETRIES:
@@ -304,10 +329,9 @@ async def send_message(
                     attempt += 1
                     delay = min(delay * 2, 300)
                     await asyncio.sleep(delay)
-            logging.error(f"❌ 直接转发最终失败，已重试 {MAX_RETRIES} 次")
+            logging.error(f"❌ 直接转发最终失败")
             return None
         else:
-            # 单条直接转发
             attempt = 0
             delay = 5
             while attempt < MAX_RETRIES:
@@ -317,7 +341,7 @@ async def send_message(
                     )
                     if isinstance(result, list):
                         result = result[0] if result else None
-                    logging.info(f"✅ forward 成功 msg={tm.message.id} (attempt {attempt+1})")
+                    logging.info(f"✅ forward 成功 msg={tm.message.id}")
                     return result
                 except Exception as e:
                     if _is_flood_wait(e):
@@ -387,7 +411,7 @@ async def send_message(
                 attempt += 1
                 delay = min(delay * 2, 300)
                 await asyncio.sleep(delay)
-        logging.error(f"❌ 媒体组发送最终失败，已重试 {MAX_RETRIES} 次")
+        logging.error(f"❌ 媒体组发送最终失败")
         return None
 
     # === 情况 3: 单条消息复制发送（不带 "Forwarded from"） ===
@@ -430,14 +454,11 @@ async def send_message(
         except Exception as e:
             logging.warning(f"⚠️ spoiler 发送失败，回退普通模式: {e}")
 
-    # 3c: 普通消息 ★ 学习 tgcf 的核心做法 ★
-    #     直接修改 message.text，然后传整个 message 对象给 send_message
-    #     Telethon 会自动复制消息（含媒体），不带来源标记，不需要 file_reference
+    # 3c: 普通消息 ★ 核心：传整个 message 对象 ★
     attempt = 0
     delay = 5
     while attempt < MAX_RETRIES:
         try:
-            # ★ 核心：修改原始消息的 text，然后发送整个消息对象
             tm.message.text = tm.text
 
             if processed_markup is not None:
@@ -450,7 +471,7 @@ async def send_message(
                     logging.info(f"✅ copy 成功(带按钮) msg={tm.message.id} (attempt {attempt+1})")
                     return result
                 except Exception as e_btn:
-                    logging.warning(f"⚠️ 带按钮发送失败，去掉按钮重试: {e_btn}")
+                    logging.warning(f"⚠️ 带按钮失败: {e_btn}")
 
             result = await client.send_message(
                 recipient, tm.message,
