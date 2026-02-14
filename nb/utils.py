@@ -23,6 +23,13 @@ from telethon.tl.types import (
     InputSingleMedia,
     MessageMediaPhoto,
     MessageMediaDocument,
+    MessageMediaWebPage,
+    MessageMediaGame,
+    MessageMediaPoll,
+    MessageMediaDice,
+    MessageMediaContact,
+    MessageMediaGeo,
+    MessageMediaVenue,
 )
 from telethon.tl.functions.messages import (
     SendMediaRequest,
@@ -30,6 +37,12 @@ from telethon.tl.functions.messages import (
     GetDiscussionMessageRequest,
 )
 from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.errors.rpcerrorlist import (
+    MediaInvalidError,
+    MediaEmptyError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+)
 
 from nb import __version__
 from nb.config import CONFIG
@@ -89,6 +102,9 @@ async def get_discussion_message(
                 return None
             if "CHANNEL_PRIVATE" in err_str or "CHAT_ADMIN_REQUIRED" in err_str:
                 return None
+            if "DISCUSSION" in err_str and "DISABLED" in err_str:
+                logging.debug(f"频道 {channel_id} 未开启评论功能")
+                return None
             logging.warning(
                 f"⚠️ 获取讨论消息失败 (attempt {attempt+1}/3, "
                 f"channel={channel_id}, msg={msg_id}): {e}"
@@ -122,6 +138,65 @@ def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
         return False
     return getattr(message.media, 'spoiler', False)
+
+
+def _is_unsupported_media(message: Message) -> bool:
+    """★ 新增：检测不支持转发的媒体类型"""
+    if not message or not message.media:
+        return False
+    
+    media = message.media
+    
+    # 游戏消息：用户账号无法发送
+    if isinstance(media, MessageMediaGame):
+        return True
+    
+    # 投票消息：需要特殊处理
+    if isinstance(media, MessageMediaPoll):
+        return True
+    
+    # 骰子消息
+    if isinstance(media, MessageMediaDice):
+        return True
+    
+    return False
+
+
+def _get_media_type_name(message: Message) -> str:
+    """获取媒体类型名称用于日志"""
+    if not message or not message.media:
+        return "text"
+    
+    media = message.media
+    if isinstance(media, MessageMediaPhoto):
+        return "photo"
+    if isinstance(media, MessageMediaDocument):
+        doc = media.document
+        if doc:
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    return "video"
+                if isinstance(attr, DocumentAttributeAnimated):
+                    return "gif"
+                if isinstance(attr, DocumentAttributeAudio):
+                    return "audio"
+                if isinstance(attr, DocumentAttributeSticker):
+                    return "sticker"
+        return "document"
+    if isinstance(media, MessageMediaWebPage):
+        return "webpage"
+    if isinstance(media, MessageMediaGame):
+        return "game"
+    if isinstance(media, MessageMediaPoll):
+        return "poll"
+    if isinstance(media, MessageMediaDice):
+        return "dice"
+    if isinstance(media, MessageMediaContact):
+        return "contact"
+    if isinstance(media, (MessageMediaGeo, MessageMediaVenue)):
+        return "location"
+    
+    return "unknown"
 
 
 async def _send_single_with_spoiler(
@@ -241,6 +316,42 @@ async def _send_album_with_spoiler(
     return sent_messages if sent_messages else result
 
 
+async def _download_and_resend(
+    client: TelegramClient,
+    recipient: EntityLike,
+    message: Message,
+    caption: Optional[str] = None,
+    reply_to: Optional[int] = None,
+) -> Optional[Message]:
+    """★ 新增：下载媒体后重新发送（用于处理文件引用过期等问题）"""
+    try:
+        # 下载媒体到临时文件
+        file_path = await message.download_media()
+        if not file_path:
+            logging.warning("⚠️ 无法下载媒体文件")
+            return None
+        
+        try:
+            # 重新发送
+            result = await client.send_file(
+                recipient,
+                file_path,
+                caption=caption or "",
+                reply_to=reply_to,
+                supports_streaming=True,
+            )
+            return result
+        finally:
+            # 清理临时文件
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.error(f"❌ 下载重发失败: {e}")
+        return None
+
+
 def platform_info():
     nl = "\n"
     return f"""Running nb {__version__}\
@@ -257,10 +368,28 @@ async def send_message(
     grouped_tms: Optional[List["NbMessage"]] = None,
     comment_to_post: Optional[int] = None,
 ) -> Union[Message, List[Message], None]:
+    """★ 增强：支持多重回退机制的消息发送"""
     client: TelegramClient = tm.client
-
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
+    
+    # ★ 检测不支持的媒体类型
+    if _is_unsupported_media(tm.message):
+        media_type = _get_media_type_name(tm.message)
+        logging.warning(f"⚠️ 跳过不支持的媒体类型: {media_type}")
+        
+        # 如果有文字，只发送文字
+        if tm.text and tm.text.strip():
+            try:
+                return await client.send_message(
+                    recipient,
+                    f"[原消息包含 {media_type}，无法转发]\n\n{tm.text}",
+                    reply_to=effective_reply_to,
+                )
+            except Exception as e:
+                logging.error(f"❌ 发送替代文本失败: {e}")
+        return None
 
+    # ========== 转发模式（show_forwarded_from=True）==========
     if CONFIG.show_forwarded_from and grouped_messages:
         attempt = 0
         delay = 5
@@ -280,6 +409,7 @@ async def send_message(
                 await asyncio.sleep(delay)
         return None
 
+    # ========== 媒体组发送 ==========
     if grouped_messages and grouped_tms:
         combined_caption = "\n\n".join([
             gtm.text.strip() for gtm in grouped_tms
@@ -287,20 +417,41 @@ async def send_message(
         ])
 
         any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
+        
+        # ★ 过滤掉不支持的媒体
+        valid_messages = [
+            msg for msg in grouped_messages
+            if not _is_unsupported_media(msg)
+        ]
+        
+        if not valid_messages:
+            logging.warning("⚠️ 媒体组中没有可发送的媒体")
+            if combined_caption:
+                try:
+                    return await client.send_message(
+                        recipient,
+                        combined_caption,
+                        reply_to=effective_reply_to,
+                    )
+                except Exception:
+                    pass
+            return None
 
         attempt = 0
         delay = 5
+        last_error = None
+        
         while attempt < MAX_RETRIES:
             try:
                 if any_spoiler:
                     result = await _send_album_with_spoiler(
-                        client, recipient, grouped_messages,
+                        client, recipient, valid_messages,
                         caption=combined_caption or None,
                         reply_to=effective_reply_to,
                     )
                 else:
                     files_to_send = [
-                        msg for msg in grouped_messages
+                        msg for msg in valid_messages
                         if msg.photo or msg.video or msg.gif or msg.document
                     ]
                     if not files_to_send:
@@ -320,20 +471,48 @@ async def send_message(
                     )
                 return result
 
+            except (FileReferenceExpiredError, FileReferenceInvalidError) as e:
+                logging.warning(f"⚠️ 文件引用过期，尝试下载重发...")
+                # 对媒体组暂不支持下载重发，直接返回失败
+                last_error = e
+                break
+                
+            except (MediaInvalidError, MediaEmptyError) as e:
+                logging.warning(f"⚠️ 媒体无效: {e}")
+                last_error = e
+                break
+                
             except Exception as e:
-                if "FLOOD_WAIT" in str(e).upper():
+                err_str = str(e).upper()
+                if "FLOOD_WAIT" in err_str:
                     wait_match = re.search(r'\d+', str(e))
                     wait_sec = int(wait_match.group()) if wait_match else 30
                     await asyncio.sleep(wait_sec + 10)
                 else:
                     logging.error(f"❌ 媒体组发送失败 ({attempt+1}/{MAX_RETRIES}): {e}")
+                    last_error = e
                 attempt += 1
                 delay = min(delay * 2, 300)
                 await asyncio.sleep(delay)
+        
+        # 所有重试失败，尝试只发送文字
+        if combined_caption:
+            try:
+                logging.info("📝 媒体发送失败，尝试只发送文字")
+                return await client.send_message(
+                    recipient,
+                    combined_caption,
+                    reply_to=effective_reply_to,
+                )
+            except Exception:
+                pass
+        
         return None
 
+    # ========== 单条消息发送 ==========
     processed_markup = getattr(tm, 'reply_markup', None)
 
+    # 方式1: 新文件（已处理过的，如加水印）
     if tm.new_file:
         try:
             return await client.send_file(
@@ -356,6 +535,7 @@ async def send_message(
                 logging.error(f"❌ 新文件最终失败: {e2}")
                 return None
 
+    # 方式2: Spoiler 处理
     if _has_spoiler(tm.message):
         try:
             result = await _send_single_with_spoiler(
@@ -363,35 +543,37 @@ async def send_message(
                 caption=tm.text, reply_to=effective_reply_to,
             )
             return result
+        except (FileReferenceExpiredError, FileReferenceInvalidError):
+            logging.warning("⚠️ spoiler 文件引用过期，尝试下载重发")
+            result = await _download_and_resend(
+                client, recipient, tm.message,
+                caption=tm.text, reply_to=effective_reply_to,
+            )
+            if result:
+                return result
         except Exception as e:
-            logging.warning(f"⚠️ spoiler 失败，回退: {e}")
+            logging.warning(f"⚠️ spoiler 失败: {e}")
 
-    try:
-        if processed_markup is not None:
-            try:
-                return await client.send_message(
-                    recipient,
-                    tm.text,
-                    file=tm.message.media if tm.message.media else None,
-                    buttons=processed_markup,
-                    reply_to=effective_reply_to,
-                    link_preview=not bool(tm.message.media),
-                )
-            except Exception as e:
-                logging.warning(f"⚠️ 带按钮失败: {e}")
-                if tm.message.media:
+    # 方式3: 常规发送（带多重回退）
+    last_error = None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            # 尝试1: 完整发送（带按钮）
+            if processed_markup is not None and attempt == 0:
+                try:
                     return await client.send_message(
-                        recipient, tm.text,
-                        file=tm.message.media,
+                        recipient,
+                        tm.text,
+                        file=tm.message.media if tm.message.media else None,
+                        buttons=processed_markup,
                         reply_to=effective_reply_to,
-                        link_preview=False,
+                        link_preview=not bool(tm.message.media),
                     )
-                else:
-                    return await client.send_message(
-                        recipient, tm.text,
-                        reply_to=effective_reply_to,
-                    )
-        else:
+                except Exception as e:
+                    logging.debug(f"带按钮发送失败: {e}")
+            
+            # 尝试2: 不带按钮发送
             if tm.message.media:
                 return await client.send_message(
                     recipient, tm.text,
@@ -404,9 +586,47 @@ async def send_message(
                     recipient, tm.text,
                     reply_to=effective_reply_to,
                 )
-    except Exception as e:
-        logging.error(f"❌ 消息发送失败: {e}")
-        return None
+                
+        except (FileReferenceExpiredError, FileReferenceInvalidError) as e:
+            logging.warning(f"⚠️ 文件引用过期 (attempt {attempt+1}), 尝试下载重发")
+            result = await _download_and_resend(
+                client, recipient, tm.message,
+                caption=tm.text, reply_to=effective_reply_to,
+            )
+            if result:
+                return result
+            last_error = e
+            
+        except (MediaInvalidError, MediaEmptyError) as e:
+            logging.warning(f"⚠️ 媒体无效: {e}")
+            # 只发送文字
+            if tm.text and tm.text.strip():
+                try:
+                    return await client.send_message(
+                        recipient, tm.text,
+                        reply_to=effective_reply_to,
+                    )
+                except Exception:
+                    pass
+            last_error = e
+            break
+            
+        except Exception as e:
+            err_str = str(e).upper()
+            if "FLOOD_WAIT" in err_str:
+                wait_match = re.search(r'\d+', str(e))
+                wait_sec = int(wait_match.group()) if wait_match else 30
+                logging.warning(f"⛔ FloodWait {wait_sec}s")
+                await asyncio.sleep(wait_sec + 10)
+                continue
+            
+            last_error = e
+            logging.error(f"❌ 发送失败 (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+            await asyncio.sleep(5 * (attempt + 1))
+    
+    # 所有方式都失败
+    logging.error(f"❌ 消息发送失败: {last_error}")
+    return None
 
 
 def cleanup(*files: str) -> None:
