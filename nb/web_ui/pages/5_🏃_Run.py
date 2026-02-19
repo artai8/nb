@@ -127,24 +127,27 @@ switch_theme(st, CONFIG)
 
 if check_password(st):
     
-    # CSS for Status Card & Terminal
+    # CSS for Status Card & Terminal (Neumorphism Enhanced)
     st.markdown("""
     <style>
     .status-card {
-        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.85) 0%, rgba(5, 150, 105, 0.85) 100%);
+        backdrop-filter: blur(5px);
         color: white;
         padding: 2rem;
-        border-radius: 12px;
+        border-radius: 20px;
         text-align: center;
-        box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);
+        box-shadow:  9px 9px 16px var(--shadow-dark),
+                    -9px -9px 16px var(--shadow-light);
+        border: 1px solid rgba(255,255,255,0.2);
     }
     .status-stopped {
-        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-        box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.3);
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.85) 0%, rgba(220, 38, 38, 0.85) 100%);
     }
     .pulse {
         width: 12px; height: 12px; background: white; border-radius: 50%;
         display: inline-block; margin-right: 8px;
+        box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7);
         animation: pulse-animation 2s infinite;
     }
     @keyframes pulse-animation {
@@ -153,30 +156,38 @@ if check_password(st):
         100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
     }
     
-    /* Terminal */
-    .terminal {
-        background: #1e293b;
-        color: #e2e8f0;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 13px;
-        border-radius: 0 0 12px 12px;
-        padding: 15px;
-        height: 400px;
-        overflow-y: auto;
-        border: 1px solid #334155;
-        border-top: none;
-        white-space: pre-wrap; /* 保持换行 */
+    /* Terminal Wrapper */
+    .terminal-wrapper {
+        background: #1e293b; /* Dark background for terminal */
+        border-radius: 15px;
+        box-shadow:  9px 9px 16px var(--shadow-dark),
+                    -9px -9px 16px var(--shadow-light);
+        overflow: hidden;
+        border: 1px solid var(--glass-border);
     }
+    
     .terminal-head {
         background: #0f172a;
-        padding: 10px 15px;
-        border-radius: 12px 12px 0 0;
-        border: 1px solid #334155;
-        border-bottom: 1px solid #1e293b;
+        padding: 12px 20px;
         display: flex; gap: 8px; align-items: center;
+        border-bottom: 1px solid #334155;
     }
-    .dot { width: 10px; height: 10px; border-radius: 50%; }
-    .red { background: #ef4444; } .yellow { background: #f59e0b; } .green { background: #10b981; }
+    
+    .terminal-body {
+        padding: 20px;
+        height: 400px;
+        overflow-y: auto;
+        color: #e2e8f0;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        box-shadow: inset 0 0 20px rgba(0,0,0,0.2); /* Inner shadow for depth */
+    }
+
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .red { background: #ef4444; box-shadow: 0 0 5px #ef4444; } 
+    .yellow { background: #f59e0b; box-shadow: 0 0 5px #f59e0b; } 
+    .green { background: #10b981; box-shadow: 0 0 5px #10b981; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -254,9 +265,11 @@ if check_password(st):
     c_log_h, c_log_r = st.columns([4, 1])
     with c_log_h:
         st.markdown("""
-        <div class="terminal-head">
-            <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
-            <span style="color:#64748b; font-family:monospace; margin-left:10px; font-size:12px;">nb-cli — logs.txt</span>
+        <div class="terminal-wrapper" style="border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: none; box-shadow: 9px 9px 16px var(--shadow-dark), -9px -9px 16px var(--shadow-light);">
+            <div class="terminal-head">
+                <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+                <span style="color:#94a3b8; font-family:monospace; margin-left:10px; font-size:12px;">nb-cli — logs.txt</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
     with c_log_r:
@@ -275,4 +288,8 @@ if check_password(st):
         except: pass
     
     # 使用安全的 log_content
-    st.markdown(f'<div class="terminal">{log_content}</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="terminal-wrapper" style="border-top-left-radius: 0; border-top-right-radius: 0; border-top: none; margin-top: -5px; box-shadow: 9px 9px 16px var(--shadow-dark), -9px -9px 16px var(--shadow-light);">
+        <div class="terminal-body">{log_content}</div>
+    </div>
+    """, unsafe_allow_html=True)
