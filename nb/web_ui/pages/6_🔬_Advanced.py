@@ -14,8 +14,9 @@ if check_password(st):
     st.title("Advanced Settings")
     
     st.markdown("""
-    <div style="background:#fff3cd; color:#856404; padding:15px; border-radius:8px; border:1px solid #ffeeba; margin-bottom:20px;">
-        ⚠️ <strong>Warning:</strong> This page allows raw configuration access. Proceed with caution.
+    <div class="glass-card" style="border-left: 4px solid #f59e0b; margin-bottom: 20px;">
+        <span style="font-size: 1.2rem; margin-right: 10px;">⚠️</span>
+        <strong>Warning:</strong> This page allows raw configuration access. Proceed with caution.
     </div>
     """, unsafe_allow_html=True)
 
