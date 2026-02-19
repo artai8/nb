@@ -19,6 +19,7 @@ from nb.utils import (
     _get_reply_to_top_id,
     get_discussion_message,
     get_discussion_group_id,
+    resolve_bot_media_from_message,
 )
 
 
@@ -34,6 +35,56 @@ def _extract_msg_id(fwded) -> Optional[int]:
     if hasattr(fwded, 'id'):
         return fwded.id
     return None
+
+
+def _dedupe_messages(messages: List[Message]) -> List[Message]:
+    seen = set()
+    result = []
+    for msg in messages:
+        if msg.id in seen:
+            continue
+        seen.add(msg.id)
+        result.append(msg)
+    return result
+
+
+def _chunk_list(items: List, size: int) -> List[List]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+async def _send_bot_media_album(
+    dest: int,
+    bot_messages: List[Message],
+    reply_to: Optional[int] = None,
+    comment_to_post: Optional[int] = None,
+):
+    skip_plugins = ["filter"] if CONFIG.bot_media.ignore_filter else None
+    tms = await apply_plugins_to_group(
+        bot_messages,
+        skip_plugins=skip_plugins,
+        fail_open=CONFIG.bot_media.force_forward_on_empty,
+    )
+    if not tms:
+        return None
+    fwded_first = None
+    chunks = _chunk_list(tms, 10)
+    for idx, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        if reply_to is not None and idx == 0:
+            chunk[0].reply_to = reply_to
+        fwded = await send_message(
+            dest,
+            chunk[0],
+            grouped_messages=[tm.message for tm in chunk],
+            grouped_tms=chunk,
+            comment_to_post=comment_to_post if idx == 0 else None,
+        )
+        if fwded_first is None:
+            fwded_first = fwded
+    for tm in tms:
+        tm.clear()
+    return fwded_first
 
 
 async def _resolve_comment_dest(
@@ -105,6 +156,24 @@ async def _send_grouped_messages(grouped_id: int) -> None:
             continue
 
         dest = config.from_to.get(chat_id)
+        bot_media = []
+        for msg in messages:
+            bot_media = await resolve_bot_media_from_message(msg.client, msg)
+            if bot_media:
+                break
+        if bot_media:
+            bot_media = _dedupe_messages(bot_media)
+            for d in dest:
+                try:
+                    fwded_msg = await _send_bot_media_album(d, bot_media)
+                    for original_msg in messages:
+                        event_uid = st.EventUid(st.DummyEvent(chat_id, original_msg.id))
+                        if event_uid not in st.stored:
+                            st.stored[event_uid] = {}
+                        st.stored[event_uid][d] = fwded_msg
+                except Exception as e:
+                    logging.critical(f"🚨 live bot 媒体组播失败: {e}")
+            continue
         tms = await apply_plugins_to_group(messages)
         if not tms:
             continue
@@ -146,6 +215,30 @@ async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
         del st.stored[next(iter(st.stored))]
 
     dest = config.from_to.get(chat_id)
+    bot_media = await resolve_bot_media_from_message(event.client, message)
+    if bot_media:
+        bot_media = _dedupe_messages(bot_media)
+        st.stored[event_uid] = {}
+        for d in dest:
+            reply_to_id = None
+            if event.is_reply:
+                reply_msg_id = _get_reply_to_msg_id(event.message)
+                if reply_msg_id is not None:
+                    r_event = st.DummyEvent(chat_id, reply_msg_id)
+                    r_event_uid = st.EventUid(r_event)
+                    if r_event_uid in st.stored:
+                        fwded_reply = st.stored[r_event_uid].get(d)
+                        reply_to_id = _extract_msg_id(fwded_reply)
+            try:
+                fwded_msg = await _send_bot_media_album(d, bot_media, reply_to=reply_to_id)
+                if fwded_msg is not None:
+                    st.stored[event_uid][d] = fwded_msg
+                    fwded_id = _extract_msg_id(fwded_msg)
+                    if fwded_id is not None:
+                        st.add_post_mapping(chat_id, message.id, d, fwded_id)
+            except Exception as e:
+                logging.error(f"❌ live bot 媒体发送失败: {e}")
+        return
     tm = await apply_plugins(message)
     if not tm:
         return
@@ -213,9 +306,16 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
     if dest_map is None:
         return
 
+    bot_media = await resolve_bot_media_from_message(event.client, message)
+    if bot_media:
+        bot_media = _dedupe_messages(bot_media)
+
     for dest_discussion_id, dest_top_id in dest_map.items():
         try:
-            fwded_msg = await send_message(dest_discussion_id, tm, comment_to_post=dest_top_id)
+            if bot_media:
+                fwded_msg = await _send_bot_media_album(dest_discussion_id, bot_media, comment_to_post=dest_top_id)
+            else:
+                fwded_msg = await send_message(dest_discussion_id, tm, comment_to_post=dest_top_id)
             if fwded_msg is not None:
                 st.add_comment_mapping(chat_id, message.id, dest_discussion_id, _extract_msg_id(fwded_msg))
         except Exception as e:
