@@ -245,9 +245,16 @@ async def apply_plugins(message: Message) -> Optional[NbMessage]:
     return tm
 
 
-async def apply_plugins_to_group(messages: List[Message]) -> List[NbMessage]:
+async def apply_plugins_to_group(
+    messages: List[Message],
+    skip_plugins: Optional[List[str]] = None,
+    fail_open: bool = False,
+) -> List[NbMessage]:
     tms = [NbMessage(msg) for msg in messages]
+    skip = set(skip_plugins or [])
     for pid in PLUGIN_ORDER:
+        if pid in skip:
+            continue
         if pid not in _plugins:
             continue
         plugin = _plugins[pid]
@@ -270,6 +277,8 @@ async def apply_plugins_to_group(messages: List[Message]) -> List[NbMessage]:
         except Exception as e:
             logging.error(f"❌ 组插件失败 [{pid}]: {e}")
         tms = [tm for tm in tms if tm]
+    if fail_open and not tms:
+        tms = [NbMessage(msg) for msg in messages]
     return tms
 
 
