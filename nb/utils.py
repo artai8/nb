@@ -3,6 +3,7 @@
 import logging
 import asyncio
 import re
+from urllib.parse import urlparse, parse_qs
 import os
 import sys
 import platform
@@ -23,11 +24,15 @@ from telethon.tl.types import (
     InputReplyToMessage,
     MessageMediaPhoto,
     MessageMediaDocument,
+    ReplyInlineMarkup,
+    KeyboardButtonUrl,
+    KeyboardButtonCallback,
 )
 from telethon.tl.functions.messages import (
     SendMediaRequest,
     SendMultiMediaRequest,
     GetDiscussionMessageRequest,
+    GetBotCallbackAnswerRequest,
 )
 
 from nb import __version__
@@ -108,6 +113,211 @@ async def get_discussion_group_id(
     except Exception as e:
         logging.warning(f"⚠️ 获取讨论组失败 (channel={channel_id}): {e}")
     return None
+
+
+def _extract_tme_links(text: str) -> List[str]:
+    if not text:
+        return []
+    candidates = re.findall(r"(https?://t\.me/[^\s]+|t\.me/[^\s]+)", text)
+    return [c.strip(").,;\"'") for c in candidates]
+
+
+def _parse_tme_start_link(url: str) -> Optional[tuple]:
+    if not url:
+        return None
+    if url.startswith("t.me/"):
+        url = "https://" + url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    path = parsed.path.lstrip("/")
+    if not path:
+        return None
+    bot_username = path.split("/")[0]
+    qs = parse_qs(parsed.query or "")
+    start_param = qs.get("start", [None])[0]
+    if not start_param:
+        return None
+    return bot_username, start_param
+
+
+def _extract_start_links_from_markup(reply_markup) -> List[tuple]:
+    if reply_markup is None or not isinstance(reply_markup, ReplyInlineMarkup):
+        return []
+    found = []
+    for row in reply_markup.rows:
+        for button in row.buttons:
+            if isinstance(button, KeyboardButtonUrl):
+                url = button.url or ""
+                parsed = _parse_tme_start_link(url)
+                if parsed:
+                    found.append(parsed)
+    return found
+
+
+def _extract_bot_usernames(text: str) -> List[str]:
+    if not text:
+        return []
+    matches = re.findall(r"@([A-Za-z0-9_]{5,})", text)
+    bots = []
+    for name in matches:
+        if name.lower().endswith("bot"):
+            bots.append(name)
+    return bots
+
+
+def _find_next_callback_button(reply_markup) -> Optional[KeyboardButtonCallback]:
+    if reply_markup is None or not isinstance(reply_markup, ReplyInlineMarkup):
+        return None
+    keywords = ["next", "more", "next page", "下一页", "下页", "继续", "更多", "➡", ">"]
+    for row in reply_markup.rows:
+        for button in row.buttons:
+            if isinstance(button, KeyboardButtonCallback):
+                text = (button.text or "").strip().lower()
+                if any(k in text for k in keywords):
+                    return button
+    return None
+
+
+async def _collect_new_messages(
+    client: TelegramClient,
+    peer,
+    min_id: int,
+    timeout: float,
+) -> List[Message]:
+    start = asyncio.get_running_loop().time()
+    seen = set()
+    collected: List[Message] = []
+    while True:
+        new_found = False
+        async for msg in client.iter_messages(peer, min_id=min_id, reverse=True):
+            if msg.id in seen:
+                continue
+            seen.add(msg.id)
+            collected.append(msg)
+            new_found = True
+        if collected and not new_found:
+            break
+        if asyncio.get_running_loop().time() - start >= timeout:
+            break
+        await asyncio.sleep(CONFIG.bot_media.poll_interval)
+    return collected
+
+
+async def _get_grouped_messages_from_bot(
+    client: TelegramClient,
+    bot,
+    grouped_id: int,
+) -> List[Message]:
+    result = []
+    async for msg in client.iter_messages(bot, limit=CONFIG.bot_media.recent_limit):
+        if msg.grouped_id == grouped_id:
+            result.append(msg)
+    result.sort(key=lambda m: m.id)
+    return result
+
+
+async def _start_bot_and_collect_album(
+    client: TelegramClient,
+    bot_username: str,
+    start_param: str,
+    max_pages: Optional[int] = None,
+    wait_timeout: Optional[float] = None,
+) -> List[Message]:
+    if max_pages is None:
+        max_pages = CONFIG.bot_media.max_pages
+    if not CONFIG.bot_media.enable_pagination:
+        max_pages = 0
+    if wait_timeout is None:
+        wait_timeout = CONFIG.bot_media.wait_timeout
+    bot = await client.get_entity(bot_username)
+    latest = await client.get_messages(bot, limit=1)
+    last_id = latest[0].id if latest else 0
+    await client.send_message(bot, f"/start {start_param}")
+    collected: List[Message] = []
+    seen_grouped = set()
+    pages = 0
+    while pages <= max_pages:
+        new_msgs = await _collect_new_messages(client, bot, last_id, wait_timeout)
+        if not new_msgs:
+            break
+        last_id = max(m.id for m in new_msgs)
+        for msg in new_msgs:
+            if msg.grouped_id and msg.grouped_id not in seen_grouped:
+                grouped = await _get_grouped_messages_from_bot(client, bot, msg.grouped_id)
+                if grouped:
+                    collected.extend(grouped)
+                seen_grouped.add(msg.grouped_id)
+        next_btn = None
+        next_msg = None
+        for msg in reversed(new_msgs):
+            next_btn = _find_next_callback_button(msg.reply_markup)
+            if next_btn:
+                next_msg = msg
+                break
+        if next_btn and next_msg:
+            try:
+                await client(GetBotCallbackAnswerRequest(peer=bot, msg_id=next_msg.id, data=next_btn.data))
+                pages += 1
+                continue
+            except Exception:
+                break
+        break
+    return collected
+
+
+async def resolve_bot_media_from_message(
+    client: TelegramClient,
+    message: Message,
+) -> List[Message]:
+    if not CONFIG.bot_media.enabled:
+        return []
+    text_links = _extract_tme_links(message.raw_text or message.text or "")
+    found = []
+    for link in text_links:
+        parsed = _parse_tme_start_link(link)
+        if parsed:
+            found.append(parsed)
+    found.extend(_extract_start_links_from_markup(message.reply_markup))
+    collected: List[Message] = []
+    for bot_username, start_param in found:
+        try:
+            items = await _start_bot_and_collect_album(client, bot_username, start_param)
+            if items:
+                collected.extend(items)
+        except Exception as e:
+            logging.warning(f"⚠️ bot 媒体拉取失败 ({bot_username}): {e}")
+    if collected:
+        return collected
+    if not CONFIG.bot_media.enable_keyword_trigger:
+        return []
+    bot_names = _extract_bot_usernames(message.raw_text or message.text or "")
+    if not bot_names:
+        return []
+    keyword = (message.raw_text or message.text or "").strip()
+    if not keyword:
+        return []
+    for bot_username in bot_names[:1]:
+        try:
+            bot = await client.get_entity(bot_username)
+            latest = await client.get_messages(bot, limit=1)
+            last_id = latest[0].id if latest else 0
+            await client.send_message(bot, keyword)
+            responses = await _collect_new_messages(client, bot, last_id, CONFIG.bot_media.wait_timeout)
+            for msg in responses:
+                new_links = _extract_tme_links(msg.raw_text or msg.text or "")
+                for link in new_links:
+                    parsed = _parse_tme_start_link(link)
+                    if parsed:
+                        items = await _start_bot_and_collect_album(client, parsed[0], parsed[1])
+                        if items:
+                            collected.extend(items)
+            if collected:
+                break
+        except Exception as e:
+            logging.warning(f"⚠️ bot 关键字请求失败 ({bot_username}): {e}")
+    return collected
 
 
 def _is_flood_wait(e: Exception) -> bool:
