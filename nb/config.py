@@ -98,6 +98,18 @@ class BotMessages(BaseModel):
     bot_help: str = "For details visit github.com/artai8/nb"
 
 
+class BotMediaSettings(BaseModel):
+    enabled: bool = True
+    enable_keyword_trigger: bool = True
+    enable_pagination: bool = True
+    ignore_filter: bool = True
+    force_forward_on_empty: bool = True
+    poll_interval: float = 1.2
+    wait_timeout: float = 12.0
+    max_pages: int = 5
+    recent_limit: int = 80
+
+
 class Config(BaseModel):
     """The blueprint for nb's whole config."""
 
@@ -113,6 +125,7 @@ class Config(BaseModel):
 
     plugins: PluginConfig = Field(default_factory=PluginConfig)
     bot_messages: BotMessages = Field(default_factory=BotMessages)
+    bot_media: BotMediaSettings = Field(default_factory=BotMediaSettings)
 
 
 def write_config_to_file(config: Config):
