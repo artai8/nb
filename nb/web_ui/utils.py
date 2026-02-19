@@ -47,158 +47,230 @@ def list_to_dict(my_list: List):
     return my_dict
 
 
-# ==================== 新增：极致美化 CSS ====================
-def inject_custom_css():
-    """注入 SaaS Dashboard 风格 CSS"""
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
-        
-        /* 全局变量 */
+
+# ==================== 新增：极致美化 CSS (Neumorphism + Glassmorphism) ====================
+def inject_custom_css(theme: str = "light"):
+    """注入 Neumorphism (新拟物化) + Glassmorphism (毛玻璃) 风格 CSS"""
+    
+    # 定义主题变量
+    if theme == "dark":
+        # 深色模式变量
+        vars_css = """
         :root {
-            --primary: #6366f1; /* Indigo */
-            --primary-hover: #4f46e5;
-            --bg-body: #f8fafc;
-            --text-main: #1e293b;
-            --radius: 10px;
+            --bg-color: #212529;
+            --text-color: #f8f9fa;
+            --shadow-light: #2c3237;
+            --shadow-dark: #16191b;
+            --glass-bg: rgba(33, 37, 41, 0.75);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --primary-color: #6c5ce7;
+            --accent-color: #00cec9;
+            --input-bg: #212529;
+            --card-radius: 20px;
         }
+        """
+    else:
+        # 浅色模式变量 (默认)
+        vars_css = """
+        :root {
+            --bg-color: #e0e5ec;
+            --text-color: #4a5568;
+            --shadow-light: #ffffff;
+            --shadow-dark: #a3b1c6;
+            --glass-bg: rgba(255, 255, 255, 0.65);
+            --glass-border: rgba(255, 255, 255, 0.4);
+            --primary-color: #6c5ce7;
+            --accent-color: #00cec9;
+            --input-bg: #e0e5ec;
+            --card-radius: 20px;
+        }
+        """
 
-        /* 基础重置 */
-        .stApp {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg-body);
-        }
+    st.markdown(
+        f"""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap');
         
-        h1, h2, h3 { font-weight: 700 !important; letter-spacing: -0.5px; color: #0f172a; }
+        {vars_css}
+
+        /* 全局样式重置 */
+        .stApp {{
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Nunito', sans-serif;
+        }}
         
-        /* 侧边栏美化 */
-        section[data-testid="stSidebar"] {
-            background-color: #0f172a; /* 深色侧边栏 */
-            color: #f8fafc;
-        }
-        /* 侧边栏文字颜色覆盖 */
-        section[data-testid="stSidebar"] h1, 
-        section[data-testid="stSidebar"] h2, 
-        section[data-testid="stSidebar"] h3, 
-        section[data-testid="stSidebar"] span, 
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] p {
-            color: #cbd5e1 !important; 
-        }
+        h1, h2, h3, h4, h5, h6 {{
+            color: var(--text-color) !important;
+            font-weight: 700;
+            text-shadow: 1px 1px 2px var(--shadow-light), -1px -1px 2px var(--shadow-dark);
+        }}
+
+        /* --- Glassmorphism Sidebar (侧边栏毛玻璃) --- */
+        section[data-testid="stSidebar"] {{
+            background-color: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-right: 1px solid var(--glass-border);
+            box-shadow: 5px 0 15px rgba(0,0,0,0.05);
+        }}
         
-        /* 按钮重绘 */
-        .stButton button {
-            border-radius: 8px;
-            font-weight: 600;
-            border: 1px solid #e2e8f0;
-            transition: all 0.2s;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-        }
-        .stButton button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        }
-        
-        /* Primary 按钮 (紫色渐变) */
-        .stButton button[kind="primary"] {
-            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+        section[data-testid="stSidebar"] .block-container {{
+            padding-top: 2rem;
+        }}
+
+        /* --- Neumorphism Buttons (新拟物化按钮) --- */
+        .stButton > button {{
+            border-radius: 12px;
+            background: var(--bg-color);
+            box-shadow:  6px 6px 12px var(--shadow-dark),
+                        -6px -6px 12px var(--shadow-light);
             border: none;
-            color: white;
-            box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.3);
-        }
-        .stButton button[kind="primary"]:hover {
-            background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
-            box-shadow: 0 6px 10px -1px rgba(79, 70, 229, 0.4);
-        }
-
-        /* Secondary 按钮 (红色用于删除/停止) */
-        .stButton button[kind="secondary"] {
-            background-color: white;
-            color: #ef4444;
-            border-color: #fee2e2;
-        }
-        .stButton button[kind="secondary"]:hover {
-            background-color: #fef2f2;
-            border-color: #fca5a5;
-        }
-
-        /* 输入框优化 */
-        .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
-            border-radius: 8px;
-            border: 1px solid #cbd5e1;
-            background-color: #ffffff;
-            color: #334155;
-        }
-        .stTextInput input:focus, .stTextArea textarea:focus {
-            border-color: #6366f1;
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-        }
-
-        /* 卡片化容器 (Expander) */
-        .streamlit-expanderHeader {
-            background-color: white;
-            border-radius: 8px;
-            border: 1px solid #e2e8f0;
-            color: #334155;
+            color: var(--text-color);
             font-weight: 600;
-        }
-        div[data-testid="stExpander"] {
-            background-color: white;
-            border-radius: 8px;
-            border: 1px solid #e2e8f0;
-            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+            transition: all 0.2s ease;
+            padding: 0.5rem 1rem;
+        }}
+        
+        .stButton > button:hover {{
+            transform: translateY(-2px);
+            box-shadow:  8px 8px 16px var(--shadow-dark),
+                        -8px -8px 16px var(--shadow-light);
+            color: var(--primary-color);
+        }}
+        
+        .stButton > button:active {{
+            transform: translateY(1px);
+            box-shadow: inset 4px 4px 8px var(--shadow-dark),
+                        inset -4px -4px 8px var(--shadow-light);
+        }}
+        
+        /* Primary 按钮特殊处理 */
+        .stButton button[kind="primary"] {{
+            color: var(--primary-color);
+            border: 1px solid rgba(108, 92, 231, 0.1);
+        }}
+
+        /* --- Neumorphism Inputs (内嵌阴影输入框) --- */
+        .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {{
+            background-color: var(--input-bg) !important;
+            border-radius: 12px;
+            border: none;
+            box-shadow: inset 5px 5px 10px var(--shadow-dark),
+                        inset -5px -5px 10px var(--shadow-light);
+            color: var(--text-color);
+            padding: 10px 12px;
+        }}
+        
+        .stTextInput input:focus, .stTextArea textarea:focus {{
+            outline: none;
+            box-shadow: inset 2px 2px 5px var(--shadow-dark),
+                        inset -2px -2px 5px var(--shadow-light),
+                        0 0 5px var(--primary-color);
+        }}
+
+        /* --- Glassmorphism Cards / Expanders (卡片/折叠框) --- */
+        div[data-testid="stExpander"] {{
+            background: var(--bg-color);
+            border-radius: var(--card-radius);
+            border: 1px solid var(--glass-border);
+            box-shadow:  9px 9px 16px var(--shadow-dark),
+                        -9px -9px 16px var(--shadow-light);
+            margin-bottom: 1rem;
             overflow: hidden;
-        }
-        div[data-testid="stExpander"] > div:first-child {
-             border-bottom: 1px solid #f1f5f9;
-        }
+        }}
+        
+        .streamlit-expanderHeader {{
+            background-color: transparent !important;
+            color: var(--text-color) !important;
+            font-weight: 600;
+            border-bottom: 1px solid var(--glass-border);
+        }}
+        
+        div[data-testid="stExpander"] > div:last-child {{
+            padding: 1rem;
+        }}
 
-        /* Tab 样式 */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
+        /* --- Tabs (标签页) --- */
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 16px;
             background-color: transparent;
-            border-bottom: 2px solid #e2e8f0;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: 40px;
-            border-radius: 6px 6px 0 0;
-            padding: 0 16px;
-            color: #64748b;
-            font-weight: 500;
-        }
-        .stTabs [aria-selected="true"] {
-            color: #6366f1;
-            background-color: white;
-            border-bottom: 2px solid #6366f1;
-            margin-bottom: -2px;
-        }
-
-        /* 状态框 Badge */
-        div[data-testid="stMarkdownContainer"] p {
-            line-height: 1.6;
-        }
-
-        /* 隐藏顶部红条 */
-        header[data-testid="stHeader"] {
-            background: transparent;
-        }
+            padding-bottom: 10px;
+        }}
         
-        /* 隐藏 Footer */
-        footer {visibility: hidden;}
-        
-        /* 告警框优化 */
-        .stAlert {
-            border-radius: 8px;
+        .stTabs [data-baseweb="tab"] {{
+            height: 45px;
+            border-radius: 12px;
+            background-color: var(--bg-color);
+            box-shadow:  5px 5px 10px var(--shadow-dark),
+                        -5px -5px 10px var(--shadow-light);
+            color: var(--text-color);
             border: none;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
+            padding: 0 20px;
+        }}
+        
+        .stTabs [aria-selected="true"] {{
+            color: var(--primary-color);
+            box-shadow: inset 3px 3px 6px var(--shadow-dark),
+                        inset -3px -3px 6px var(--shadow-light);
+        }}
+
+        /* --- Checkbox & Radio (开关与单选) --- */
+        /* 自定义 Checkbox 较难完全覆盖，尝试用容器包裹 */
+        div[data-baseweb="checkbox"] {{
+            margin-bottom: 0.5rem;
+        }}
+        
+        /* Alert / Info Boxes (提示框) */
+        .stAlert {{
+            background-color: var(--bg-color);
+            border-radius: 12px;
+            box-shadow: inset 3px 3px 6px var(--shadow-dark),
+                        inset -3px -3px 6px var(--shadow-light);
+            border: none;
+            color: var(--text-color);
+        }}
+        
+        /* Code Block */
+        .stCodeBlock {{
+            border-radius: 12px;
+            box-shadow: inset 3px 3px 6px var(--shadow-dark),
+                        inset -3px -3px 6px var(--shadow-light);
+        }}
+        
+        /* 隐藏顶部红条和页脚 */
+        header[data-testid="stHeader"] {{
+            background: transparent;
+        }}
+        footer {{visibility: hidden;}}
+
+        /* --- Custom Utility Classes (自定义工具类) --- */
+        .neu-card {{
+            background-color: var(--bg-color);
+            border-radius: var(--card-radius);
+            box-shadow:  9px 9px 16px var(--shadow-dark),
+                        -9px -9px 16px var(--shadow-light);
+            padding: 20px;
+            border: 1px solid var(--glass-border);
+            height: 100%;
+        }}
+        
+        .glass-card {{
+            background: var(--glass-bg);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-radius: var(--card-radius);
+            border: 1px solid var(--glass-border);
+            padding: 20px;
+        }}
+        
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 def apply_theme(st, CONFIG, hidden_container):
+
     """Apply theme using browser's local storage"""
     if st.session_state.theme == "☀️":
         theme = "Light"
@@ -226,7 +298,10 @@ def apply_theme(st, CONFIG, hidden_container):
 def switch_theme(st, CONFIG):
     """Display the option to change theme (Light/Dark)"""
     # ★★★ 关键：在这里调用 CSS 注入 ★★★
-    inject_custom_css()
+    theme_val = "light"
+    if CONFIG.theme == "dark":
+        theme_val = "dark"
+    inject_custom_css(theme=theme_val)
     
     with st.sidebar:
         st.markdown("---")
