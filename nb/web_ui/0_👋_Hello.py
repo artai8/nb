@@ -21,7 +21,7 @@ with col_txt:
     st.markdown("""
     <div style='padding-top: 10px;'>
         <h1 style='margin-bottom: 0; font-size: 2.5rem; background: -webkit-linear-gradient(45deg, #6366f1, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>Welcome to NB Manager</h1>
-        <p style='color: #64748b; font-size: 1.1rem;'>The Ultimate Telegram Forwarding Tool</p>
+        <p style='font-size: 1.1rem; opacity: 0.8;'>The Ultimate Telegram Forwarding Tool</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -33,14 +33,7 @@ c1, c2, c3 = st.columns(3)
 
 def card(icon, title, desc, color):
     st.markdown(f"""
-    <div style="
-        background: white; 
-        padding: 20px; 
-        border-radius: 12px; 
-        border: 1px solid #e2e8f0; 
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-        height: 100%;
-    ">
+    <div class="neu-card">
         <div style="
             width: 40px; height: 40px; 
             background: {color}20; 
@@ -51,7 +44,7 @@ def card(icon, title, desc, color):
             {icon}
         </div>
         <h3 style="margin: 0 0 8px 0; font-size: 1.1rem;">{title}</h3>
-        <p style="margin: 0; color: #64748b; font-size: 0.9rem; line-height: 1.5;">{desc}</p>
+        <p style="margin: 0; opacity: 0.8; font-size: 0.9rem; line-height: 1.5;">{desc}</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -76,8 +69,8 @@ with c_info:
 
 with c_dev:
     st.markdown("""
-    <div style="background: #f1f5f9; padding: 15px; border-radius: 10px; border-left: 4px solid #6366f1;">
-        <small style="color:#475569"><b>Developer Note:</b><br>
+    <div class="glass-card" style="border-left: 4px solid #6366f1;">
+        <small style="opacity: 0.8"><b>Developer Note:</b><br>
         Plugins allow you to modify messages before they are sent. It's fully customizable!</small>
     </div>
     """, unsafe_allow_html=True)
