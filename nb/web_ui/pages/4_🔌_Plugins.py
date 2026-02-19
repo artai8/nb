@@ -184,25 +184,20 @@ if check_password(st):
                 )
                 st.markdown(
                     """
-                ###### How to get session string?
-
-                Link to repl: https://replit.com/@artai8/tg-login?v=1
-
-                <p style="line-height:0px;margin-bottom:2em">
-                    <i>Click on the above link and enter api id, api hash, and phone no to generate session string.</i>
-                </p>
-
-
-                > <small>**Note from developer:**<small>
-                >
-                > <small>Due some issues logging in with a user account using a phone no is not supported in this web interface.</small>
-                >
-                > <small>I have built a command-line program named tg-login (https://github.com/artai8/tg-login) that can generate the session string for you.</small>
-                >
-                > <small>You can run tg-login on your computer, or securely in this repl. tg-login is open source, and you can also inspect the bash script running in the repl.</small>
-                >
-                > <small>What is a session string?</small>
-                > <small>https://docs.telethon.dev/en/stable/concepts/sessions.html#string-sessions</small>
+                <div class="glass-card">
+                    <h6 style="margin-top:0">How to get session string?</h6>
+                    <p>Link to repl: <a href="https://replit.com/@artai8/tg-login?v=1" target="_blank">https://replit.com/@artai8/tg-login?v=1</a></p>
+                    <p style="margin-bottom:1em"><i>Click on the above link and enter api id, api hash, and phone no to generate session string.</i></p>
+                    
+                    <div style="background:rgba(0,0,0,0.05); padding:10px; border-radius:8px; font-size:0.9em">
+                        <strong>Note from developer:</strong><br>
+                        Due some issues logging in with a user account using a phone no is not supported in this web interface.<br>
+                        I have built a command-line program named tg-login (https://github.com/artai8/tg-login) that can generate the session string for you.<br>
+                        You can run tg-login on your computer, or securely in this repl. tg-login is open source, and you can also inspect the bash script running in the repl.<br>
+                        <br>
+                        <a href="https://docs.telethon.dev/en/stable/concepts/sessions.html#string-sessions" target="_blank">What is a session string?</a>
+                    </div>
+                </div>
                 """,
                     unsafe_allow_html=True,
                 )
