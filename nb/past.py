@@ -1,4 +1,4 @@
-# nb/past.py — 导入已清理，不引用不存在的函数
+# nb/past.py
 
 import asyncio
 import logging
@@ -25,6 +25,9 @@ from nb.utils import (
     _auto_comment_keyword,
     _extract_comment_keyword,
     resolve_bot_media_from_message,
+    _extract_tme_links,
+    _extract_start_links_from_markup,
+    _extract_tme_links_from_entities,
 )
 
 
@@ -55,6 +58,27 @@ def _dedupe_messages(messages: List[Message]) -> List[Message]:
 
 def _chunk_list(items: List, size: int) -> List[List]:
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _comment_has_bot_links(comment: Message) -> bool:
+    """检查评论是否包含 t.me bot 链接（纯文本、entities、按钮）"""
+    comment_text = comment.raw_text or comment.text or ""
+    # 检查纯文本链接
+    text_links = _extract_tme_links(comment_text)
+    for link in text_links:
+        from nb.utils import _parse_tme_start_link
+        if _parse_tme_start_link(link):
+            return True
+    # 检查 entities 中的链接
+    entity_links = _extract_tme_links_from_entities(comment)
+    for link in entity_links:
+        from nb.utils import _parse_tme_start_link
+        if _parse_tme_start_link(link):
+            return True
+    # 检查内联按钮
+    if _extract_start_links_from_markup(comment.reply_markup):
+        return True
+    return False
 
 
 async def _send_bot_media_album(
@@ -254,9 +278,31 @@ async def _forward_comments_for_post(
         if isinstance(comment, MessageService):
             continue
 
+        # ✅ 修复 Bug 1：不再无条件跳过所有转发消息
+        # 只跳过频道自动镜像到讨论组的系统消息（from_id 与源频道一致）
+        # 保留包含 bot 链接的转发评论
         if hasattr(comment, 'fwd_from') and comment.fwd_from:
-            if getattr(comment.fwd_from, 'channel_post', None):
-                continue
+            fwd = comment.fwd_from
+            if getattr(fwd, 'channel_post', None):
+                # 判断是否是频道自动镜像消息
+                fwd_from_id = None
+                if hasattr(fwd, 'from_id') and fwd.from_id:
+                    if hasattr(fwd.from_id, 'channel_id'):
+                        fwd_from_id = fwd.from_id.channel_id
+                # 源频道 ID（去掉 -100 前缀）
+                src_id_abs = abs(src_channel_id) % (10 ** 10)
+                is_auto_mirror = (fwd_from_id is not None and fwd_from_id == src_id_abs)
+
+                if is_auto_mirror:
+                    # 自动镜像消息：跳过
+                    continue
+                else:
+                    # 转发自其他来源的评论：检查是否包含 bot 链接
+                    if not _comment_has_bot_links(comment):
+                        # 不包含 bot 链接的普通转发评论，按原逻辑跳过
+                        continue
+                    else:
+                        logging.info(f"💡 发现包含 bot 链接的转发评论: msg_id={comment.id}")
 
         if comments_cfg.only_media and not comment.media:
             continue
@@ -289,8 +335,16 @@ async def _forward_comments_for_post(
             delay = random.randint(60, 300)
             await asyncio.sleep(delay)
 
-        bot_media = []
+        # ✅ 修复 Bug 3：评论区也触发关键词评论
+        auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
         bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+
+        if bot_media_allowed and auto_comment_allowed:
+            keyword = _extract_comment_keyword(comment.raw_text or comment.text or "", forward)
+            if keyword:
+                await _auto_comment_keyword(client, src_channel_id, comment.id, keyword)
+
+        bot_media = []
         if bot_media_allowed:
             bot_media = await resolve_bot_media_from_message(client, comment, forward)
         if bot_media:
@@ -303,6 +357,7 @@ async def _forward_comments_for_post(
                             comment.chat_id, comment.id,
                             dest_disc_id, _extract_msg_id(fwded),
                         )
+                        logging.info(f"💬 评论 bot 媒体发送成功: {comment.chat_id}/{comment.id} → {dest_disc_id}")
                 except Exception as e:
                     logging.error(f"❌ 评论 bot 媒体发送失败: {e}")
         else:
