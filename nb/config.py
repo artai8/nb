@@ -56,6 +56,7 @@ class Forward(BaseModel):
     comments: CommentsConfig = Field(default_factory=CommentsConfig)
     bot_media_enabled: Optional[bool] = None
     auto_comment_trigger_enabled: Optional[bool] = None
+    bot_media_keyword_trigger_enabled: Optional[bool] = None
     bot_media_pagination_mode: str = ""
     bot_media_pagination_keywords_raw: str = ""
     comment_keyword_prefixes_raw: str = ""
