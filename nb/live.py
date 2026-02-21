@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 from typing import Union, List, Optional, Dict
 
 from telethon import TelegramClient, events
@@ -54,9 +55,31 @@ def _chunk_list(items: List, size: int) -> List[List]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+LIVE_QUEUE: asyncio.Queue = asyncio.Queue()
+_queue_task: Optional[asyncio.Task] = None
+
+
+async def _queue_worker() -> None:
+    while True:
+        handler, payload = await LIVE_QUEUE.get()
+        try:
+            await handler(payload)
+        except Exception as e:
+            logging.error(f"❌ live 队列处理失败: {e}")
+        finally:
+            LIVE_QUEUE.task_done()
+        delay_seconds = random.randint(60, 300)
+        logging.info(f"⏸️ live 队列休息 {delay_seconds} 秒")
+        await asyncio.sleep(delay_seconds)
+
+
+async def _enqueue_task(handler, payload) -> None:
+    await LIVE_QUEUE.put((handler, payload))
+
+
+
 async def _send_bot_media_album(
     dest: int,
-    bot_messages: List[Message],
     reply_to: Optional[int] = None,
     comment_to_post: Optional[int] = None,
 ):
@@ -203,7 +226,11 @@ async def _send_grouped_messages(grouped_id: int) -> None:
     st.GROUPED_MAPPING.pop(grouped_id, None)
 
 
-async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
+async def _enqueue_grouped_messages(grouped_id: int) -> None:
+    await _enqueue_task(_send_grouped_messages, grouped_id)
+
+
+async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
     chat_id = event.chat_id
     if chat_id in config.comment_sources:
         return
@@ -283,7 +310,7 @@ async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
     tm.clear()
 
 
-async def comment_message_handler(event: Union[Message, events.NewMessage]) -> None:
+async def _handle_comment_message(event: Union[Message, events.NewMessage]) -> None:
     chat_id = event.chat_id
     message = event.message
 
@@ -339,6 +366,14 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
             logging.error(f"❌ 评论转发失败: {e}")
 
     tm.clear()
+
+
+async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
+    await _enqueue_task(_handle_new_message, event)
+
+
+async def comment_message_handler(event: Union[Message, events.NewMessage]) -> None:
+    await _enqueue_task(_handle_comment_message, event)
 
 
 async def edited_message_handler(event) -> None:
@@ -483,6 +518,10 @@ async def start_sync() -> None:
         if not CONFIG.live.delete_sync and key == "deleted":
             continue
         client.add_event_handler(*val)
+
+    global _queue_task
+    if _queue_task is None or _queue_task.done():
+        _queue_task = asyncio.create_task(_queue_worker())
 
     logging.info("🟢 live 模式启动完成")
     await client.run_until_disconnected()
