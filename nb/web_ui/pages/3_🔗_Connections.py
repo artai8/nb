@@ -161,17 +161,25 @@ if check_password(st):
                     obj.bot_media_enabled = True if enabled_override else False
 
                     if enabled_override:
-                        auto_comment_enabled = st.checkbox(
-                            "Auto comment trigger",
-                            value=obj.auto_comment_trigger_enabled is not False,
-                            key=f"act{con}",
-                        )
-                        obj.auto_comment_trigger_enabled = True if auto_comment_enabled else False
+                        ckw1, ckw2 = st.columns(2)
+                        with ckw1:
+                            keyword_trigger_enabled = st.checkbox(
+                                "Keyword trigger",
+                                value=obj.bot_media_keyword_trigger_enabled is not False,
+                                key=f"bmk{con}",
+                            )
+                            obj.bot_media_keyword_trigger_enabled = True if keyword_trigger_enabled else False
+                        with ckw2:
+                            auto_comment_enabled = st.checkbox(
+                                "Auto comment trigger",
+                                value=obj.auto_comment_trigger_enabled is not False,
+                                key=f"act{con}",
+                            )
+                            obj.auto_comment_trigger_enabled = True if auto_comment_enabled else False
 
-                        mode_options = ["auto", "custom_only", "any"]
+                        mode_options = ["auto", "any"]
                         mode_labels = {
                             "auto": "Auto",
-                            "custom_only": "Custom Only",
                             "any": "Any Button",
                         }
                         current_mode = obj.bot_media_pagination_mode if obj.bot_media_pagination_mode in mode_options else "auto"
@@ -201,119 +209,6 @@ if check_password(st):
                             key=f"bps{con}",
                         )
 
-                    st.markdown("---")
-                    st.markdown("**Live Mode Tweaks (Global)**")
-                    CONFIG.live.delete_on_edit = st.text_input(
-                        "Delete-on-Edit Trigger",
-                        value=CONFIG.live.delete_on_edit,
-                        key=f"ldt{con}",
-                    )
-
-                    st.markdown("---")
-                    st.markdown("**Bot Media Fetch (Global)**")
-                    CONFIG.bot_media.enabled = st.checkbox(
-                        "Enable bot media fetching",
-                        value=CONFIG.bot_media.enabled,
-                        key=f"g_bm_en{con}",
-                    )
-                    CONFIG.bot_media.enable_keyword_trigger = st.checkbox(
-                        "Enable keyword trigger",
-                        value=CONFIG.bot_media.enable_keyword_trigger,
-                        key=f"g_bm_kw{con}",
-                    )
-                    CONFIG.bot_media.enable_pagination = st.checkbox(
-                        "Enable pagination",
-                        value=CONFIG.bot_media.enable_pagination,
-                        key=f"g_bm_pg{con}",
-                    )
-                    pagination_modes = ["auto", "custom_only", "any"]
-                    pagination_labels = {
-                        "auto": "Auto",
-                        "custom_only": "Custom Only",
-                        "any": "Any Button",
-                    }
-                    current_mode = CONFIG.bot_media.pagination_mode if CONFIG.bot_media.pagination_mode in pagination_modes else "auto"
-                    CONFIG.bot_media.pagination_mode = st.selectbox(
-                        "Pagination mode",
-                        pagination_modes,
-                        index=pagination_modes.index(current_mode),
-                        format_func=lambda x: pagination_labels.get(x, x),
-                        key=f"g_bm_pm{con}",
-                    )
-                    CONFIG.bot_media.ignore_filter = st.checkbox(
-                        "Ignore filter plugin for bot media",
-                        value=CONFIG.bot_media.ignore_filter,
-                        key=f"g_bm_if{con}",
-                    )
-                    CONFIG.bot_media.force_forward_on_empty = st.checkbox(
-                        "Force forward if plugins drop all",
-                        value=CONFIG.bot_media.force_forward_on_empty,
-                        key=f"g_bm_ff{con}",
-                    )
-                    CONFIG.bot_media.poll_interval = st.number_input(
-                        "Bot poll interval (sec)",
-                        min_value=0.2,
-                        max_value=10.0,
-                        value=float(CONFIG.bot_media.poll_interval),
-                        step=0.1,
-                        key=f"g_bm_pi{con}",
-                    )
-                    CONFIG.bot_media.wait_timeout = st.number_input(
-                        "Bot wait timeout (sec)",
-                        min_value=2.0,
-                        max_value=60.0,
-                        value=float(CONFIG.bot_media.wait_timeout),
-                        step=1.0,
-                        key=f"g_bm_wt{con}",
-                    )
-                    CONFIG.bot_media.max_pages = st.number_input(
-                        "Max pages",
-                        min_value=0,
-                        max_value=50,
-                        value=int(CONFIG.bot_media.max_pages),
-                        step=1,
-                        key=f"g_bm_mp{con}",
-                    )
-                    CONFIG.bot_media.recent_limit = st.number_input(
-                        "Recent messages limit",
-                        min_value=10,
-                        max_value=500,
-                        value=int(CONFIG.bot_media.recent_limit),
-                        step=10,
-                        key=f"g_bm_rl{con}",
-                    )
-                    CONFIG.bot_media.pagination_keywords_raw = st.text_area(
-                        "Pagination keywords (one per line)",
-                        value=CONFIG.bot_media.pagination_keywords_raw,
-                        height=80,
-                        key=f"g_bm_pk{con}",
-                    )
-                    CONFIG.bot_media.comment_keyword_prefixes_raw = st.text_area(
-                        "Comment keyword prefix (one per line)",
-                        value=CONFIG.bot_media.comment_keyword_prefixes_raw,
-                        height=80,
-                        key=f"g_bm_cp{con}",
-                    )
-                    CONFIG.bot_media.comment_keyword_suffixes_raw = st.text_area(
-                        "Comment keyword suffix (one per line)",
-                        value=CONFIG.bot_media.comment_keyword_suffixes_raw,
-                        height=80,
-                        key=f"g_bm_cs{con}",
-                    )
-
-                    st.markdown("---")
-                    st.markdown("**Bot Responses (Global)**")
-                    CONFIG.bot_messages.start = st.text_area(
-                        "/start Reply",
-                        value=CONFIG.bot_messages.start,
-                        key=f"g_bm_start{con}",
-                    )
-                    CONFIG.bot_messages.bot_help = st.text_area(
-                        "/help Reply",
-                        value=CONFIG.bot_messages.bot_help,
-                        key=f"g_bm_help{con}",
-                    )
-
                 with st.expander("🕰️ Past Mode (History) Settings"):
                     hc1, hc2 = st.columns(2)
                     with hc1:
@@ -322,6 +217,16 @@ if check_password(st):
                     with hc2:
                         end_val = st.text_input("End ID (Optional)", value=str(obj.end) if obj.end else "", key=f"end{con}")
                         obj.end = _safe_int(end_val, None) if end_val else None
+
+    with st.expander("🤖 Bot Responses (Global)"):
+        CONFIG.bot_messages.start = st.text_area(
+            "/start Reply",
+            value=CONFIG.bot_messages.start,
+        )
+        CONFIG.bot_messages.bot_help = st.text_area(
+            "/help Reply",
+            value=CONFIG.bot_messages.bot_help,
+        )
 
     st.markdown("---")
     if st.button("💾 Save All Changes", type="primary", use_container_width=True):
