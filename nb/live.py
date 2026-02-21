@@ -20,6 +20,8 @@ from nb.utils import (
     get_discussion_message,
     get_discussion_group_id,
     resolve_bot_media_from_message,
+    _extract_comment_keyword,
+    _auto_comment_keyword,
 )
 
 
@@ -156,11 +158,14 @@ async def _send_grouped_messages(grouped_id: int) -> None:
             continue
 
         dest = config.from_to.get(chat_id)
+        forward = config.forward_map.get(chat_id)
+        bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
         bot_media = []
-        for msg in messages:
-            bot_media = await resolve_bot_media_from_message(msg.client, msg)
-            if bot_media:
-                break
+        if bot_media_allowed:
+            for msg in messages:
+                bot_media = await resolve_bot_media_from_message(msg.client, msg, forward)
+                if bot_media:
+                    break
         if bot_media:
             bot_media = _dedupe_messages(bot_media)
             for d in dest:
@@ -206,6 +211,13 @@ async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
         return
 
     message = event.message
+    forward = config.forward_map.get(chat_id)
+    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+    auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
+    if bot_media_allowed and auto_comment_allowed:
+        keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
+        if keyword:
+            await _auto_comment_keyword(event.client, chat_id, message.id, keyword)
     if message.grouped_id is not None:
         st.add_to_group_cache(chat_id, message.grouped_id, message)
         return
@@ -215,7 +227,9 @@ async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
         del st.stored[next(iter(st.stored))]
 
     dest = config.from_to.get(chat_id)
-    bot_media = await resolve_bot_media_from_message(event.client, message)
+    bot_media = []
+    if bot_media_allowed:
+        bot_media = await resolve_bot_media_from_message(event.client, message, forward)
     if bot_media:
         bot_media = _dedupe_messages(bot_media)
         st.stored[event_uid] = {}
@@ -306,7 +320,10 @@ async def comment_message_handler(event: Union[Message, events.NewMessage]) -> N
     if dest_map is None:
         return
 
-    bot_media = await resolve_bot_media_from_message(event.client, message)
+    bot_media = []
+    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+    if bot_media_allowed:
+        bot_media = await resolve_bot_media_from_message(event.client, message, forward)
     if bot_media:
         bot_media = _dedupe_messages(bot_media)
 
@@ -452,6 +469,7 @@ async def start_sync() -> None:
     ALL_EVENTS.update(get_events())
     await config.load_admins(client)
     config.from_to = await config.load_from_to(client, CONFIG.forwards)
+    config.forward_map = await config.load_forward_map(client, CONFIG.forwards)
 
     has_comments = any(f.use_this and f.comments.enabled for f in CONFIG.forwards)
     if has_comments:
