@@ -54,6 +54,12 @@ class Forward(BaseModel):
     offset: int = 0
     end: Optional[int] = None
     comments: CommentsConfig = Field(default_factory=CommentsConfig)
+    bot_media_enabled: Optional[bool] = None
+    auto_comment_trigger_enabled: Optional[bool] = None
+    bot_media_pagination_mode: str = ""
+    bot_media_pagination_keywords_raw: str = ""
+    comment_keyword_prefixes_raw: str = ""
+    comment_keyword_suffixes_raw: str = ""
 
 
 class LiveSettings(BaseModel):
@@ -102,12 +108,16 @@ class BotMediaSettings(BaseModel):
     enabled: bool = True
     enable_keyword_trigger: bool = True
     enable_pagination: bool = True
+    pagination_mode: str = "auto"
+    pagination_keywords_raw: str = ""
     ignore_filter: bool = True
     force_forward_on_empty: bool = True
     poll_interval: float = 1.2
     wait_timeout: float = 12.0
     max_pages: int = 5
     recent_limit: int = 80
+    comment_keyword_prefixes_raw: str = "评论区回复\n评论区发送\n在评论区回复\n在评论区发送"
+    comment_keyword_suffixes_raw: str = "获取资源\n领取\n获取\n得到内容"
 
 
 class Config(BaseModel):
@@ -220,6 +230,25 @@ async def load_from_to(
     return from_to_dict
 
 
+async def load_forward_map(
+    client: TelegramClient, forwards: List[Forward]
+) -> Dict[int, Forward]:
+    forward_map: Dict[int, Forward] = {}
+
+    async def _(peer):
+        return await get_id(client, peer)
+
+    for forward in forwards:
+        if not forward.use_this:
+            continue
+        source = forward.source
+        if not isinstance(source, int) and source.strip() == "":
+            continue
+        src = await _(forward.source)
+        forward_map[src] = forward
+    return forward_map
+
+
 async def load_admins(client: TelegramClient):
     for admin in CONFIG.admins:
         ADMINS.append(await get_id(client, admin))
@@ -267,6 +296,7 @@ if PASSWORD == "nb":
 from_to = {}
 comment_sources: Dict[int, int] = {}
 comment_forward_map: Dict[int, "Forward"] = {}
+forward_map: Dict[int, "Forward"] = {}
 
 is_bot: Optional[bool] = None
 logging.info("config.py got executed")
