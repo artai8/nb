@@ -125,15 +125,12 @@ async def _flush_group(grouped_id: int) -> None:
     if grouped_id not in GROUPED_CACHE:
         return
     try:
-        from nb.live import _send_grouped_messages
-        await _send_grouped_messages(grouped_id)
+        from nb.live import _enqueue_grouped_messages
+        await _enqueue_grouped_messages(grouped_id)
     except Exception as e:
         logging.exception(
             f"Failed to send grouped messages for grouped_id={grouped_id}: {e}"
         )
-    finally:
-        GROUPED_CACHE.pop(grouped_id, None)
-        GROUPED_TIMERS.pop(grouped_id, None)
 
 
 def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
