@@ -20,6 +20,7 @@ from telethon.tl.types import (
     InputPhoto,
     InputDocument,
     InputSingleMedia,
+    # ✅ 必须引入 InputReplyToMessage 以兼容 Telethon 1.34+
     InputReplyToMessage,
     MessageMediaPhoto,
     MessageMediaDocument,
@@ -70,7 +71,7 @@ def _get_reply_to_top_id(message) -> Optional[int]:
 
 def _make_reply_to(msg_id: Optional[int]):
     """
-    构造 reply_to 参数
+    ✅ 核心修复：构造 reply_to 参数
     Telethon 1.34+ 底层 API 要求使用 InputReplyToMessage
     """
     if msg_id is None:
@@ -119,30 +120,6 @@ def _extract_tme_links(text: str) -> List[str]:
         return []
     candidates = re.findall(r"(https?://t\.me/[^\s]+|t\.me/[^\s]+)", text)
     return [c.strip(").,;\"'") for c in candidates]
-
-
-# ✅ 新增：从消息 entities 中提取 t.me 链接（处理超链接实体）
-def _extract_tme_links_from_entities(message: Message) -> List[str]:
-    """从消息的 entities 中提取 t.me 链接（处理超链接实体）"""
-    if not message:
-        return []
-    entities = getattr(message, 'entities', None) or []
-    links = []
-    text = message.raw_text or message.text or ""
-    for ent in entities:
-        # TextUrl: 显示文字与实际 URL 不同（如 "点击获取" 实际链接是 t.me/xxx）
-        if hasattr(ent, 'url') and ent.url:
-            url = ent.url
-            if 't.me/' in url:
-                links.append(url.strip())
-        # Url: 文本本身就是 URL（兜底，_extract_tme_links 通常已覆盖）
-        elif hasattr(ent, 'offset') and hasattr(ent, 'length'):
-            type_name = type(ent).__name__
-            if 'Url' in type_name:
-                url_text = text[ent.offset:ent.offset + ent.length]
-                if 't.me/' in url_text:
-                    links.append(url_text.strip())
-    return links
 
 
 def _parse_tme_start_link(url: str) -> Optional[tuple]:
@@ -200,7 +177,7 @@ def _parse_lines(raw: str) -> List[str]:
 def _trim_keyword(value: str) -> str:
     if not value:
         return value
-    return value.strip().strip(" \"'""''()（）[]【】{}<>《》")
+    return value.strip().strip(" \"'“”‘’()（）[]【】{}<>《》")
 
 
 def _get_bot_media_value(forward, name: str, default: str = "") -> str:
@@ -395,24 +372,16 @@ async def resolve_bot_media_from_message(
     message: Message,
     forward=None,
 ) -> List[Message]:
-    if not CONFIG.bot_media.enabled:
-        return []
     if CONFIG.login.user_type == 0:
         logging.warning("⚠️ bot 媒体拉取需要 user 模式")
         return []
-
-    # ✅ 修复：同时从纯文本和 entities 中提取链接
     text_links = _extract_tme_links(message.raw_text or message.text or "")
-    entity_links = _extract_tme_links_from_entities(message)
-    all_links = list(dict.fromkeys(text_links + entity_links))  # 去重保序
-
     found = []
-    for link in all_links:
+    for link in text_links:
         parsed = _parse_tme_start_link(link)
         if parsed:
             found.append(parsed)
     found.extend(_extract_start_links_from_markup(message.reply_markup))
-
     collected: List[Message] = []
     for bot_username, start_param in found:
         try:
@@ -507,6 +476,7 @@ async def _send_single_with_spoiler(
     else:
         raise ValueError(f"不支持的媒体类型: {type(media)}")
 
+    # ✅ 修复：使用 _make_reply_to 处理
     kwargs = {
         'peer': peer,
         'media': input_media,
@@ -577,6 +547,7 @@ async def _send_album_with_spoiler(
     if not multi_media:
         raise ValueError("没有有效的媒体可发送")
 
+    # ✅ 修复：使用 _make_reply_to 处理
     kwargs = {
         'peer': peer,
         'multi_media': multi_media,
