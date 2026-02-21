@@ -167,17 +167,107 @@ def _extract_bot_usernames(text: str) -> List[str]:
     return bots
 
 
-def _find_next_callback_button(reply_markup) -> Optional[KeyboardButtonCallback]:
+def _parse_lines(raw: str) -> List[str]:
+    if not raw:
+        return []
+    lines = [line.strip() for line in raw.replace("\r", "\n").split("\n")]
+    return [line for line in lines if line]
+
+
+def _trim_keyword(value: str) -> str:
+    if not value:
+        return value
+    return value.strip().strip(" \"'“”‘’()（）[]【】{}<>《》")
+
+
+def _get_bot_media_value(forward, name: str, default: str = "") -> str:
+    if forward is not None:
+        value = getattr(forward, name, "")
+        if isinstance(value, str) and value.strip():
+            return value
+    value = getattr(CONFIG.bot_media, name, default)
+    return value if isinstance(value, str) else default
+
+
+def _extract_comment_keyword(text: str, forward=None) -> Optional[str]:
+    if not text:
+        return None
+    prefixes = _parse_lines(_get_bot_media_value(forward, "comment_keyword_prefixes_raw"))
+    suffixes = _parse_lines(_get_bot_media_value(forward, "comment_keyword_suffixes_raw"))
+    if not prefixes or not suffixes:
+        return None
+    for prefix in prefixes:
+        start = text.find(prefix)
+        if start == -1:
+            continue
+        start_idx = start + len(prefix)
+        end_candidates = []
+        for suffix in suffixes:
+            end = text.find(suffix, start_idx)
+            if end != -1:
+                end_candidates.append(end)
+        if not end_candidates:
+            continue
+        end_idx = min(end_candidates)
+        keyword = text[start_idx:end_idx]
+        keyword = _trim_keyword(keyword)
+        if keyword:
+            return keyword
+    return None
+
+
+def _find_next_callback_button(reply_markup, forward=None) -> Optional[KeyboardButtonCallback]:
     if reply_markup is None or not isinstance(reply_markup, ReplyInlineMarkup):
         return None
-    keywords = ["next", "more", "next page", "下一页", "下页", "继续", "更多", "➡", ">"]
+    mode = _get_bot_media_value(forward, "bot_media_pagination_mode", "")
+    if not mode:
+        mode = getattr(CONFIG.bot_media, "pagination_mode", "auto")
+    next_keywords = [
+        "next", "more", "next page", "nextpage", "continue", "remaining", "send remaining",
+        "下一页", "下页", "继续", "更多", "继续发送", "发送剩余", "剩余", "查看更多", "下一个", "翻页", "➡", ">",
+    ]
+    get_all_keywords = [
+        "get all", "getall", "all", "all files", "fetch all", "download all",
+        "获取全部", "全部获取", "一键获取", "获取所有", "查看全部", "全部发送", "一键发送",
+    ]
+    custom_keywords = _parse_lines(_get_bot_media_value(forward, "bot_media_pagination_keywords_raw"))
+    if not custom_keywords:
+        custom_keywords = _parse_lines(CONFIG.bot_media.pagination_keywords_raw)
+    if mode == "custom_only":
+        keywords = custom_keywords
+    elif mode == "any":
+        keywords = []
+    else:
+        keywords = next_keywords + get_all_keywords + custom_keywords
     for row in reply_markup.rows:
         for button in row.buttons:
             if isinstance(button, KeyboardButtonCallback):
+                if mode == "any":
+                    return button
                 text = (button.text or "").strip().lower()
-                if any(k in text for k in keywords):
+                compact = text.replace(" ", "")
+                if any(k in text or k in compact for k in keywords):
                     return button
     return None
+
+
+async def _auto_comment_keyword(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+    post_id: int,
+    keyword: str,
+) -> bool:
+    if CONFIG.login.user_type == 0:
+        return False
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    if disc_msg is None:
+        return False
+    try:
+        await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+        return True
+    except Exception as e:
+        logging.warning(f"⚠️ 评论区触发失败: {e}")
+        return False
 
 
 async def _collect_new_messages(
@@ -224,6 +314,7 @@ async def _start_bot_and_collect_album(
     start_param: str,
     max_pages: Optional[int] = None,
     wait_timeout: Optional[float] = None,
+    forward=None,
 ) -> List[Message]:
     if max_pages is None:
         max_pages = CONFIG.bot_media.max_pages
@@ -237,6 +328,7 @@ async def _start_bot_and_collect_album(
     await client.send_message(bot, f"/start {start_param}")
     collected: List[Message] = []
     seen_grouped = set()
+    seen_ids = set()
     pages = 0
     while pages <= max_pages:
         new_msgs = await _collect_new_messages(client, bot, last_id, wait_timeout)
@@ -244,15 +336,24 @@ async def _start_bot_and_collect_album(
             break
         last_id = max(m.id for m in new_msgs)
         for msg in new_msgs:
-            if msg.grouped_id and msg.grouped_id not in seen_grouped:
+            if msg.grouped_id:
+                if msg.grouped_id in seen_grouped:
+                    continue
                 grouped = await _get_grouped_messages_from_bot(client, bot, msg.grouped_id)
                 if grouped:
-                    collected.extend(grouped)
+                    for gmsg in grouped:
+                        if gmsg.media and gmsg.id not in seen_ids:
+                            collected.append(gmsg)
+                            seen_ids.add(gmsg.id)
                 seen_grouped.add(msg.grouped_id)
+            else:
+                if msg.media and msg.id not in seen_ids:
+                    collected.append(msg)
+                    seen_ids.add(msg.id)
         next_btn = None
         next_msg = None
         for msg in reversed(new_msgs):
-            next_btn = _find_next_callback_button(msg.reply_markup)
+            next_btn = _find_next_callback_button(msg.reply_markup, forward)
             if next_btn:
                 next_msg = msg
                 break
@@ -264,14 +365,19 @@ async def _start_bot_and_collect_album(
             except Exception:
                 break
         break
+    collected.sort(key=lambda m: m.id)
     return collected
 
 
 async def resolve_bot_media_from_message(
     client: TelegramClient,
     message: Message,
+    forward=None,
 ) -> List[Message]:
     if not CONFIG.bot_media.enabled:
+        return []
+    if CONFIG.login.user_type == 0:
+        logging.warning("⚠️ bot 媒体拉取需要 user 模式")
         return []
     text_links = _extract_tme_links(message.raw_text or message.text or "")
     found = []
@@ -283,7 +389,7 @@ async def resolve_bot_media_from_message(
     collected: List[Message] = []
     for bot_username, start_param in found:
         try:
-            items = await _start_bot_and_collect_album(client, bot_username, start_param)
+            items = await _start_bot_and_collect_album(client, bot_username, start_param, forward=forward)
             if items:
                 collected.extend(items)
         except Exception as e:
@@ -310,7 +416,7 @@ async def resolve_bot_media_from_message(
                 for link in new_links:
                     parsed = _parse_tme_start_link(link)
                     if parsed:
-                        items = await _start_bot_and_collect_album(client, parsed[0], parsed[1])
+                        items = await _start_bot_and_collect_album(client, parsed[0], parsed[1], forward=forward)
                         if items:
                             collected.extend(items)
             if collected:
