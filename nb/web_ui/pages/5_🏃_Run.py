@@ -223,7 +223,6 @@ if check_password(st):
                 mode = st.radio("Mode", ["live", "past"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
             with c3:
                 if mode == "past":
-                    CONFIG.past.delay = st.slider("Delay", 0, 100, value=CONFIG.past.delay)
                     CONFIG.mode = 1
                 else:
                     CONFIG.live.delete_sync = st.checkbox("Sync Deletes", value=CONFIG.live.delete_sync)
