@@ -55,6 +55,10 @@ def _chunk_list(items: List, size: int) -> List[List]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _bot_media_allowed(forward) -> bool:
+    return forward is None or forward.bot_media_enabled is not False
+
+
 LIVE_QUEUE: asyncio.Queue = asyncio.Queue()
 _queue_task: Optional[asyncio.Task] = None
 
@@ -182,7 +186,7 @@ async def _send_grouped_messages(grouped_id: int) -> None:
 
         dest = config.from_to.get(chat_id)
         forward = config.forward_map.get(chat_id)
-        bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+        bot_media_allowed = _bot_media_allowed(forward)
         bot_media = []
         if bot_media_allowed:
             for msg in messages:
@@ -239,7 +243,7 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
 
     message = event.message
     forward = config.forward_map.get(chat_id)
-    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+    bot_media_allowed = _bot_media_allowed(forward)
     auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
     if bot_media_allowed and auto_comment_allowed:
         keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
@@ -348,7 +352,7 @@ async def _handle_comment_message(event: Union[Message, events.NewMessage]) -> N
         return
 
     bot_media = []
-    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+    bot_media_allowed = _bot_media_allowed(forward)
     if bot_media_allowed:
         bot_media = await resolve_bot_media_from_message(event.client, message, forward)
     if bot_media:
