@@ -22,6 +22,8 @@ from nb.utils import (
     _get_reply_to_top_id,
     get_discussion_message,
     get_discussion_group_id,
+    _auto_comment_keyword,
+    _extract_comment_keyword,
     resolve_bot_media_from_message,
 )
 
@@ -91,13 +93,22 @@ async def _send_bot_media_album(
 
 
 async def _send_past_grouped(
-    client: TelegramClient, src: int, dest: List[int], messages: List[Message]
+    client: TelegramClient, src: int, dest: List[int], messages: List[Message], forward
 ) -> bool:
     bot_media = []
-    for msg in messages:
-        bot_media = await resolve_bot_media_from_message(msg.client, msg)
-        if bot_media:
-            break
+    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+    auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
+    if bot_media_allowed and auto_comment_allowed:
+        for msg in messages:
+            keyword = _extract_comment_keyword(msg.raw_text or msg.text or "", forward)
+            if keyword:
+                await _auto_comment_keyword(client, src, msg.id, keyword)
+                break
+    if bot_media_allowed:
+        for msg in messages:
+            bot_media = await resolve_bot_media_from_message(msg.client, msg, forward)
+            if bot_media:
+                break
     if bot_media:
         bot_media = _dedupe_messages(bot_media)
         for d in dest:
@@ -157,7 +168,7 @@ async def _flush_grouped_buffer(
         if not msgs:
             continue
 
-        await _send_past_grouped(client, src, dest, msgs)
+        await _send_past_grouped(client, src, dest, msgs, forward)
 
         group_last_id = max(m.id for m in msgs)
         last_id = max(last_id, group_last_id)
@@ -278,7 +289,10 @@ async def _forward_comments_for_post(
             delay = random.randint(10, 60)
             await asyncio.sleep(delay)
 
-        bot_media = await resolve_bot_media_from_message(client, comment)
+        bot_media = []
+        bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+        if bot_media_allowed:
+            bot_media = await resolve_bot_media_from_message(client, comment, forward)
         if bot_media:
             bot_media = _dedupe_messages(bot_media)
             for dest_disc_id, dest_top_id in dest_targets.items():
@@ -452,7 +466,15 @@ async def forward_job() -> None:
 
                     prev_grouped_id = None
 
-                    bot_media = await resolve_bot_media_from_message(client, message)
+                    bot_media = []
+                    bot_media_allowed = CONFIG.bot_media.enabled and (forward is None or forward.bot_media_enabled is not False)
+                    auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
+                    if bot_media_allowed and auto_comment_allowed:
+                        keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
+                        if keyword:
+                            await _auto_comment_keyword(client, src, message.id, keyword)
+                    if bot_media_allowed:
+                        bot_media = await resolve_bot_media_from_message(client, message, forward)
                     if bot_media:
                         bot_media = _dedupe_messages(bot_media)
                         event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
