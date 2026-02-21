@@ -233,9 +233,7 @@ def _find_next_callback_button(reply_markup, forward=None) -> Optional[KeyboardB
     custom_keywords = _parse_lines(_get_bot_media_value(forward, "bot_media_pagination_keywords_raw"))
     if not custom_keywords:
         custom_keywords = _parse_lines(CONFIG.bot_media.pagination_keywords_raw)
-    if mode == "custom_only":
-        keywords = custom_keywords
-    elif mode == "any":
+    if mode == "any":
         keywords = []
     else:
         keywords = next_keywords + get_all_keywords + custom_keywords
@@ -396,7 +394,10 @@ async def resolve_bot_media_from_message(
             logging.warning(f"⚠️ bot 媒体拉取失败 ({bot_username}): {e}")
     if collected:
         return collected
-    if not CONFIG.bot_media.enable_keyword_trigger:
+    keyword_trigger_enabled = CONFIG.bot_media.enable_keyword_trigger
+    if forward is not None and forward.bot_media_keyword_trigger_enabled is not None:
+        keyword_trigger_enabled = forward.bot_media_keyword_trigger_enabled
+    if not keyword_trigger_enabled:
         return []
     bot_names = _extract_bot_usernames(message.raw_text or message.text or "")
     if not bot_names:
