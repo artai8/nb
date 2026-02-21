@@ -276,7 +276,7 @@ async def _forward_comments_for_post(
                 await _send_comment_group(client, grouped_buffer[old_gid], dest_targets)
                 comment_count += len(grouped_buffer[old_gid])
                 del grouped_buffer[old_gid]
-                delay = random.randint(10, 60)
+                delay = random.randint(60, 300)
                 await asyncio.sleep(delay)
 
             grouped_buffer[comment.grouped_id].append(comment)
@@ -286,7 +286,7 @@ async def _forward_comments_for_post(
             await _send_comment_group(client, grouped_buffer[old_gid], dest_targets)
             comment_count += len(grouped_buffer[old_gid])
             del grouped_buffer[old_gid]
-            delay = random.randint(10, 60)
+            delay = random.randint(60, 300)
             await asyncio.sleep(delay)
 
         bot_media = []
@@ -309,7 +309,7 @@ async def _forward_comments_for_post(
             await _send_single_comment(client, comment, dest_targets)
         comment_count += 1
 
-        delay = random.randint(10, 60)
+        delay = random.randint(60, 300)
         await asyncio.sleep(delay)
 
     for old_gid in list(grouped_buffer.keys()):
