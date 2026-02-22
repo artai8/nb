@@ -24,20 +24,20 @@ RUN if [ -d "nb/web_ui/page" ] && [ ! -d "nb/web_ui/pages" ]; then mv nb/web_ui/
 RUN find nb/web_ui/pages/ -mindepth 1 ! -name "*.py" -exec rm -rf {} + 2>/dev/null || true
 
 # 2. 升级 pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip setuptools wheel
 
 # 3. 安装依赖 (调整顺序，防止降级)
 
 # Step A: 安装那些容易导致降级的旧库 (先安装它们！)
 # 使用 --no-deps 防止它们自动安装旧版 Pydantic
-RUN pip install --no-cache-dir --prefer-binary \
+RUN pip install --no-cache-dir --root-user-action=ignore --prefer-binary \
     "tg-login>=0.0.4" \
     "watermark.py>=0.0.3" \
     "verlat>=0.1.0"
 
 # Step B: 安装核心库与 Pydantic V2
 # 这里会覆盖掉任何可能的旧依赖
-RUN pip install --no-cache-dir --prefer-binary \
+RUN pip install --no-cache-dir --root-user-action=ignore --prefer-binary \
     "streamlit>=1.33.0" \
     "altair>=5.2.0" \
     "pydantic>=2.7.0" \
@@ -56,7 +56,7 @@ RUN pip install --no-cache-dir --prefer-binary \
 
 # Step C: 🛡️ 保险措施 - 强制检查并重装 Pydantic V2
 # 如果前面的步骤导致了降级，这一步会把它升回来
-RUN pip install --no-cache-dir --force-reinstall --ignore-installed "pydantic>=2.7.0"
+RUN pip install --no-cache-dir --root-user-action=ignore --force-reinstall --ignore-installed "pydantic>=2.7.0"
 
 # 生成可执行命令
 RUN printf '#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, "/app")\nfrom nb.cli import app\nif __name__ == "__main__":\n    app()\n' > /usr/local/bin/nb && chmod +x /usr/local/bin/nb
