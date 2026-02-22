@@ -20,15 +20,15 @@ with col_logo:
 with col_txt:
     st.markdown("""
     <div style='padding-top: 10px;'>
-        <h1 style='margin-bottom: 0; font-size: 2.5rem; background: -webkit-linear-gradient(45deg, #6366f1, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>Welcome to NB Manager</h1>
-        <p style='font-size: 1.1rem; opacity: 0.8;'>The Ultimate Telegram Forwarding Tool</p>
+        <h1 style='margin-bottom: 0; font-size: 2.5rem; background: -webkit-linear-gradient(45deg, #6366f1, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>欢迎使用 NB 管理器</h1>
+        <p style='font-size: 1.1rem; opacity: 0.8;'>终极 Telegram 转发工具</p>
     </div>
     """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 # --- Feature Cards ---
-st.markdown("### 🚀 Capabilities")
+st.markdown("### 🚀 功能特性")
 c1, c2, c3 = st.columns(3)
 
 def card(icon, title, desc, color):
@@ -49,11 +49,11 @@ def card(icon, title, desc, color):
     """, unsafe_allow_html=True)
 
 with c1:
-    card("📤", "Smart Forwarding", "Automate message forwarding between Channels, Groups, and Bots with ease.", "#6366f1")
+    card("📤", "智能转发", "轻松实现频道、群组和机器人之间的自动化消息转发。", "#6366f1")
 with c2:
-    card("⚡", "Live & Past Modes", "Sync real-time messages or migrate chat history with offset controls.", "#10b981")
+    card("⚡", "实时与历史模式", "支持实时消息同步或带有偏移量控制的历史记录迁移。", "#10b981")
 with c3:
-    card("🧩", "Powerful Plugins", "Filter, Replace, Watermark, OCR, Format, and modify messages on the fly.", "#f59e0b")
+    card("🧩", "强大插件", "过滤、替换、水印、OCR、格式化以及实时修改消息。", "#f59e0b")
 
 st.markdown("---")
 
@@ -62,15 +62,15 @@ c_info, c_dev = st.columns([2, 1])
 
 with c_info:
     st.info("""
-    **Getting Started?**
-    Check the sidebar menu to configure your **Telegram Login**, set up **Connections**, and start the **Run Dashboard**.
+    **如何开始？**
+    请查看侧边栏菜单来配置您的 **TG 登录**，设置 **连接**，并启动 **运行仪表盘**。
     """)
-    st.markdown("[View Documentation on GitHub Wiki](https://github.com/artai8/nb/wiki)")
+    st.markdown("[在 GitHub Wiki 查看文档](https://github.com/artai8/nb/wiki)")
 
 with c_dev:
     st.markdown("""
     <div class="glass-card" style="border-left: 4px solid #6366f1;">
-        <small style="opacity: 0.8"><b>Developer Note:</b><br>
-        Plugins allow you to modify messages before they are sent. It's fully customizable!</small>
+        <small style="opacity: 0.8"><b>开发者提示：</b><br>
+        插件允许您在消息发送前对其进行修改。完全可定制！</small>
     </div>
     """, unsafe_allow_html=True)
