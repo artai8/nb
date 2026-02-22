@@ -9,7 +9,7 @@ class NbOcr(NbPlugin):
     id_ = "ocr"
 
     def __init__(self, data) -> None:
-        pass
+        self.data = data
 
     async def modify(self, tm: NbMessage) -> NbMessage:
 
@@ -17,6 +17,10 @@ class NbOcr(NbPlugin):
             return tm
 
         file = await tm.get_file()
-        tm.text = pytesseract.image_to_string(Image.open(file))
+        lang = getattr(self.data, "lang", "chi_sim")
+        try:
+            tm.text = pytesseract.image_to_string(Image.open(file), lang=lang)
+        except Exception as e:
+            tm.text = f"OCR Error: {e}"
         cleanup(file)
         return tm
