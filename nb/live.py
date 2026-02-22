@@ -84,35 +84,38 @@ async def _enqueue_task(handler, payload) -> None:
 
 async def _send_bot_media_album(
     dest: int,
+    bot_messages: List[Message],
+    base_text: Optional[str] = None,
     reply_to: Optional[int] = None,
     comment_to_post: Optional[int] = None,
 ):
     skip_plugins = ["filter"] if CONFIG.bot_media.ignore_filter else None
-    tms = await apply_plugins_to_group(
-        bot_messages,
-        skip_plugins=skip_plugins,
-        fail_open=CONFIG.bot_media.force_forward_on_empty,
-    )
-    if not tms:
-        return None
     fwded_first = None
-    chunks = _chunk_list(tms, 10)
-    for idx, chunk in enumerate(chunks):
-        if not chunk:
+    chunks = _chunk_list(bot_messages, 10)
+    for idx, chunk_msgs in enumerate(chunks):
+        if not chunk_msgs:
+            continue
+        tms = await apply_plugins_to_group(
+            chunk_msgs,
+            skip_plugins=skip_plugins,
+            fail_open=CONFIG.bot_media.force_forward_on_empty,
+            base_text=base_text,
+        )
+        if not tms:
             continue
         if reply_to is not None and idx == 0:
-            chunk[0].reply_to = reply_to
+            tms[0].reply_to = reply_to
         fwded = await send_message(
             dest,
-            chunk[0],
-            grouped_messages=[tm.message for tm in chunk],
-            grouped_tms=chunk,
+            tms[0],
+            grouped_messages=[tm.message for tm in tms],
+            grouped_tms=tms,
             comment_to_post=comment_to_post if idx == 0 else None,
         )
         if fwded_first is None:
             fwded_first = fwded
-    for tm in tms:
-        tm.clear()
+        for tm in tms:
+            tm.clear()
     return fwded_first
 
 
@@ -189,15 +192,21 @@ async def _send_grouped_messages(grouped_id: int) -> None:
         bot_media_allowed = _bot_media_allowed(forward)
         bot_media = []
         if bot_media_allowed:
+            trigger_text = None
             for msg in messages:
                 bot_media = await resolve_bot_media_from_message(msg.client, msg, forward)
                 if bot_media:
+                    trigger_text = msg.raw_text or msg.text or ""
                     break
         if bot_media:
             bot_media = _dedupe_messages(bot_media)
             for d in dest:
                 try:
-                    fwded_msg = await _send_bot_media_album(d, bot_media)
+                    fwded_msg = await _send_bot_media_album(
+                        d,
+                        bot_media,
+                        base_text=trigger_text,
+                    )
                     for original_msg in messages:
                         event_uid = st.EventUid(st.DummyEvent(chat_id, original_msg.id))
                         if event_uid not in st.stored:
@@ -275,7 +284,12 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
                         fwded_reply = st.stored[r_event_uid].get(d)
                         reply_to_id = _extract_msg_id(fwded_reply)
             try:
-                fwded_msg = await _send_bot_media_album(d, bot_media, reply_to=reply_to_id)
+                fwded_msg = await _send_bot_media_album(
+                    d,
+                    bot_media,
+                    base_text=message.raw_text or message.text or "",
+                    reply_to=reply_to_id,
+                )
                 if fwded_msg is not None:
                     st.stored[event_uid][d] = fwded_msg
                     fwded_id = _extract_msg_id(fwded_msg)
@@ -361,7 +375,12 @@ async def _handle_comment_message(event: Union[Message, events.NewMessage]) -> N
     for dest_discussion_id, dest_top_id in dest_map.items():
         try:
             if bot_media:
-                fwded_msg = await _send_bot_media_album(dest_discussion_id, bot_media, comment_to_post=dest_top_id)
+                fwded_msg = await _send_bot_media_album(
+                    dest_discussion_id,
+                    bot_media,
+                    base_text=message.raw_text or message.text or "",
+                    comment_to_post=dest_top_id,
+                )
             else:
                 fwded_msg = await send_message(dest_discussion_id, tm, comment_to_post=dest_top_id)
             if fwded_msg is not None:
