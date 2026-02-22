@@ -106,6 +106,28 @@ if check_password(st):
         CONFIG.plugins.ocr.check = st.checkbox(
             "启用图片 OCR", value=CONFIG.plugins.ocr.check
         )
+        
+        lang_options = ["chi_sim", "chi_tra", "eng", "jpn", "kor", "rus"]
+        lang_labels = {
+            "chi_sim": "简体中文 (chi_sim)",
+            "chi_tra": "繁体中文 (chi_tra)",
+            "eng": "English (eng)",
+            "jpn": "日本語 (jpn)",
+            "kor": "한국어 (kor)",
+            "rus": "Русский (rus)",
+        }
+        current_lang = getattr(CONFIG.plugins.ocr, "lang", "chi_sim")
+        # 如果当前配置的语言不在列表中，添加到列表
+        if current_lang not in lang_options:
+            lang_options.append(current_lang)
+            
+        CONFIG.plugins.ocr.lang = st.selectbox(
+            "OCR 语言",
+            lang_options,
+            index=lang_options.index(current_lang),
+            format_func=lambda x: lang_labels.get(x, x),
+        )
+
         st.write("转发时文本将添加到图片描述中。")
 
     with st.expander("替换"):
