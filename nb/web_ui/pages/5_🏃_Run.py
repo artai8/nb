@@ -9,6 +9,7 @@ import time
 import html
 
 import streamlit as st
+import streamlit.components.v1 as components
 from nb.config import CONFIG, read_config, write_config
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import switch_theme
@@ -292,7 +293,7 @@ if check_password(st):
     # --- Terminal Log ---
     st.write("")
     st.write("")
-    c_log_h, c_log_r = st.columns([4, 1])
+    c_log_h, c_log_r = st.columns([3, 2])
     with c_log_h:
         st.markdown("""
         <div class="terminal-wrapper" style="border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: none; box-shadow: 9px 9px 16px var(--shadow-dark), -9px -9px 16px var(--shadow-light);">
@@ -304,6 +305,13 @@ if check_password(st):
         """, unsafe_allow_html=True)
     with c_log_r:
         # 修复：移除 use_container_width=True
+        auto_refresh = st.toggle("Auto Refresh", value=False)
+        refresh_interval = st.selectbox(
+            "Interval (s)",
+            [1, 2, 3, 5, 10],
+            index=3,
+            disabled=not auto_refresh,
+        )
         if st.button("🔄 Refresh Logs"):
             rerun()
 
@@ -317,10 +325,20 @@ if check_password(st):
                 log_content = html.escape(raw_content)
         except: pass
     
-    st.text_area(
-        "Logs",
-        value=log_content,
-        height=400,
-        disabled=True,
-        label_visibility="collapsed",
+    components.html(
+        f"""
+        <div style="height:400px; overflow-y:auto; padding:16px; background:#1e293b; color:#e2e8f0; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; border-radius:15px; border:1px solid rgba(255,255,255,0.1);">
+            {log_content}
+        </div>
+        <script>
+            const box = document.currentScript.previousElementSibling;
+            if (box) {{
+                box.scrollTop = box.scrollHeight;
+            }}
+        </script>
+        """,
+        height=420,
     )
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        rerun()
