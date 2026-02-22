@@ -229,9 +229,9 @@ if check_password(st):
     
     # 启动/停止按钮区
     if pid == 0:
-        # 居中放置开始按钮
-        start_col1, start_col2, start_col3 = st.columns([1, 1, 1])
-        with start_col2:
+        # 左对齐放置开始按钮
+        c_btn, c_spacer = st.columns([1, 3])
+        with c_btn:
             if st.button("▶️ 开始流程", type="primary", use_container_width=True):
                 # 传入 "live" 或 "past" 对应的英文参数
                 mode_arg = "live" if CONFIG.mode == 0 else "past"
@@ -244,9 +244,9 @@ if check_password(st):
                 else:
                     st.error("启动失败")
     else:
-        # 居中放置停止按钮
-        k1, k2, k3 = st.columns([1, 2, 1])
-        with k2:
+        # 左对齐放置停止按钮
+        c_btn, c_spacer = st.columns([1, 3])
+        with c_btn:
             s1, s2 = st.columns(2)
             with s1:
                 if st.button("⏹️ 停止", type="primary", use_container_width=True):
@@ -281,11 +281,16 @@ if check_password(st):
         )
 
     with c_act3:
-        st.write("")  # Spacer
-        auto_refresh = st.toggle("自动刷新", value=False)
+        # 显示“刷新间隔 (秒)”文本
+        st.markdown("""
+        <div style="display: flex; align-items: center; height: 100%; padding-top: 5px;">
+            <span style="font-size: 0.9em; opacity: 0.8;">刷新间隔 (秒)</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     with c_act4:
-        st.caption("刷新间隔 (秒)")
+        st.write("") # Spacer to align vertically if needed
+        auto_refresh = st.toggle("自动刷新", value=False)
 
     log_content = "暂无日志。"
     if os.path.exists(LOG_FILE):
@@ -297,10 +302,10 @@ if check_password(st):
                 log_content = html.escape(raw_content)
         except: pass
     
-    # 恢复日志显示框样式（黑色背景）
+    # 恢复日志显示框样式（白色背景）
     st.components.v1.html(
         f"""
-        <div id="log-container" style="height:400px; overflow-y:auto; padding:16px; background:#1e293b; color:#e2e8f0; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; border-radius:15px; border:1px solid rgba(255,255,255,0.1);">
+        <div id="log-container" style="height:400px; overflow-y:auto; padding:16px; background:#ffffff; color:#000000; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; border-radius:15px; border:1px solid #ccc;">
             {log_content}
         </div>
         <script>
