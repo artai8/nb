@@ -68,27 +68,62 @@ async def _collect_bot_media_from_comments(
     forward,
 ) -> List[Message]:
     if not _bot_media_allowed(forward):
+        logging.info(f"🤖 bot_media 未启用, 跳过 post={src_post_id}")
         return []
+
+    logging.info(f"🤖 开始获取讨论消息 channel={src_channel_id} post={src_post_id}")
+
     try:
         disc_msg = await get_discussion_message(client, src_channel_id, src_post_id)
-    except Exception:
+    except Exception as e:
+        logging.warning(f"⚠️ 获取讨论消息异常 post={src_post_id}: {e}")
         return []
+
     if disc_msg is None:
+        logging.info(f"🤖 帖子 {src_post_id} 无讨论消息, 跳过")
         return []
+
     src_discussion_id = disc_msg.chat_id
     src_top_id = disc_msg.id
+    logging.info(f"🤖 讨论组={src_discussion_id} top_id={src_top_id}")
+
+    comment_count = 0
+    collected: List[Message] = []
+
     async for comment in client.iter_messages(
         src_discussion_id, reply_to=src_top_id, reverse=True,
     ):
         if isinstance(comment, MessageService):
+            logging.debug(f"🤖 跳过 MessageService #{comment.id}")
             continue
+
+        comment_count += 1
+        text_preview = (comment.raw_text or comment.text or "")[:150]
+        has_markup = comment.reply_markup is not None
+        sender_id = comment.sender_id
+        fwd = comment.fwd_from
+        logging.info(
+            f"🤖 评论#{comment.id} sender={sender_id} fwd={fwd is not None} "
+            f"markup={has_markup} text={text_preview!r}"
+        )
+
         try:
             bot_media = await resolve_bot_media_from_message(client, comment, forward)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"⚠️ 评论#{comment.id} bot媒体解析异常: {e}")
             bot_media = []
+
         if bot_media:
-            return _dedupe_messages(bot_media)
-    return []
+            logging.info(f"🤖 ✅ 评论#{comment.id} 命中 {len(bot_media)} 条bot媒体")
+            collected.extend(bot_media)
+        else:
+            logging.debug(f"🤖 评论#{comment.id} 无bot媒体")
+
+    logging.info(
+        f"🤖 评论区扫描完成 post={src_post_id}: "
+        f"{comment_count} 条评论, 收集 {len(collected)} 条媒体"
+    )
+    return _dedupe_messages(collected) if collected else []
 
 
 async def _send_combined_album(
