@@ -6,8 +6,10 @@ import sys
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
-# ✅ Pydantic v2 导入
-from pydantic import BaseModel, Field, field_validator
+try:
+    from pydantic import BaseModel, Field, field_validator
+except Exception:
+    from pydantic import BaseModel, Field, validator as field_validator
 from pymongo import MongoClient
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -141,8 +143,11 @@ class Config(BaseModel):
 
 def write_config_to_file(config: Config):
     with open(CONFIG_FILE_NAME, "w", encoding="utf8") as file:
-        # ✅ v2 变更: .json() -> .model_dump_json()
-        file.write(config.model_dump_json(indent=4))
+        dump_json = getattr(config, "model_dump_json", None)
+        if callable(dump_json):
+            file.write(dump_json(indent=4))
+        else:
+            file.write(config.json(indent=4))
 
 
 def detect_config_type() -> int:
@@ -174,8 +179,11 @@ def read_config(count=1) -> Config:
     try:
         if stg.CONFIG_TYPE == 1:
             with open(CONFIG_FILE_NAME, encoding="utf8") as file:
-                # ✅ v2 变更: parse_raw -> model_validate_json
-                return Config.model_validate_json(file.read())
+                validate_json = getattr(Config, "model_validate_json", None)
+                if callable(validate_json):
+                    return validate_json(file.read())
+                else:
+                    return Config.parse_raw(file.read())
         elif stg.CONFIG_TYPE == 2:
             return read_db()
         else:
@@ -261,20 +269,22 @@ def setup_mongo(client):
     mydb = client[MONGO_DB_NAME]
     mycol = mydb[MONGO_COL_NAME]
     if not mycol.find_one({"_id": 0}):
-        # ✅ v2 变更: .dict() -> .model_dump()
-        mycol.insert_one({"_id": 0, "author": "nb", "config": Config().model_dump()})
+        model_dump = getattr(Config(), "model_dump", None)
+        data = model_dump() if callable(model_dump) else Config().dict()
+        mycol.insert_one({"_id": 0, "author": "nb", "config": data})
     return mycol
 
 
 def update_db(cfg):
-    # ✅ v2 变更: .dict() -> .model_dump()
-    stg.mycol.update_one({"_id": 0}, {"$set": {"config": cfg.model_dump()}})
+    model_dump = getattr(cfg, "model_dump", None)
+    data = model_dump() if callable(model_dump) else cfg.dict()
+    stg.mycol.update_one({"_id": 0}, {"$set": {"config": data}})
 
 
 def read_db():
     obj = stg.mycol.find_one({"_id": 0})
-    # ✅ v2 变更: 推荐使用 model_validate
-    cfg = Config.model_validate(obj["config"])
+    validate = getattr(Config, "model_validate", None)
+    cfg = validate(obj["config"]) if callable(validate) else Config.parse_obj(obj["config"])
     return cfg
 
 
