@@ -87,6 +87,10 @@ class Caption(BaseModel):
     footer: str = ""
 
 
+class SpoilerConfig(BaseModel):
+    check: bool = False
+
+
 class Sender(BaseModel):
     check: bool = False
     user_type: int = 0  # 0:bot, 1:user
@@ -120,6 +124,7 @@ class PluginConfig(BaseModel):
     ocr: OcrConfig = Field(default_factory=OcrConfig)
     replace: Replace = Field(default_factory=Replace)
     caption: Caption = Field(default_factory=Caption)
+    spoiler: SpoilerConfig = Field(default_factory=SpoilerConfig)
     sender: Sender = Field(default_factory=Sender)
     inline: InlineButtonConfig = Field(default_factory=InlineButtonConfig)
 
