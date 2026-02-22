@@ -131,8 +131,19 @@ if check_password(st):
                         with cf3: comments.skip_bot_comments = st.checkbox("跳过机器人", value=comments.skip_bot_comments, key=f"csb{con}")
                         with cf4: comments.skip_admin_comments = st.checkbox("跳过管理员", value=comments.skip_admin_comments, key=f"csa{con}")
 
-                        # Mapping logic (simplified for UI, keeping logic)
-                        comments.post_mapping_mode = st.selectbox("帖子映射模式", ["auto", "manual"], index=0 if comments.post_mapping_mode!="manual" else 1, key=f"cpmm{con}")
+                        mode_options = ["auto", "manual"]
+                        mode_labels = {
+                            "auto": "自动 (Auto)",
+                            "manual": "手动 (Manual)",
+                        }
+                        current_mode = comments.post_mapping_mode if comments.post_mapping_mode in mode_options else "auto"
+                        comments.post_mapping_mode = st.selectbox(
+                            "帖子映射模式",
+                            mode_options,
+                            index=mode_options.index(current_mode),
+                            format_func=lambda x: mode_labels.get(x, x),
+                            key=f"cpmm{con}",
+                        )
                         if comments.post_mapping_mode == "manual":
                             comments.manual_post_mapping_raw = st.text_area("YAML 映射配置", value=comments.manual_post_mapping_raw, key=f"cyp{con}")
                             try:
