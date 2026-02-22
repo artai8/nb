@@ -69,31 +69,62 @@ def get_running_pid() -> int:
             write_config(CONFIG)
     return 0
 
-def kill_process(pid: int) -> bool:
+def _kill_posix(pid: int, force: bool) -> bool:
     if not is_process_alive(pid):
         _remove_pid_file()
         return True
     try:
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(2)
-    except: pass
-    
-    if is_process_alive(pid):
+        if force:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.killpg(pid, signal.SIGTERM)
+    except Exception:
         try:
-            os.kill(pid, signal.SIGKILL)
-            time.sleep(1)
-        except: pass
-        
-    if is_process_alive(pid):
+            os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+        except Exception:
+            pass
+    time.sleep(2 if not force else 1)
+    if not is_process_alive(pid):
+        _remove_pid_file()
+        return True
+    if not force:
         try:
-            os.system(f"kill -9 {pid} 2>/dev/null")
-            os.system("pkill -9 -f 'nb.cli' 2>/dev/null")
-            time.sleep(1)
-        except: pass
-        
+            os.killpg(pid, signal.SIGKILL)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        time.sleep(1)
     res = not is_process_alive(pid)
-    if res: _remove_pid_file()
+    if res:
+        _remove_pid_file()
     return res
+
+
+def _kill_windows(pid: int, force: bool) -> bool:
+    if not is_process_alive(pid):
+        _remove_pid_file()
+        return True
+    flag = "/F" if force else ""
+    try:
+        os.system(f"taskkill /PID {pid} /T {flag}")
+    except Exception:
+        pass
+    time.sleep(1)
+    res = not is_process_alive(pid)
+    if res:
+        _remove_pid_file()
+    return res
+
+
+def kill_process(pid: int, force: bool = False) -> bool:
+    if not is_process_alive(pid):
+        _remove_pid_file()
+        return True
+    if os.name == "nt":
+        return _kill_windows(pid, force)
+    return _kill_posix(pid, force)
 
 def start_nb_process(mode: str) -> int:
     if os.path.exists(LOG_FILE):
@@ -246,17 +277,17 @@ if check_password(st):
             with k1:
                 # 修复：移除 use_container_width=True
                 if st.button("⏹️ Stop Process", type="primary"):
-                    if kill_process(pid):
+                    if kill_process(pid, force=False):
                         termination()
                         time.sleep(1)
                         rerun()
             with k2:
                 # 修复：移除 use_container_width=True
                 if st.button("🔴 Kill", type="secondary"):
-                    os.system(f"kill -9 {pid}")
-                    termination()
-                    time.sleep(1)
-                    rerun()
+                    if kill_process(pid, force=True):
+                        termination()
+                        time.sleep(1)
+                        rerun()
 
     # --- Terminal Log ---
     st.write("")
