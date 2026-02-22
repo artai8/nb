@@ -85,7 +85,7 @@ if check_password(st):
                 
                 st.markdown("---")
                 
-                with st.expander("� 来源与目的地", expanded=True):
+                with st.expander("📤 来源与目的地", expanded=False):
                     c_src, c_dst = st.columns(2)
                     with c_src:
                         st.markdown("#### 来源")
@@ -228,13 +228,13 @@ if check_password(st):
                 # 底部按钮区
                 b_col1, b_col2 = st.columns(2)
                 with b_col1:
-                    if st.button("�️ 删除连接", key=f"del_btn_{con}", type="secondary", use_container_width=True):
-                        del CONFIG.forwards[i]
-                        write_config(CONFIG)
-                        rerun()
-                with b_col2:
                     if st.button("💾 保存更改", key=f"save_btn_{con}", type="primary", use_container_width=True):
                         write_config(CONFIG)
                         st.toast("配置已保存！", icon="✅")
                         time.sleep(1)
+                        rerun()
+                with b_col2:
+                    if st.button("🗑️ 删除连接", key=f"del_btn_{con}", type="secondary", use_container_width=True):
+                        del CONFIG.forwards[i]
+                        write_config(CONFIG)
                         rerun()
