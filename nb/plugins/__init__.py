@@ -249,8 +249,12 @@ async def apply_plugins_to_group(
     messages: List[Message],
     skip_plugins: Optional[List[str]] = None,
     fail_open: bool = False,
+    base_text: Optional[str] = None,
 ) -> List[NbMessage]:
     tms = [NbMessage(msg) for msg in messages]
+    if base_text and tms:
+        tms[0].text = base_text
+        tms[0].raw_text = base_text
     skip = set(skip_plugins or [])
     for pid in PLUGIN_ORDER:
         if pid in skip:
@@ -279,6 +283,9 @@ async def apply_plugins_to_group(
         tms = [tm for tm in tms if tm]
     if fail_open and not tms:
         tms = [NbMessage(msg) for msg in messages]
+        if base_text and tms:
+            tms[0].text = base_text
+            tms[0].raw_text = base_text
     return tms
 
 
