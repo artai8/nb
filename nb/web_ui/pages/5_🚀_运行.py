@@ -277,8 +277,10 @@ if check_password(st):
                     rerun()
                 else:
                     st.error("启动失败")
+            # 占位，保持布局一致
+            st.empty()
         else:
-            k1, k2 = st.columns([1, 1])
+            k1, k2 = st.columns([1, 3])
             with k1:
                 # 修复：移除 use_container_width=True
                 if st.button("⏹️ 停止", type="primary"):
@@ -295,7 +297,6 @@ if check_password(st):
                     rerun()
 
     # --- Terminal Log ---
-    # 移除日志标题栏
     st.write("")
     
     # 按钮与刷新设置行
@@ -306,16 +307,18 @@ if check_password(st):
             rerun()
 
     with c_act2:
-        auto_refresh = st.toggle("自动刷新", value=False)
-
-    with c_act3:
         refresh_interval = st.selectbox(
             "间隔 (秒)",
             [1, 2, 3, 5, 10],
             index=1,
             label_visibility="collapsed",
-            disabled=not auto_refresh,
+            disabled=False,
         )
+
+    with c_act3:
+        st.write("")  # Spacer
+        auto_refresh = st.toggle("自动刷新", value=False)
+
     with c_act4:
         st.caption("刷新间隔 (秒)")
 
@@ -329,10 +332,10 @@ if check_password(st):
                 log_content = html.escape(raw_content)
         except: pass
     
-    # 移除黑色框样式，直接显示内容
+    # 恢复日志显示框样式（黑色背景）
     st.components.v1.html(
         f"""
-        <div id="log-container" style="height:400px; overflow-y:auto; padding:10px; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; color:#333;">
+        <div id="log-container" style="height:400px; overflow-y:auto; padding:16px; background:#1e293b; color:#e2e8f0; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; border-radius:15px; border:1px solid rgba(255,255,255,0.1);">
             {log_content}
         </div>
         <script>
