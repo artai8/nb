@@ -158,35 +158,9 @@ st.set_page_config(page_title="Run Dashboard", page_icon="🏃", layout="wide")
 switch_theme(st, CONFIG)
 
 if check_password(st):
-# CSS for Status Card & Terminal (Neumorphism Enhanced)
+    # CSS for Status Card & Terminal (Neumorphism Enhanced)
     st.markdown("""
     <style>
-    .status-card {
-        background: linear-gradient(135deg, rgba(16, 185, 129, 0.85) 0%, rgba(5, 150, 105, 0.85) 100%);
-        backdrop-filter: blur(5px);
-        color: white;
-        padding: 2rem;
-        border-radius: 20px;
-        text-align: center;
-        box-shadow:  9px 9px 16px var(--shadow-dark),
-                    -9px -9px 16px var(--shadow-light);
-        border: 1px solid rgba(255,255,255,0.2);
-    }
-    .status-stopped {
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.85) 0%, rgba(220, 38, 38, 0.85) 100%);
-    }
-    .pulse {
-        width: 12px; height: 12px; background: white; border-radius: 50%;
-        display: inline-block; margin-right: 8px;
-        box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7);
-        animation: pulse-animation 2s infinite;
-    }
-    @keyframes pulse-animation {
-        0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7); }
-        70% { box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
-    }
-    
     /* Terminal Wrapper */
     .terminal-wrapper {
         background: #1e293b; /* Dark background for terminal */
@@ -222,48 +196,43 @@ if check_password(st):
     </style>
     """, unsafe_allow_html=True)
 
-    col_main, col_stat = st.columns([2, 1])
     pid = get_running_pid()
 
-    with col_stat:
-        if pid > 0:
-            st.markdown(f"""
-            <div class="status-card">
-                <h2 style="color:white; margin:0;">运行中</h2>
-                <div style="margin-top:10px; opacity:0.9;">
-                    <span class="pulse"></span> 进程 ID: {pid}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="status-card status-stopped">
-                <h2 style="color:white; margin:0;">已停止</h2>
-                <div style="margin-top:10px; opacity:0.9;">没有活动进程</div>
-            </div>
-            """, unsafe_allow_html=True)
+    with st.container():
+        # 4列布局：转发自 | 模式 | 同步删除 | 状态指示器
+        c1, c2, c3, c4 = st.columns(4)
+        
+        with c1:
+            CONFIG.show_forwarded_from = st.checkbox("显示 “转发自”", value=CONFIG.show_forwarded_from)
+        
+        with c2:
+            # 模式映射：0->live(居住), 1->past(过去的)
+            mode_label = "居住" if CONFIG.mode == 0 else "过去的"
+            mode = st.radio("模式", ["居住", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
+        
+        with c3:
+            if mode == "过去的":
+                CONFIG.mode = 1
+                st.write("") # 占位
+            else:
+                CONFIG.live.delete_sync = st.checkbox("同步删除", value=CONFIG.live.delete_sync)
+                CONFIG.mode = 0
+                
+        with c4:
+            # 状态指示器：缩小到按钮大小
+            if pid > 0:
+                st.button(f"🟢 运行中 ({pid})", disabled=True, use_container_width=True, key="status_btn")
+            else:
+                st.button("🔴 已停止", disabled=True, use_container_width=True, key="status_btn")
 
-    with col_main:
-        with st.container():
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                CONFIG.show_forwarded_from = st.checkbox("显示 “转发自”", value=CONFIG.show_forwarded_from)
-            with c2:
-                # 模式映射：0->live(居住), 1->past(过去的)
-                mode_label = "居住" if CONFIG.mode == 0 else "过去的"
-                mode = st.radio("模式", ["居住", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
-            with c3:
-                if mode == "过去的":
-                    CONFIG.mode = 1
-                else:
-                    CONFIG.live.delete_sync = st.checkbox("同步删除", value=CONFIG.live.delete_sync)
-                    CONFIG.mode = 0
-        
-        st.write("---")
-        
-        if pid == 0:
-            # 修复：移除 use_container_width=True
-            if st.button("▶️ 开始流程", type="primary"):
+    st.write("---")
+    
+    # 启动/停止按钮区
+    if pid == 0:
+        # 居中放置开始按钮
+        start_col1, start_col2, start_col3 = st.columns([1, 1, 1])
+        with start_col2:
+            if st.button("▶️ 开始流程", type="primary", use_container_width=True):
                 # 传入 "live" 或 "past" 对应的英文参数
                 mode_arg = "live" if CONFIG.mode == 0 else "past"
                 new_pid = start_nb_process(mode_arg)
@@ -274,20 +243,19 @@ if check_password(st):
                     rerun()
                 else:
                     st.error("启动失败")
-            # 占位，保持布局一致
-            st.empty()
-        else:
-            k1, k2 = st.columns([1, 3])
-            with k1:
-                # 修复：移除 use_container_width=True
-                if st.button("⏹️ 停止", type="primary"):
+    else:
+        # 居中放置停止按钮
+        k1, k2, k3 = st.columns([1, 2, 1])
+        with k2:
+            s1, s2 = st.columns(2)
+            with s1:
+                if st.button("⏹️ 停止", type="primary", use_container_width=True):
                     if kill_process(pid):
                         termination()
                         time.sleep(1)
                         rerun()
-            with k2:
-                # 修复：移除 use_container_width=True
-                if st.button("🔴 强制终止", type="secondary"):
+            with s2:
+                if st.button("🔴 强制终止", type="secondary", use_container_width=True):
                     os.system(f"kill -9 {pid}")
                     termination()
                     time.sleep(1)
