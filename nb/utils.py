@@ -320,6 +320,7 @@ async def _start_bot_and_collect_album(
         max_pages = 0
     if wait_timeout is None:
         wait_timeout = CONFIG.bot_media.wait_timeout
+    logging.info(f"🤖 bot 拉取开始: @{bot_username} start={start_param} pages={max_pages} timeout={wait_timeout}")
     bot = await client.get_entity(bot_username)
     latest = await client.get_messages(bot, limit=1)
     last_id = latest[0].id if latest else 0
@@ -331,8 +332,10 @@ async def _start_bot_and_collect_album(
     while pages <= max_pages:
         new_msgs = await _collect_new_messages(client, bot, last_id, wait_timeout)
         if not new_msgs:
+            logging.info(f"🤖 bot 拉取结束: @{bot_username} 无新消息")
             break
         last_id = max(m.id for m in new_msgs)
+        logging.info(f"🤖 bot 新消息: @{bot_username} count={len(new_msgs)} last_id={last_id}")
         for msg in new_msgs:
             if msg.grouped_id:
                 if msg.grouped_id in seen_grouped:
@@ -357,13 +360,16 @@ async def _start_bot_and_collect_album(
                 break
         if next_btn and next_msg:
             try:
+                logging.info(f"🤖 bot 翻页: @{bot_username} msg_id={next_msg.id}")
                 await client(GetBotCallbackAnswerRequest(peer=bot, msg_id=next_msg.id, data=next_btn.data))
                 pages += 1
                 continue
             except Exception:
+                logging.warning(f"⚠️ bot 翻页失败: @{bot_username}")
                 break
         break
     collected.sort(key=lambda m: m.id)
+    logging.info(f"🤖 bot 拉取完成: @{bot_username} collected={len(collected)}")
     return collected
 
 
@@ -382,6 +388,8 @@ async def resolve_bot_media_from_message(
         if parsed:
             found.append(parsed)
     found.extend(_extract_start_links_from_markup(message.reply_markup))
+    if found:
+        logging.info(f"🤖 bot 直链命中: {found}")
     collected: List[Message] = []
     for bot_username, start_param in found:
         try:
@@ -396,13 +404,17 @@ async def resolve_bot_media_from_message(
     if forward is not None and forward.bot_media_keyword_trigger_enabled is not None:
         keyword_trigger_enabled = forward.bot_media_keyword_trigger_enabled
     if not keyword_trigger_enabled:
+        logging.info("🤖 bot 关键字触发关闭")
         return []
     bot_names = _extract_bot_usernames(message.raw_text or message.text or "")
     if not bot_names:
+        logging.info("🤖 bot 未识别到用户名")
         return []
     keyword = (message.raw_text or message.text or "").strip()
     if not keyword:
+        logging.info("🤖 bot 关键字为空")
         return []
+    logging.info(f"🤖 bot 关键字触发: @{bot_names[0]} keyword={keyword}")
     for bot_username in bot_names[:1]:
         try:
             bot = await client.get_entity(bot_username)
@@ -410,6 +422,7 @@ async def resolve_bot_media_from_message(
             last_id = latest[0].id if latest else 0
             await client.send_message(bot, keyword)
             responses = await _collect_new_messages(client, bot, last_id, CONFIG.bot_media.wait_timeout)
+            logging.info(f"🤖 bot 关键字响应: @{bot_username} count={len(responses)}")
             for msg in responses:
                 new_links = _extract_tme_links(msg.raw_text or msg.text or "")
                 for link in new_links:
@@ -422,6 +435,8 @@ async def resolve_bot_media_from_message(
                 break
         except Exception as e:
             logging.warning(f"⚠️ bot 关键字请求失败 ({bot_username}): {e}")
+    if not collected:
+        logging.info("🤖 bot 拉取结束: collected=0")
     return collected
 
 
