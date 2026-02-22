@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import List, Dict, Optional
 
 from telethon import TelegramClient
-from telethon.errors.rpcerrorlist import FloodWaitError
+from telethon.errors.rpcerrorlist import FloodWaitError, MsgIdInvalidError
 from telethon.tl.custom.message import Message
 from telethon.tl.patched import MessageService
 
@@ -90,34 +90,38 @@ async def _collect_bot_media_from_comments(
     comment_count = 0
     collected: List[Message] = []
 
-    async for comment in client.iter_messages(
-        src_discussion_id, reply_to=src_top_id, reverse=True,
-    ):
-        if isinstance(comment, MessageService):
-            logging.debug(f"🤖 跳过 MessageService #{comment.id}")
-            continue
+    try:
+        async for comment in client.iter_messages(
+            src_discussion_id, reply_to=src_top_id, reverse=True,
+        ):
+            if isinstance(comment, MessageService):
+                logging.debug(f"🤖 跳过 MessageService #{comment.id}")
+                continue
 
-        comment_count += 1
-        text_preview = (comment.raw_text or comment.text or "")[:150]
-        has_markup = comment.reply_markup is not None
-        sender_id = comment.sender_id
-        fwd = comment.fwd_from
-        logging.info(
-            f"🤖 评论#{comment.id} sender={sender_id} fwd={fwd is not None} "
-            f"markup={has_markup} text={text_preview!r}"
-        )
+            comment_count += 1
+            text_preview = (comment.raw_text or comment.text or "")[:150]
+            has_markup = comment.reply_markup is not None
+            sender_id = comment.sender_id
+            fwd = comment.fwd_from
+            logging.info(
+                f"🤖 评论#{comment.id} sender={sender_id} fwd={fwd is not None} "
+                f"markup={has_markup} text={text_preview!r}"
+            )
 
-        try:
-            bot_media = await resolve_bot_media_from_message(client, comment, forward)
-        except Exception as e:
-            logging.warning(f"⚠️ 评论#{comment.id} bot媒体解析异常: {e}")
-            bot_media = []
+            try:
+                bot_media = await resolve_bot_media_from_message(client, comment, forward)
+            except Exception as e:
+                logging.warning(f"⚠️ 评论#{comment.id} bot媒体解析异常: {e}")
+                bot_media = []
 
-        if bot_media:
-            logging.info(f"🤖 ✅ 评论#{comment.id} 命中 {len(bot_media)} 条bot媒体")
-            collected.extend(bot_media)
-        else:
-            logging.debug(f"🤖 评论#{comment.id} 无bot媒体")
+            if bot_media:
+                logging.info(f"🤖 ✅ 评论#{comment.id} 命中 {len(bot_media)} 条bot媒体")
+                collected.extend(bot_media)
+            else:
+                logging.debug(f"🤖 评论#{comment.id} 无bot媒体")
+    except MsgIdInvalidError as e:
+        logging.warning(f"⚠️ 讨论区消息 ID 无效, 跳过评论拉取 post={src_post_id}: {e}")
+        return []
 
     logging.info(
         f"🤖 评论区扫描完成 post={src_post_id}: "
