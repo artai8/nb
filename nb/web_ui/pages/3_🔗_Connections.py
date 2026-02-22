@@ -196,6 +196,18 @@ if check_password(st):
                             height=80,
                             key=f"bpk{con}",
                         )
+                        obj.bot_media_pagination_ignore_keywords_raw = st.text_area(
+                            "Pagination ignore keywords (one per line)",
+                            value=obj.bot_media_pagination_ignore_keywords_raw,
+                            height=80,
+                            key=f"bpki{con}",
+                        )
+                        obj.bot_media_tme_link_blacklist_raw = st.text_area(
+                            "t.me link blacklist contains (one per line)",
+                            value=obj.bot_media_tme_link_blacklist_raw,
+                            height=80,
+                            key=f"bmtl{con}",
+                        )
                         obj.comment_keyword_prefixes_raw = st.text_area(
                             "Comment keyword prefix (one per line)",
                             value=obj.comment_keyword_prefixes_raw,
@@ -217,16 +229,6 @@ if check_password(st):
                     with hc2:
                         end_val = st.text_input("End ID (Optional)", value=str(obj.end) if obj.end else "", key=f"end{con}")
                         obj.end = _safe_int(end_val, None) if end_val else None
-
-    with st.expander("🤖 Bot Responses (Global)"):
-        CONFIG.bot_messages.start = st.text_area(
-            "/start Reply",
-            value=CONFIG.bot_messages.start,
-        )
-        CONFIG.bot_messages.bot_help = st.text_area(
-            "/help Reply",
-            value=CONFIG.bot_messages.bot_help,
-        )
 
     st.markdown("---")
     if st.button("💾 Save All Changes", type="primary", use_container_width=True):
