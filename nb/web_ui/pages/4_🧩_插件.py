@@ -97,6 +97,13 @@ if check_password(st):
             with open("image.png", "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
+    with st.expander("剧透 Spoiler"):
+        st.write("将媒体强制设置为 Spoiler。")
+        CONFIG.plugins.spoiler.check = st.checkbox(
+            "启用此插件：强制 Spoiler",
+            value=CONFIG.plugins.spoiler.check,
+        )
+
     with st.expander("OCR 文字识别"):
         st.write("光学字符识别。")
         if os.system("tesseract --version >> /dev/null 2>&1") != 0:
