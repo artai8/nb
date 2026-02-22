@@ -20,7 +20,7 @@ from nb.plugin_models import ASYNC_PLUGIN_IDS, InlineButtonMode
 from nb.utils import cleanup, stamp
 
 PLUGIN_ORDER = [
-    "filter", "ocr", "replace", "caption", "fmt", "mark", "sender"
+    "filter", "ocr", "replace", "caption", "fmt", "mark", "spoiler", "sender"
 ]
 
 
