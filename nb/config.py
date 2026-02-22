@@ -61,6 +61,8 @@ class Forward(BaseModel):
     bot_media_keyword_trigger_enabled: Optional[bool] = None
     bot_media_pagination_mode: str = ""
     bot_media_pagination_keywords_raw: str = ""
+    bot_media_pagination_ignore_keywords_raw: str = ""
+    bot_media_tme_link_blacklist_raw: str = ""
     comment_keyword_prefixes_raw: str = ""
     comment_keyword_suffixes_raw: str = ""
 
@@ -113,6 +115,8 @@ class BotMediaSettings(BaseModel):
     enable_pagination: bool = True
     pagination_mode: str = "auto"
     pagination_keywords_raw: str = ""
+    pagination_ignore_keywords_raw: str = ""
+    tme_link_blacklist_raw: str = ""
     ignore_filter: bool = True
     force_forward_on_empty: bool = True
     poll_interval: float = 1.2
