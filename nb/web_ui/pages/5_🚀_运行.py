@@ -158,8 +158,7 @@ st.set_page_config(page_title="Run Dashboard", page_icon="🏃", layout="wide")
 switch_theme(st, CONFIG)
 
 if check_password(st):
-    
-    # CSS for Status Card & Terminal (Neumorphism Enhanced)
+# CSS for Status Card & Terminal (Neumorphism Enhanced)
     st.markdown("""
     <style>
     .status-card {
@@ -223,8 +222,6 @@ if check_password(st):
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("运营仪表盘")
-    
     col_main, col_stat = st.columns([2, 1])
     pid = get_running_pid()
 
