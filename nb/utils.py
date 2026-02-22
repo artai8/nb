@@ -142,14 +142,19 @@ def _parse_tme_start_link(url: str) -> Optional[tuple]:
     return bot_username, start_param
 
 
-def _extract_start_links_from_markup(reply_markup) -> List[tuple]:
+def _extract_start_links_from_markup(reply_markup, forward=None) -> List[tuple]:
     if reply_markup is None or not isinstance(reply_markup, ReplyInlineMarkup):
         return []
+    blacklist = _get_tme_link_blacklist(forward)
     found = []
     for row in reply_markup.rows:
         for button in row.buttons:
             if isinstance(button, KeyboardButtonUrl):
                 url = button.url or ""
+                if blacklist:
+                    url_lower = url.lower()
+                    if any(token in url_lower for token in blacklist):
+                        continue
                 parsed = _parse_tme_start_link(url)
                 if parsed:
                     found.append(parsed)
@@ -187,6 +192,43 @@ def _get_bot_media_value(forward, name: str, default: str = "") -> str:
             return value
     value = getattr(CONFIG.bot_media, name, default)
     return value if isinstance(value, str) else default
+
+
+def _get_bot_media_list(
+    forward,
+    forward_field: str,
+    config_field: str,
+) -> List[str]:
+    raw = _get_bot_media_value(forward, forward_field, "")
+    items = _parse_lines(raw)
+    if not items:
+        items = _parse_lines(getattr(CONFIG.bot_media, config_field, ""))
+    return [item.strip().lower() for item in items if item and item.strip()]
+
+
+def _get_tme_link_blacklist(forward) -> List[str]:
+    return _get_bot_media_list(forward, "bot_media_tme_link_blacklist_raw", "tme_link_blacklist_raw")
+
+
+def _filter_tme_links(links: List[str], forward) -> List[str]:
+    blacklist = _get_tme_link_blacklist(forward)
+    if not blacklist:
+        return links
+    filtered = []
+    for link in links:
+        link_lower = (link or "").lower()
+        if any(token in link_lower for token in blacklist):
+            continue
+        filtered.append(link)
+    return filtered
+
+
+def _get_pagination_ignore_keywords(forward) -> List[str]:
+    return _get_bot_media_list(
+        forward,
+        "bot_media_pagination_ignore_keywords_raw",
+        "pagination_ignore_keywords_raw",
+    )
 
 
 def _extract_comment_keyword(text: str, forward=None) -> Optional[str]:
@@ -237,13 +279,16 @@ def _find_next_callback_button(reply_markup, forward=None) -> Optional[KeyboardB
         keywords = []
     else:
         keywords = next_keywords + get_all_keywords + custom_keywords
+    ignore_keywords = _get_pagination_ignore_keywords(forward)
     for row in reply_markup.rows:
         for button in row.buttons:
             if isinstance(button, KeyboardButtonCallback):
-                if mode == "any":
-                    return button
                 text = (button.text or "").strip().lower()
                 compact = text.replace(" ", "")
+                if ignore_keywords and any(k in text or k in compact for k in ignore_keywords):
+                    continue
+                if mode == "any":
+                    return button
                 if any(k in text or k in compact for k in keywords):
                     return button
     return None
@@ -381,13 +426,16 @@ async def resolve_bot_media_from_message(
     if CONFIG.login.user_type == 0:
         logging.warning("⚠️ bot 媒体拉取需要 user 模式")
         return []
-    text_links = _extract_tme_links(message.raw_text or message.text or "")
+    text_links = _filter_tme_links(
+        _extract_tme_links(message.raw_text or message.text or ""),
+        forward,
+    )
     found = []
     for link in text_links:
         parsed = _parse_tme_start_link(link)
         if parsed:
             found.append(parsed)
-    found.extend(_extract_start_links_from_markup(message.reply_markup))
+    found.extend(_extract_start_links_from_markup(message.reply_markup, forward))
     if found:
         logging.info(f"🤖 bot 直链命中: {found}")
     collected: List[Message] = []
@@ -424,7 +472,10 @@ async def resolve_bot_media_from_message(
             responses = await _collect_new_messages(client, bot, last_id, CONFIG.bot_media.wait_timeout)
             logging.info(f"🤖 bot 关键字响应: @{bot_username} count={len(responses)}")
             for msg in responses:
-                new_links = _extract_tme_links(msg.raw_text or msg.text or "")
+                new_links = _filter_tme_links(
+                    _extract_tme_links(msg.raw_text or msg.text or ""),
+                    forward,
+                )
                 for link in new_links:
                     parsed = _parse_tme_start_link(link)
                     if parsed:
