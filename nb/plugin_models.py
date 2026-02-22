@@ -70,6 +70,7 @@ class MarkConfig(BaseModel):
 
 class OcrConfig(BaseModel):
     check: bool = False
+    lang: str = "chi_sim"
 
 
 class Replace(BaseModel):
