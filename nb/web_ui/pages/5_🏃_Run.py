@@ -317,9 +317,10 @@ if check_password(st):
                 log_content = html.escape(raw_content)
         except: pass
     
-    # 使用安全的 log_content
-    st.markdown(f"""
-    <div class="terminal-wrapper" style="border-top-left-radius: 0; border-top-right-radius: 0; border-top: none; margin-top: -5px; box-shadow: 9px 9px 16px var(--shadow-dark), -9px -9px 16px var(--shadow-light);">
-        <div class="terminal-body">{log_content}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.text_area(
+        "Logs",
+        value=log_content,
+        height=400,
+        disabled=True,
+        label_visibility="collapsed",
+    )
