@@ -45,7 +45,7 @@ if check_password(st):
     # Header
     c_head, c_act = st.columns([6, 1])
     with c_head:
-        st.title("连接管理器")
+        st.write("") # 移除 "连接管理器" 标题，保留占位
     with c_act:
         st.write("")
         if st.button("➕ 新连接", type="primary", use_container_width=True):
