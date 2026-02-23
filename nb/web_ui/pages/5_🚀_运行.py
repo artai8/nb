@@ -198,9 +198,9 @@ if check_password(st):
     with st.container():
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            CONFIG.show_forwarded_from = st.checkbox("显示 "转发自"", value=CONFIG.show_forwarded_from)
+            CONFIG.show_forwarded_from = st.checkbox('显示 "转发自"', value=CONFIG.show_forwarded_from)
         with c2:
-            mode = st.radio("模式", ["居住", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
+            mode = st.radio("模式", ["实时的", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
         with c3:
             if mode == "过去的":
                 CONFIG.mode = 1
@@ -216,11 +216,10 @@ if check_password(st):
 
     st.write("---")
 
-    # 启动/停止按钮区
     if pid == 0:
         c_btn, c_spacer = st.columns([1, 3])
         with c_btn:
-            if st.button("▶️ 开始流程", type="primary", use_container_width=True):
+            if st.button("▶️ 开始运行", type="primary", use_container_width=True):
                 mode_arg = "live" if CONFIG.mode == 0 else "past"
                 new_pid = start_nb_process(mode_arg)
                 if new_pid > 0:
@@ -252,7 +251,7 @@ if check_password(st):
     if pid > 0:
         st_autorefresh(interval=1000, key="log_autorefresh")
 
-    # --- 读取日志内容 ---
+    # --- 读取日志 ---
     log_content = "暂无日志。"
     if os.path.exists(LOG_FILE):
         try:
@@ -263,9 +262,7 @@ if check_password(st):
         except:
             pass
 
-    # --- 修复3: 用户滚动时不强制拉到底部 ---
-    # 逻辑：JS 检测用户是否在底部附近（距底部<50px），
-    # 只有在底部时才自动滚动，用户向上翻看时保持位置不变。
+    # --- 修复3: 智能滚动，用户翻看时不强制拉到底部 ---
     st.components.v1.html(
         f"""
         <div id="log-container" style="
@@ -284,12 +281,10 @@ if check_password(st):
             (function() {{
                 const box = document.getElementById('log-container');
                 if (!box) return;
-                // 判断用户是否已经在底部附近（距底部 50px 以内）
                 const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
                 if (distanceFromBottom < 50) {{
                     box.scrollTop = box.scrollHeight;
                 }}
-                // 否则保持用户当前滚动位置，不做任何操作
             }})();
         </script>
         """,
