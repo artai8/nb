@@ -51,9 +51,10 @@ class Forward(BaseModel):
 
     con_name: str = ""
     use_this: bool = True
-    source: Union[int, str] = ""
+    sources: List[Union[int, str]] = Field(default_factory=list)
     dest: List[Union[int, str]] = Field(default_factory=list)
     offset: int = 0
+    offsets: Dict[str, int] = Field(default_factory=dict)
     end: Optional[int] = None
     comments: CommentsConfig = Field(default_factory=CommentsConfig)
     bot_media_enabled: Optional[bool] = None
@@ -222,6 +223,21 @@ async def get_id(client: TelegramClient, peer):
     return await client.get_peer_id(peer)
 
 
+def get_forward_sources(forward: Forward) -> List[Union[int, str]]:
+    sources = list(forward.sources or [])
+    if sources:
+        seen = set()
+        result = []
+        for s in sources:
+            key = str(s)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(s)
+        return result
+    return []
+
+
 async def load_from_to(
     client: TelegramClient, forwards: List[Forward]
 ) -> Dict[int, List[int]]:
@@ -234,11 +250,20 @@ async def load_from_to(
     for forward in forwards:
         if not forward.use_this:
             continue
-        source = forward.source
-        if not isinstance(source, int) and source.strip() == "":
+        sources = get_forward_sources(forward)
+        if not sources:
             continue
-        src = await _(forward.source)
-        from_to_dict[src] = [await _(dest) for dest in forward.dest]
+        dest_list = [await _(dest) for dest in forward.dest]
+        for source in sources:
+            if not isinstance(source, int) and isinstance(source, str) and source.strip() == "":
+                continue
+            src = await _(source)
+            if src in from_to_dict:
+                existing = set(from_to_dict[src])
+                merged = from_to_dict[src] + [d for d in dest_list if d not in existing]
+                from_to_dict[src] = merged
+            else:
+                from_to_dict[src] = list(dest_list)
     logging.info(f"From to dict is {from_to_dict}")
     return from_to_dict
 
@@ -254,11 +279,14 @@ async def load_forward_map(
     for forward in forwards:
         if not forward.use_this:
             continue
-        source = forward.source
-        if not isinstance(source, int) and source.strip() == "":
+        sources = get_forward_sources(forward)
+        if not sources:
             continue
-        src = await _(forward.source)
-        forward_map[src] = forward
+        for source in sources:
+            if not isinstance(source, int) and isinstance(source, str) and source.strip() == "":
+                continue
+            src = await _(source)
+            forward_map[src] = forward
     return forward_map
 
 
