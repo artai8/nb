@@ -178,7 +178,7 @@ def inject_custom_css(theme: str = "light"):
                        -5px -5px 10px var(--shadow-light);
             color: var(--text-color);
             padding: 0 12px;
-            min-height: 42px;
+            min-height: 20px;
         }}
 
         /* 选中值文字：确保可见且不被裁剪 */
@@ -234,7 +234,7 @@ def inject_custom_css(theme: str = "light"):
                        -5px -5px 10px var(--shadow-light);
             color: var(--text-color);
             padding: 4px 12px;
-            min-height: 42px;
+            min-height: 20px;
         }}
 
         .stMultiSelect div[data-baseweb="select"] span {{
