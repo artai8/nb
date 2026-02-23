@@ -1,8 +1,6 @@
 # nb/web_ui/utils.py
 
 import os
-import platform
-import sys
 from typing import Dict, List
 
 import streamlit as st
@@ -47,17 +45,6 @@ def list_to_dict(my_list: List):
         key, val = item.split(":")
         my_dict[key.strip()] = val.strip()
     return my_dict
-
-
-def platform_info() -> str:
-    lines = [
-        f"OS: {platform.platform()}",
-        f"Python: {sys.version.split()[0]}",
-        f"Executable: {sys.executable}",
-        f"Working Dir: {os.getcwd()}",
-        f"Process ID: {os.getpid()}",
-    ]
-    return "\n".join(lines)
 
 
 
@@ -165,7 +152,7 @@ def inject_custom_css(theme: str = "light"):
         }}
 
         /* --- Neumorphism Inputs (内嵌阴影输入框) --- */
-        .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {{
+        .stTextInput input, .stTextArea textarea {{
             background-color: var(--input-bg) !important;
             border-radius: 12px;
             border: none;
@@ -173,6 +160,17 @@ def inject_custom_css(theme: str = "light"):
                         inset -5px -5px 10px var(--shadow-light);
             color: var(--text-color);
             padding: 10px 12px;
+        }}
+
+        .stSelectbox div[data-baseweb="select"] > div {{
+            background-color: var(--input-bg) !important;
+            border-radius: 12px;
+            border: none;
+            box-shadow: inset 5px 5px 10px var(--shadow-dark),
+                        inset -5px -5px 10px var(--shadow-light);
+            color: var(--text-color);
+            padding: 12px 12px;
+            min-height: 30px;
         }}
         
         .stTextInput input:focus, .stTextArea textarea:focus {{
@@ -212,17 +210,14 @@ def inject_custom_css(theme: str = "light"):
         }}
         
         .stTabs [data-baseweb="tab"] {{
-            min-height: 45px;
-            height: auto;
+            height: 45px;
             border-radius: 12px;
             background-color: var(--bg-color);
             box-shadow:  5px 5px 10px var(--shadow-dark),
                         -5px -5px 10px var(--shadow-light);
             color: var(--text-color);
             border: none;
-            padding: 10px 20px;
-            white-space: pre-wrap;
-            word-break: break-word;
+            padding: 0 20px;
         }}
         
         .stTabs [aria-selected="true"] {{
