@@ -1,10 +1,10 @@
-# nb/past.py — 导入已清理，不引用不存在的函数
+# nb/past.py
 
 import asyncio
 import logging
 import random
 from collections import defaultdict
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 
 from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError, MsgIdInvalidError
@@ -25,8 +25,13 @@ from nb.utils import (
     _auto_comment_keyword,
     _extract_comment_keyword,
     resolve_bot_media_from_message,
+    _msg_has_media,
 )
 
+
+# =====================================================================
+#  共用辅助函数
+# =====================================================================
 
 def _extract_msg_id(fwded) -> Optional[int]:
     if fwded is None:
@@ -60,6 +65,30 @@ def _chunk_list(items: List, size: int) -> List[List]:
 def _bot_media_allowed(forward) -> bool:
     return forward is None or forward.bot_media_enabled is not False
 
+
+def _resolve_reply_to_id(
+    message: Message,
+    dest: int,
+) -> Optional[int]:
+    """从 stored 映射中查找目标频道中对应的 reply_to msg id。"""
+    if not getattr(message, 'is_reply', False):
+        return None
+    reply_msg_id = _get_reply_to_msg_id(message)
+    if reply_msg_id is None:
+        return None
+    r_event = st.DummyEvent(message.chat_id, reply_msg_id)
+    r_event_uid = st.EventUid(r_event)
+    if r_event_uid not in st.stored:
+        return None
+    fwded_reply = st.stored[r_event_uid].get(dest)
+    if fwded_reply is None:
+        return None
+    return _extract_msg_id(fwded_reply)
+
+
+# =====================================================================
+#  Bot 媒体从评论区收集
+# =====================================================================
 
 async def _collect_bot_media_from_comments(
     client: TelegramClient,
@@ -130,12 +159,21 @@ async def _collect_bot_media_from_comments(
     return _dedupe_messages(collected) if collected else []
 
 
+# =====================================================================
+#  合并媒体组发送（修复 Bug1：只第一个 chunk 带 caption；修复 Bug2：支持 reply_to）
+# =====================================================================
+
 async def _send_combined_album(
     src: int,
     dest: List[int],
     first_msg_id: int,
     combined_messages: List[Message],
+    reply_to_map: Optional[Dict[int, Optional[int]]] = None,
 ) -> bool:
+    """
+    发送合并后的媒体组到多个目标。
+    reply_to_map: {dest_id: reply_to_msg_id} 可选的每目标回复ID映射。
+    """
     tms = await apply_plugins_to_group(combined_messages)
     if not tms:
         logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
@@ -144,25 +182,38 @@ async def _send_combined_album(
     if tm_template is None:
         logging.warning("⚠️ 合并媒体组模板消息为 None，跳过")
         return False
+
     chunks = _chunk_list(tms, 10)
+    # 只有第一个 chunk 携带 caption
     first_caption = "\n\n".join(
         [tm.text.strip() for tm in chunks[0] if tm.text and tm.text.strip()]
     )
+
     for d in dest:
         try:
             fwded_first = None
+            reply_to_id = (reply_to_map or {}).get(d)
+
             for idx, chunk in enumerate(chunks):
                 if not chunk:
                     continue
+                # 只第一个 chunk 设置 reply_to 和 caption
+                chunk_reply = reply_to_id if idx == 0 else None
+                chunk_caption = first_caption if idx == 0 else None
+
+                if chunk_reply is not None:
+                    chunk[0].reply_to = chunk_reply
+
                 fwded = await send_message(
                     d,
                     chunk[0],
                     grouped_messages=[tm.message for tm in chunk],
                     grouped_tms=chunk,
-                    grouped_caption=first_caption,
+                    grouped_caption=chunk_caption,
                 )
                 if fwded_first is None:
                     fwded_first = fwded
+
             event_uid = st.EventUid(st.DummyEvent(src, first_msg_id))
             st.stored[event_uid] = {d: fwded_first}
             fwded_id = _extract_msg_id(fwded_first)
@@ -170,10 +221,15 @@ async def _send_combined_album(
                 st.add_post_mapping(src, first_msg_id, d, fwded_id)
         except Exception as e:
             logging.critical(f"🚨 合并媒体组播失败: {e}")
+
     for tm in tms:
         tm.clear()
     return True
 
+
+# =====================================================================
+#  Bot 媒体相册发送
+# =====================================================================
 
 async def _send_bot_media_album(
     dest: int,
@@ -212,30 +268,55 @@ async def _send_bot_media_album(
     return fwded_first
 
 
+# =====================================================================
+#  Past 模式媒体组发送
+# =====================================================================
+
 async def _send_past_grouped(
     client: TelegramClient, src: int, dest: List[int], messages: List[Message], forward
 ) -> bool:
-    comment_bot_media = await _collect_bot_media_from_comments(client, src, messages[0].id, forward)
+    comment_bot_media = await _collect_bot_media_from_comments(
+        client, src, messages[0].id, forward
+    )
     if comment_bot_media:
         combined_messages = messages + comment_bot_media
-        return await _send_combined_album(src, dest, messages[0].id, combined_messages)
+        # 构建 reply_to 映射
+        reply_to_map = {}
+        for d in dest:
+            reply_to_map[d] = _resolve_reply_to_id(messages[0], d)
+        return await _send_combined_album(
+            src, dest, messages[0].id, combined_messages, reply_to_map=reply_to_map
+        )
+
     bot_media = []
     bot_media_allowed = _bot_media_allowed(forward)
-    auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
+    auto_comment_allowed = getattr(forward, 'auto_comment_trigger_enabled', None) is not False
+
     if bot_media_allowed and auto_comment_allowed:
         for msg in messages:
-            keyword = _extract_comment_keyword(msg.raw_text or msg.text or "", forward)
+            keyword = _extract_comment_keyword(
+                msg.raw_text or msg.text or "", forward
+            )
             if keyword:
                 await _auto_comment_keyword(client, src, msg.id, keyword)
                 break
+
     if bot_media_allowed:
         for msg in messages:
-            bot_media = await resolve_bot_media_from_message(msg.client, msg, forward)
+            # 修复 Bug7：使用传入的 client 而非 msg.client
+            bot_media = await resolve_bot_media_from_message(client, msg, forward)
             if bot_media:
                 break
+
     if bot_media:
         combined_messages = _dedupe_messages(messages + bot_media)
-        return await _send_combined_album(src, dest, messages[0].id, combined_messages)
+        reply_to_map = {}
+        for d in dest:
+            reply_to_map[d] = _resolve_reply_to_id(messages[0], d)
+        return await _send_combined_album(
+            src, dest, messages[0].id, combined_messages, reply_to_map=reply_to_map
+        )
+
     tms = await apply_plugins_to_group(messages)
     if not tms:
         logging.warning("⚠️ 所有消息被插件过滤，跳过该媒体组")
@@ -248,16 +329,21 @@ async def _send_past_grouped(
 
     for d in dest:
         try:
+            reply_to_id = _resolve_reply_to_id(messages[0], d)
+            tm_template.reply_to = reply_to_id
+
             fwded_msgs = await send_message(
                 d,
                 tm_template,
                 grouped_messages=[tm.message for tm in tms],
-                grouped_tms=tms
+                grouped_tms=tms,
             )
 
             first_msg_id = messages[0].id
             event_uid = st.EventUid(st.DummyEvent(src, first_msg_id))
-            st.stored[event_uid] = {d: fwded_msgs}
+            if event_uid not in st.stored:
+                st.stored[event_uid] = {}
+            st.stored[event_uid][d] = fwded_msgs
 
             fwded_id = _extract_msg_id(fwded_msgs)
             if fwded_id is not None:
@@ -266,8 +352,14 @@ async def _send_past_grouped(
         except Exception as e:
             logging.critical(f"🚨 组播失败: {e}")
 
+    for tm in tms:
+        tm.clear()
     return True
 
+
+# =====================================================================
+#  刷新媒体组缓冲区
+# =====================================================================
 
 async def _flush_grouped_buffer(
     client: TelegramClient,
@@ -289,7 +381,9 @@ async def _flush_grouped_buffer(
         forward.offset = group_last_id
         write_config(CONFIG, persist=False)
 
-        logging.info(f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}")
+        logging.info(
+            f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}"
+        )
 
         delay_seconds = random.randint(60, 300)
         logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
@@ -302,7 +396,6 @@ async def _flush_grouped_buffer(
 # =====================================================================
 #  评论区 past 模式
 # =====================================================================
-
 
 async def _forward_comments_for_post(
     client: TelegramClient,
@@ -336,14 +429,21 @@ async def _forward_comments_for_post(
             src_channel_id, src_post_id, dest_resolved
         )
         if dest_post_id is None:
-            logging.debug(f"帖子 {src_post_id} 在目标 {dest_resolved} 没有映射，跳过评论")
+            logging.debug(
+                f"帖子 {src_post_id} 在目标 {dest_resolved} 没有映射，跳过评论"
+            )
             continue
 
         if comments_cfg.dest_mode == "comments":
-            dest_disc_msg = await get_discussion_message(client, dest_resolved, dest_post_id)
+            dest_disc_msg = await get_discussion_message(
+                client, dest_resolved, dest_post_id
+            )
             if dest_disc_msg:
                 dest_targets[dest_disc_msg.chat_id] = dest_disc_msg.id
-                logging.info(f"💬 评论目标: discussion={dest_disc_msg.chat_id}, reply_to={dest_disc_msg.id}")
+                logging.info(
+                    f"💬 评论目标: discussion={dest_disc_msg.chat_id}, "
+                    f"reply_to={dest_disc_msg.id}"
+                )
         elif comments_cfg.dest_mode == "discussion":
             for dg in comments_cfg.dest_discussion_groups:
                 dg_id = dg
@@ -384,9 +484,14 @@ async def _forward_comments_for_post(
                 pass
 
         if comment.grouped_id is not None:
-            other_groups = [gid for gid in grouped_buffer if gid != comment.grouped_id]
+            # 刷新不同 grouped_id 的缓冲
+            other_groups = [
+                gid for gid in grouped_buffer if gid != comment.grouped_id
+            ]
             for old_gid in other_groups:
-                await _send_comment_group(client, grouped_buffer[old_gid], dest_targets)
+                await _send_comment_group(
+                    client, grouped_buffer[old_gid], dest_targets
+                )
                 comment_count += len(grouped_buffer[old_gid])
                 del grouped_buffer[old_gid]
                 delay = random.randint(60, 300)
@@ -395,13 +500,17 @@ async def _forward_comments_for_post(
             grouped_buffer[comment.grouped_id].append(comment)
             continue
 
+        # 刷新所有 grouped 缓冲
         for old_gid in list(grouped_buffer.keys()):
-            await _send_comment_group(client, grouped_buffer[old_gid], dest_targets)
+            await _send_comment_group(
+                client, grouped_buffer[old_gid], dest_targets
+            )
             comment_count += len(grouped_buffer[old_gid])
             del grouped_buffer[old_gid]
             delay = random.randint(60, 300)
             await asyncio.sleep(delay)
 
+        # 单条评论处理
         bot_media = []
         bot_media_allowed = _bot_media_allowed(forward)
         if bot_media_allowed:
@@ -430,12 +539,17 @@ async def _forward_comments_for_post(
         delay = random.randint(60, 300)
         await asyncio.sleep(delay)
 
+    # 刷新剩余 grouped 缓冲
     for old_gid in list(grouped_buffer.keys()):
-        await _send_comment_group(client, grouped_buffer[old_gid], dest_targets)
+        await _send_comment_group(
+            client, grouped_buffer[old_gid], dest_targets
+        )
         comment_count += len(grouped_buffer[old_gid])
 
     if comment_count > 0:
-        logging.info(f"💬 帖子 {src_post_id} 评论转发完成: {comment_count} 条")
+        logging.info(
+            f"💬 帖子 {src_post_id} 评论转发完成: {comment_count} 条"
+        )
 
 
 async def _send_single_comment(
@@ -449,22 +563,28 @@ async def _send_single_comment(
 
     for dest_disc_id, dest_top_id in dest_targets.items():
         try:
-            fwded = await send_message(dest_disc_id, tm, comment_to_post=dest_top_id)
+            fwded = await send_message(
+                dest_disc_id, tm, comment_to_post=dest_top_id
+            )
             if fwded:
                 st.add_comment_mapping(
                     comment.chat_id, comment.id,
                     dest_disc_id, _extract_msg_id(fwded),
                 )
-                logging.info(f"💬 评论转发成功: {comment.chat_id}/{comment.id} → {dest_disc_id}")
+                logging.info(
+                    f"💬 评论转发成功: {comment.chat_id}/{comment.id} → {dest_disc_id}"
+                )
             else:
                 logging.warning(f"⚠️ 评论转发返回 None: {comment.id}")
         except FloodWaitError as fwe:
             logging.warning(f"⛔ FloodWait (评论): {fwe.seconds} 秒")
             await asyncio.sleep(fwe.seconds + 10)
             try:
-                fwded = await send_message(dest_disc_id, tm, comment_to_post=dest_top_id)
+                fwded = await send_message(
+                    dest_disc_id, tm, comment_to_post=dest_top_id
+                )
                 if fwded:
-                    logging.info(f"💬 评论重试成功")
+                    logging.info("💬 评论重试成功")
             except Exception as e2:
                 logging.error(f"❌ 评论重试失败: {e2}")
         except Exception as e:
@@ -500,9 +620,11 @@ async def _send_comment_group(
                     comments[0].chat_id, comments[0].id,
                     dest_disc_id, _extract_msg_id(fwded),
                 )
-                logging.info(f"💬 评论媒体组成功: {len(comments)} 条 → {dest_disc_id}")
+                logging.info(
+                    f"💬 评论媒体组成功: {len(comments)} 条 → {dest_disc_id}"
+                )
             else:
-                logging.warning(f"⚠️ 评论媒体组返回 None")
+                logging.warning("⚠️ 评论媒体组返回 None")
         except FloodWaitError as fwe:
             logging.warning(f"⛔ FloodWait (评论组): {fwe.seconds} 秒")
             await asyncio.sleep(fwe.seconds + 10)
@@ -513,7 +635,7 @@ async def _send_comment_group(
                     grouped_tms=tms, comment_to_post=dest_top_id,
                 )
                 if fwded:
-                    logging.info(f"💬 评论媒体组重试成功")
+                    logging.info("💬 评论媒体组重试成功")
             except Exception as e2:
                 logging.error(f"❌ 评论媒体组重试失败: {e2}")
         except Exception as e:
@@ -524,9 +646,25 @@ async def _send_comment_group(
 
 
 # =====================================================================
-#  主 forward_job
+#  offset 更新辅助
 # =====================================================================
 
+def _update_offset(
+    forward,
+    offset_key: str,
+    msg_id: int,
+    sources: list,
+) -> None:
+    """统一更新 forward offset 并持久化。"""
+    forward.offsets[offset_key] = msg_id
+    if len(sources) == 1:
+        forward.offset = msg_id
+    write_config(CONFIG, persist=False)
+
+
+# =====================================================================
+#  主 forward_job（修复 Bug3：统一 offset 更新；修复 Bug7：使用 client 参数）
+# =====================================================================
 
 async def forward_job() -> None:
     clean_session_files()
@@ -537,7 +675,9 @@ async def forward_job() -> None:
         return
 
     SESSION = get_SESSION()
-    async with TelegramClient(SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
+    async with TelegramClient(
+        SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH
+    ) as client:
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
 
         for forward in CONFIG.forwards:
@@ -568,10 +708,11 @@ async def forward_job() -> None:
                 offset_key = str(src)
                 last_id = 0
                 grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
-                prev_grouped_id: Optional[int] = None
                 start_offset = forward.offsets.get(offset_key, forward.offset)
 
-                async for message in client.iter_messages(src, reverse=True, offset_id=start_offset):
+                async for message in client.iter_messages(
+                    src, reverse=True, offset_id=start_offset
+                ):
                     if isinstance(message, MessageService):
                         continue
 
@@ -582,10 +723,13 @@ async def forward_job() -> None:
                     try:
                         current_grouped_id = message.grouped_id
 
+                        # 刷新之前的 grouped 缓冲
                         if grouped_buffer and (
                             current_grouped_id is None
-                            or (current_grouped_id is not None
-                                and current_grouped_id not in grouped_buffer)
+                            or (
+                                current_grouped_id is not None
+                                and current_grouped_id not in grouped_buffer
+                            )
                         ):
                             try:
                                 flushed_last = await _flush_grouped_buffer(
@@ -594,7 +738,9 @@ async def forward_job() -> None:
                                 if flushed_last:
                                     last_id = max(last_id, flushed_last)
                             except FloodWaitError as fwe:
-                                logging.warning(f"⛔ FloodWait (组刷新): {fwe.seconds} 秒")
+                                logging.warning(
+                                    f"⛔ FloodWait (组刷新): {fwe.seconds} 秒"
+                                )
                                 await asyncio.sleep(fwe.seconds)
                                 flushed_last = await _flush_grouped_buffer(
                                     client, src, dest, grouped_buffer, forward
@@ -602,167 +748,138 @@ async def forward_job() -> None:
                                 if flushed_last:
                                     last_id = max(last_id, flushed_last)
 
+                        # grouped 消息加入缓冲
                         if current_grouped_id is not None:
                             grouped_buffer[current_grouped_id].append(message)
-                            prev_grouped_id = current_grouped_id
                             continue
 
-                        prev_grouped_id = None
+                        # ============ 单条消息处理 ============
 
-                        bot_media = []
                         bot_media_allowed = _bot_media_allowed(forward)
-                        auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
-                        if bot_media_allowed and auto_comment_allowed:
-                            keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
-                            if keyword:
-                                await _auto_comment_keyword(client, src, message.id, keyword)
+                        auto_comment_allowed = getattr(
+                            forward, 'auto_comment_trigger_enabled', None
+                        ) is not False
 
-                        comment_bot_media = await _collect_bot_media_from_comments(client, src, message.id, forward)
+                        # 自动评论关键字触发
+                        if bot_media_allowed and auto_comment_allowed:
+                            keyword = _extract_comment_keyword(
+                                message.raw_text or message.text or "", forward
+                            )
+                            if keyword:
+                                await _auto_comment_keyword(
+                                    client, src, message.id, keyword
+                                )
+
+                        # 从评论区收集 bot 媒体
+                        comment_bot_media = await _collect_bot_media_from_comments(
+                            client, src, message.id, forward
+                        )
+
                         if comment_bot_media:
                             combined_messages = [message] + comment_bot_media
-                            tms = await apply_plugins_to_group(combined_messages)
-                            if tms:
-                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
-                                st.stored[event_uid] = {}
-                                for d in dest:
-                                    reply_to_id = None
-                                    if message.is_reply:
-                                        reply_msg_id = _get_reply_to_msg_id(message)
-                                        if reply_msg_id is not None:
-                                            r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                            r_event_uid = st.EventUid(r_event)
-                                            if r_event_uid in st.stored:
-                                                fwded_reply = st.stored[r_event_uid].get(d)
-                                                if fwded_reply is not None:
-                                                    if isinstance(fwded_reply, int):
-                                                        reply_to_id = fwded_reply
-                                                    elif hasattr(fwded_reply, 'id'):
-                                                        reply_to_id = fwded_reply.id
-                                    try:
-                                        tms[0].reply_to = reply_to_id
-                                        fwded_msg = await send_message(
-                                            d,
-                                            tms[0],
-                                            grouped_messages=[tm.message for tm in tms],
-                                            grouped_tms=tms,
-                                        )
-                                        if fwded_msg is not None:
-                                            st.stored[event_uid][d] = fwded_msg
-                                            fwded_id = _extract_msg_id(fwded_msg)
-                                            if fwded_id is not None:
-                                                st.add_post_mapping(src, message.id, d, fwded_id)
-                                    except Exception as e:
-                                        logging.error(f"❌ 合并媒体发送失败: {e}")
-                                for tm in tms:
-                                    tm.clear()
-                            else:
-                                logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
-                            last_id = message.id
-                            forward.offsets[offset_key] = last_id
-                            if len(sources) == 1:
-                                forward.offset = last_id
-                            write_config(CONFIG, persist=False)
+                            reply_to_map = {}
+                            for d in dest:
+                                reply_to_map[d] = _resolve_reply_to_id(message, d)
+                            await _send_combined_album(
+                                src, dest, message.id, combined_messages,
+                                reply_to_map=reply_to_map,
+                            )
                         else:
+                            # 从消息本身拉取 bot 媒体
+                            bot_media = []
                             if bot_media_allowed:
-                                bot_media = await resolve_bot_media_from_message(client, message, forward)
+                                bot_media = await resolve_bot_media_from_message(
+                                    client, message, forward
+                                )
+
                             if bot_media:
                                 bot_media = _dedupe_messages(bot_media)
-                                has_media = bool(message.photo or message.video or message.gif or message.document)
-                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
+                                has_media = _msg_has_media(message)
+                                event_uid = st.EventUid(
+                                    st.DummyEvent(message.chat_id, message.id)
+                                )
                                 st.stored[event_uid] = {}
+
                                 if has_media:
-                                    combined_messages = _dedupe_messages([message] + bot_media)
-                                    tms = await apply_plugins_to_group(combined_messages)
+                                    combined_messages = _dedupe_messages(
+                                        [message] + bot_media
+                                    )
+                                    tms = await apply_plugins_to_group(
+                                        combined_messages
+                                    )
                                     if tms:
                                         for d in dest:
-                                            reply_to_id = None
-                                            if message.is_reply:
-                                                reply_msg_id = _get_reply_to_msg_id(message)
-                                                if reply_msg_id is not None:
-                                                    r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                                    r_event_uid = st.EventUid(r_event)
-                                                    if r_event_uid in st.stored:
-                                                        fwded_reply = st.stored[r_event_uid].get(d)
-                                                        if fwded_reply is not None:
-                                                            if isinstance(fwded_reply, int):
-                                                                reply_to_id = fwded_reply
-                                                            elif hasattr(fwded_reply, 'id'):
-                                                                reply_to_id = fwded_reply.id
+                                            reply_to_id = _resolve_reply_to_id(
+                                                message, d
+                                            )
                                             try:
                                                 tms[0].reply_to = reply_to_id
                                                 fwded_msg = await send_message(
-                                                    d,
-                                                    tms[0],
-                                                    grouped_messages=[tm.message for tm in tms],
+                                                    d, tms[0],
+                                                    grouped_messages=[
+                                                        tm.message for tm in tms
+                                                    ],
                                                     grouped_tms=tms,
                                                 )
                                                 if fwded_msg is not None:
                                                     st.stored[event_uid][d] = fwded_msg
                                                     fwded_id = _extract_msg_id(fwded_msg)
                                                     if fwded_id is not None:
-                                                        st.add_post_mapping(src, message.id, d, fwded_id)
+                                                        st.add_post_mapping(
+                                                            src, message.id, d, fwded_id
+                                                        )
                                             except Exception as e:
-                                                logging.error(f"❌ bot 媒体发送失败: {e}")
+                                                logging.error(
+                                                    f"❌ bot 媒体发送失败: {e}"
+                                                )
                                         for tm in tms:
                                             tm.clear()
                                     else:
-                                        logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
+                                        logging.warning(
+                                            "⚠️ 合并媒体组全部被插件过滤，跳过"
+                                        )
                                 else:
                                     for d in dest:
-                                        reply_to_id = None
-                                        if message.is_reply:
-                                            reply_msg_id = _get_reply_to_msg_id(message)
-                                            if reply_msg_id is not None:
-                                                r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                                r_event_uid = st.EventUid(r_event)
-                                                if r_event_uid in st.stored:
-                                                    fwded_reply = st.stored[r_event_uid].get(d)
-                                                    if fwded_reply is not None:
-                                                        if isinstance(fwded_reply, int):
-                                                            reply_to_id = fwded_reply
-                                                        elif hasattr(fwded_reply, 'id'):
-                                                            reply_to_id = fwded_reply.id
+                                        reply_to_id = _resolve_reply_to_id(message, d)
                                         try:
                                             fwded_msg = await _send_bot_media_album(
-                                                d,
-                                                bot_media,
-                                                base_text=message.raw_text or message.text or "",
+                                                d, bot_media,
+                                                base_text=(
+                                                    message.raw_text
+                                                    or message.text
+                                                    or ""
+                                                ),
                                                 reply_to=reply_to_id,
                                             )
                                             if fwded_msg is not None:
                                                 st.stored[event_uid][d] = fwded_msg
                                                 fwded_id = _extract_msg_id(fwded_msg)
                                                 if fwded_id is not None:
-                                                    st.add_post_mapping(src, message.id, d, fwded_id)
+                                                    st.add_post_mapping(
+                                                        src, message.id, d, fwded_id
+                                                    )
                                         except Exception as e:
-                                            logging.error(f"❌ bot 媒体发送失败: {e}")
-                                last_id = message.id
-                                forward.offsets[offset_key] = last_id
-                                if len(sources) == 1:
-                                    forward.offset = last_id
-                                write_config(CONFIG, persist=False)
+                                            logging.error(
+                                                f"❌ bot 媒体发送失败: {e}"
+                                            )
                             else:
+                                # 普通单条消息
                                 tm = await apply_plugins(message)
                                 if not tm:
+                                    # 修复 Bug3：即使被过滤也要更新 offset
+                                    _update_offset(
+                                        forward, offset_key,
+                                        message.id, sources,
+                                    )
                                     continue
 
-                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
+                                event_uid = st.EventUid(
+                                    st.DummyEvent(message.chat_id, message.id)
+                                )
                                 st.stored[event_uid] = {}
 
                                 for d in dest:
-                                    reply_to_id = None
-                                    if message.is_reply:
-                                        reply_msg_id = _get_reply_to_msg_id(message)
-                                        if reply_msg_id is not None:
-                                            r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                            r_event_uid = st.EventUid(r_event)
-                                            if r_event_uid in st.stored:
-                                                fwded_reply = st.stored[r_event_uid].get(d)
-                                                if fwded_reply is not None:
-                                                    if isinstance(fwded_reply, int):
-                                                        reply_to_id = fwded_reply
-                                                    elif hasattr(fwded_reply, 'id'):
-                                                        reply_to_id = fwded_reply.id
+                                    reply_to_id = _resolve_reply_to_id(message, d)
                                     tm.reply_to = reply_to_id
 
                                     try:
@@ -771,27 +888,38 @@ async def forward_job() -> None:
                                             st.stored[event_uid][d] = fwded_msg
                                             fwded_id = _extract_msg_id(fwded_msg)
                                             if fwded_id is not None:
-                                                st.add_post_mapping(src, message.id, d, fwded_id)
+                                                st.add_post_mapping(
+                                                    src, message.id, d, fwded_id
+                                                )
                                         else:
-                                            logging.warning(f"⚠️ 发送返回 None, dest={d}, msg={message.id}")
+                                            logging.warning(
+                                                f"⚠️ 发送返回 None, "
+                                                f"dest={d}, msg={message.id}"
+                                            )
                                     except Exception as e:
                                         logging.error(f"❌ 单条发送失败: {e}")
 
                                 tm.clear()
-                                last_id = message.id
-                                forward.offsets[offset_key] = last_id
-                                if len(sources) == 1:
-                                    forward.offset = last_id
-                                write_config(CONFIG, persist=False)
 
+                        # 统一更新 offset（修复 Bug3）
+                        last_id = message.id
+                        _update_offset(forward, offset_key, message.id, sources)
+
+                        # 评论转发
                         if forward.comments.enabled:
                             try:
-                                await _forward_comments_for_post(client, src, message.id, forward)
+                                await _forward_comments_for_post(
+                                    client, src, message.id, forward
+                                )
                             except Exception as e:
-                                logging.error(f"❌ 帖子 {message.id} 评论转发失败: {e}")
+                                logging.error(
+                                    f"❌ 帖子 {message.id} 评论转发失败: {e}"
+                                )
 
                         delay_seconds = random.randint(60, 300)
-                        logging.info(f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})")
+                        logging.info(
+                            f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})"
+                        )
                         await asyncio.sleep(delay_seconds)
 
                     except FloodWaitError as fwe:
@@ -800,9 +928,14 @@ async def forward_job() -> None:
                     except Exception as err:
                         logging.exception(err)
 
+                # 刷新剩余 grouped 缓冲
                 if grouped_buffer:
-                    logging.info(f"📦 刷新剩余 {len(grouped_buffer)} 个媒体组")
+                    logging.info(
+                        f"📦 刷新剩余 {len(grouped_buffer)} 个媒体组"
+                    )
                     try:
-                        await _flush_grouped_buffer(client, src, dest, grouped_buffer, forward)
+                        await _flush_grouped_buffer(
+                            client, src, dest, grouped_buffer, forward
+                        )
                     except Exception as e:
                         logging.exception(f"🚨 刷新剩余组失败: {e}")
