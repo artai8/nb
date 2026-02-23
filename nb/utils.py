@@ -31,6 +31,8 @@ from telethon.tl.types import (
     ReplyInlineMarkup,
     KeyboardButtonUrl,
     KeyboardButtonCallback,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
 )
 from telethon.tl.functions.messages import (
     SendMediaRequest,
@@ -124,6 +126,24 @@ def _extract_tme_links(text: str) -> List[str]:
         return []
     candidates = re.findall(r"(https?://t\.me/[^\s]+|t\.me/[^\s]+)", text)
     return [c.strip(").,;\"'") for c in candidates]
+
+
+def _extract_tme_links_from_entities(message: Message) -> List[str]:
+    if message is None:
+        return []
+    entities = getattr(message, "entities", None) or []
+    text = message.raw_text or message.text or ""
+    links: List[str] = []
+    for ent in entities:
+        if isinstance(ent, MessageEntityTextUrl):
+            if ent.url:
+                links.append(ent.url)
+        elif isinstance(ent, MessageEntityUrl):
+            if text:
+                url = text[ent.offset : ent.offset + ent.length]
+                if url:
+                    links.append(url)
+    return links
 
 
 def _parse_tme_start_link(url: str) -> Optional[tuple]:
@@ -430,10 +450,10 @@ async def resolve_bot_media_from_message(
     if CONFIG.login.user_type == 0:
         logging.warning("⚠️ bot 媒体拉取需要 user 模式")
         return []
-    text_links = _filter_tme_links(
-        _extract_tme_links(message.raw_text or message.text or ""),
-        forward,
-    )
+    raw_text = message.raw_text or message.text or ""
+    text_links = _extract_tme_links(raw_text)
+    entity_links = _extract_tme_links_from_entities(message)
+    text_links = _filter_tme_links(text_links + entity_links, forward)
     found = []
     for link in text_links:
         parsed = _parse_tme_start_link(link)
