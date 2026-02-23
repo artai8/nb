@@ -2,7 +2,7 @@ from enum import Enum
 from typing import Any, Dict, List
 
 # ✅ Pydantic v2 导入 Field
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from watermark import Position
 
 
@@ -57,6 +57,7 @@ class Filters(BaseModel):
 
 
 class Format(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
     check: bool = False
     style: Style = Style.PRESERVE
 
@@ -109,6 +110,7 @@ class InlineButtonMode(str, Enum):
 
 
 class InlineButtonConfig(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
     check: bool = False
     mode: InlineButtonMode = InlineButtonMode.REMOVE
     url_replacements: Dict[str, str] = Field(default_factory=dict)       # 旧URL片段 -> 新URL片段
