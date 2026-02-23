@@ -66,6 +66,7 @@ class Forward(BaseModel):
     bot_media_tme_link_blacklist_raw: str = ""
     comment_keyword_prefixes_raw: str = ""
     comment_keyword_suffixes_raw: str = ""
+    comment_keyword_from_comments_enabled: Optional[bool] = None
 
 
 class LiveSettings(BaseModel):
@@ -126,6 +127,7 @@ class BotMediaSettings(BaseModel):
     recent_limit: int = 80
     comment_keyword_prefixes_raw: str = "评论区回复\n评论区发送\n在评论区回复\n在评论区发送"
     comment_keyword_suffixes_raw: str = "获取资源\n领取\n获取\n得到内容"
+    comment_keyword_from_comments_enabled: bool = True
 
 
 class Config(BaseModel):
