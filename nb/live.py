@@ -119,6 +119,41 @@ async def _send_bot_media_album(
     return fwded_first
 
 
+async def _send_combined_album(
+    dest: int,
+    combined_messages: List[Message],
+    reply_to: Optional[int] = None,
+    comment_to_post: Optional[int] = None,
+):
+    tms = await apply_plugins_to_group(combined_messages)
+    if not tms:
+        logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
+        return None
+    chunks = _chunk_list(tms, 10)
+    first_caption = "\n\n".join(
+        [tm.text.strip() for tm in chunks[0] if tm.text and tm.text.strip()]
+    )
+    fwded_first = None
+    for idx, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        if reply_to is not None and idx == 0:
+            chunk[0].reply_to = reply_to
+        fwded = await send_message(
+            dest,
+            chunk[0],
+            grouped_messages=[tm.message for tm in chunk],
+            grouped_tms=chunk,
+            grouped_caption=first_caption,
+            comment_to_post=comment_to_post if idx == 0 else None,
+        )
+        if fwded_first is None:
+            fwded_first = fwded
+        for tm in chunk:
+            tm.clear()
+    return fwded_first
+
+
 async def _resolve_comment_dest(
     client: TelegramClient,
     message: Message,
@@ -192,21 +227,15 @@ async def _send_grouped_messages(grouped_id: int) -> None:
         bot_media_allowed = _bot_media_allowed(forward)
         bot_media = []
         if bot_media_allowed:
-            trigger_text = None
             for msg in messages:
                 bot_media = await resolve_bot_media_from_message(msg.client, msg, forward)
                 if bot_media:
-                    trigger_text = msg.raw_text or msg.text or ""
                     break
         if bot_media:
-            bot_media = _dedupe_messages(bot_media)
+            combined_messages = _dedupe_messages(messages + bot_media)
             for d in dest:
                 try:
-                    fwded_msg = await _send_bot_media_album(
-                        d,
-                        bot_media,
-                        base_text=trigger_text,
-                    )
+                    fwded_msg = await _send_combined_album(d, combined_messages)
                     for original_msg in messages:
                         event_uid = st.EventUid(st.DummyEvent(chat_id, original_msg.id))
                         if event_uid not in st.stored:
@@ -273,30 +302,57 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
     if bot_media:
         bot_media = _dedupe_messages(bot_media)
         st.stored[event_uid] = {}
-        for d in dest:
-            reply_to_id = None
-            if event.is_reply:
-                reply_msg_id = _get_reply_to_msg_id(event.message)
-                if reply_msg_id is not None:
-                    r_event = st.DummyEvent(chat_id, reply_msg_id)
-                    r_event_uid = st.EventUid(r_event)
-                    if r_event_uid in st.stored:
-                        fwded_reply = st.stored[r_event_uid].get(d)
-                        reply_to_id = _extract_msg_id(fwded_reply)
-            try:
-                fwded_msg = await _send_bot_media_album(
-                    d,
-                    bot_media,
-                    base_text=message.raw_text or message.text or "",
-                    reply_to=reply_to_id,
-                )
-                if fwded_msg is not None:
-                    st.stored[event_uid][d] = fwded_msg
-                    fwded_id = _extract_msg_id(fwded_msg)
-                    if fwded_id is not None:
-                        st.add_post_mapping(chat_id, message.id, d, fwded_id)
-            except Exception as e:
-                logging.error(f"❌ live bot 媒体发送失败: {e}")
+        has_media = bool(message.photo or message.video or message.gif or message.document)
+        if has_media:
+            combined_messages = _dedupe_messages([message] + bot_media)
+            for d in dest:
+                reply_to_id = None
+                if event.is_reply:
+                    reply_msg_id = _get_reply_to_msg_id(event.message)
+                    if reply_msg_id is not None:
+                        r_event = st.DummyEvent(chat_id, reply_msg_id)
+                        r_event_uid = st.EventUid(r_event)
+                        if r_event_uid in st.stored:
+                            fwded_reply = st.stored[r_event_uid].get(d)
+                            reply_to_id = _extract_msg_id(fwded_reply)
+                try:
+                    fwded_msg = await _send_combined_album(
+                        d,
+                        combined_messages,
+                        reply_to=reply_to_id,
+                    )
+                    if fwded_msg is not None:
+                        st.stored[event_uid][d] = fwded_msg
+                        fwded_id = _extract_msg_id(fwded_msg)
+                        if fwded_id is not None:
+                            st.add_post_mapping(chat_id, message.id, d, fwded_id)
+                except Exception as e:
+                    logging.error(f"❌ live bot 媒体发送失败: {e}")
+        else:
+            for d in dest:
+                reply_to_id = None
+                if event.is_reply:
+                    reply_msg_id = _get_reply_to_msg_id(event.message)
+                    if reply_msg_id is not None:
+                        r_event = st.DummyEvent(chat_id, reply_msg_id)
+                        r_event_uid = st.EventUid(r_event)
+                        if r_event_uid in st.stored:
+                            fwded_reply = st.stored[r_event_uid].get(d)
+                            reply_to_id = _extract_msg_id(fwded_reply)
+                try:
+                    fwded_msg = await _send_bot_media_album(
+                        d,
+                        bot_media,
+                        base_text=message.raw_text or message.text or "",
+                        reply_to=reply_to_id,
+                    )
+                    if fwded_msg is not None:
+                        st.stored[event_uid][d] = fwded_msg
+                        fwded_id = _extract_msg_id(fwded_msg)
+                        if fwded_id is not None:
+                            st.add_post_mapping(chat_id, message.id, d, fwded_id)
+                except Exception as e:
+                    logging.error(f"❌ live bot 媒体发送失败: {e}")
         return
     tm = await apply_plugins(message)
     if not tm:
