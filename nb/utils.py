@@ -1,6 +1,7 @@
 # nb/web_ui/utils.py
 
 import os
+import json
 from typing import Dict, List
 
 import streamlit as st
@@ -16,7 +17,7 @@ def _get_package_dir() -> str:
 package_dir = _get_package_dir()
 
 
-def get_list(string: str):
+def get_list(string: str) -> List[str]:
     my_list = []
     for line in string.splitlines():
         clean_line = line.strip()
@@ -25,36 +26,33 @@ def get_list(string: str):
     return my_list
 
 
-def get_string(my_list: List):
+def get_string(my_list: List) -> str:
     string = ""
     for item in my_list:
         string += f"{item}\n"
     return string
 
 
-def dict_to_list(dict: Dict):
+def dict_to_list(d: Dict) -> List[str]:
     my_list = []
-    for key, val in dict.items():
+    for key, val in d.items():
         my_list.append(f"{key}: {val}")
     return my_list
 
 
-def list_to_dict(my_list: List):
+def list_to_dict(my_list: List) -> Dict:
     my_dict = {}
     for item in my_list:
-        key, val = item.split(":")
+        key, val = item.split(":", maxsplit=1)
         my_dict[key.strip()] = val.strip()
     return my_dict
 
 
-
-# ==================== 新增：极致美化 CSS (Neumorphism + Glassmorphism) ====================
+# ==================== 极致美化 CSS (Neumorphism + Glassmorphism) ====================
 def inject_custom_css(theme: str = "light"):
     """注入 Neumorphism (新拟物化) + Glassmorphism (毛玻璃) 风格 CSS"""
-    
-    # 定义主题变量
+
     if theme == "dark":
-        # 深色模式变量
         vars_css = """
         :root {
             --bg-color: #212529;
@@ -70,7 +68,6 @@ def inject_custom_css(theme: str = "light"):
         }
         """
     else:
-        # 浅色模式变量 (默认)
         vars_css = """
         :root {
             --bg-color: #e0e5ec;
@@ -90,23 +87,23 @@ def inject_custom_css(theme: str = "light"):
         f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap');
-        
+
         {vars_css}
 
         /* 全局样式重置 */
         .stApp {{
             background-color: var(--bg-color);
             color: var(--text-color);
-            font-family: 'Nunito', sans-serif;
+            font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }}
-        
+
         h1, h2, h3, h4, h5, h6 {{
             color: var(--text-color) !important;
             font-weight: 700;
             text-shadow: 1px 1px 2px var(--shadow-light), -1px -1px 2px var(--shadow-dark);
         }}
 
-        /* --- Glassmorphism Sidebar (侧边栏毛玻璃) --- */
+        /* --- Glassmorphism Sidebar --- */
         section[data-testid="stSidebar"] {{
             background-color: var(--glass-bg);
             backdrop-filter: blur(20px);
@@ -114,12 +111,12 @@ def inject_custom_css(theme: str = "light"):
             border-right: 1px solid var(--glass-border);
             box-shadow: 5px 0 15px rgba(0,0,0,0.05);
         }}
-        
+
         section[data-testid="stSidebar"] .block-container {{
             padding-top: 2rem;
         }}
 
-        /* --- Neumorphism Buttons (新拟物化按钮) --- */
+        /* --- Neumorphism Buttons --- */
         .stButton > button {{
             border-radius: 12px;
             background: var(--bg-color);
@@ -131,27 +128,26 @@ def inject_custom_css(theme: str = "light"):
             transition: all 0.2s ease;
             padding: 0.5rem 1rem;
         }}
-        
+
         .stButton > button:hover {{
             transform: translateY(-2px);
             box-shadow:  8px 8px 16px var(--shadow-dark),
                         -8px -8px 16px var(--shadow-light);
             color: var(--primary-color);
         }}
-        
+
         .stButton > button:active {{
             transform: translateY(1px);
             box-shadow: inset 4px 4px 8px var(--shadow-dark),
                         inset -4px -4px 8px var(--shadow-light);
         }}
-        
-        /* Primary 按钮特殊处理 */
+
         .stButton button[kind="primary"] {{
             color: var(--primary-color);
             border: 1px solid rgba(108, 92, 231, 0.1);
         }}
 
-        /* --- Neumorphism Inputs (内嵌阴影输入框) --- */
+        /* --- Neumorphism Text Inputs --- */
         .stTextInput input, .stTextArea textarea {{
             background-color: var(--input-bg) !important;
             border-radius: 12px;
@@ -162,25 +158,6 @@ def inject_custom_css(theme: str = "light"):
             padding: 10px 12px;
         }}
 
-        .stSelectbox div[data-baseweb="select"] > div {{
-            background-color: var(--input-bg) !important;
-            border-radius: 12px;
-            border: none;
-            box-shadow: inset 5px 5px 10px var(--shadow-dark),
-                        inset -5px -5px 10px var(--shadow-light);
-            color: var(--text-color);
-            padding: 5px 12px;
-            min-height: 45px;
-            display: flex;
-            align-items: center;
-            position: relative;
-        }}
-        
-        /* 修复选中值被遮挡的问题 */
-        .stSelectbox div[data-baseweb="select"] > div > div {{
-            z-index: 1;
-        }}
-        
         .stTextInput input:focus, .stTextArea textarea:focus {{
             outline: none;
             box-shadow: inset 2px 2px 5px var(--shadow-dark),
@@ -188,7 +165,87 @@ def inject_custom_css(theme: str = "light"):
                         0 0 5px var(--primary-color);
         }}
 
-        /* --- Glassmorphism Cards / Expanders (卡片/折叠框) --- */
+        /* ====================================================
+           ★★★ 修复: SelectBox 下拉框文字被遮挡 ★★★
+           ==================================================== */
+
+        /* 外层容器：只用外部凸起阴影，不用 inset 阴影 */
+        .stSelectbox div[data-baseweb="select"] > div {{
+            background-color: var(--input-bg) !important;
+            border-radius: 12px;
+            border: none;
+            box-shadow: 5px 5px 10px var(--shadow-dark),
+                       -5px -5px 10px var(--shadow-light);
+            color: var(--text-color);
+            padding: 0 12px;
+            min-height: 42px;
+        }}
+
+        /* 选中值文字：确保可见且不被裁剪 */
+        .stSelectbox div[data-baseweb="select"] span {{
+            color: var(--text-color) !important;
+            overflow: visible !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+        }}
+
+        /* 内部 ValueContainer：给文字足够空间 */
+        .stSelectbox div[data-baseweb="select"] > div > div:first-child {{
+            overflow: visible !important;
+            padding: 4px 0 !important;
+            color: var(--text-color) !important;
+        }}
+
+        /* 下拉箭头图标：确保不遮挡文字 */
+        .stSelectbox div[data-baseweb="select"] > div > div:last-child {{
+            position: relative;
+            z-index: 2;
+            flex-shrink: 0;
+        }}
+
+        /* 下拉菜单弹出层 */
+        div[data-baseweb="popover"] {{
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 8px 8px 16px var(--shadow-dark),
+                       -8px -8px 16px var(--shadow-light);
+        }}
+
+        div[data-baseweb="popover"] ul {{
+            background-color: var(--input-bg) !important;
+            border-radius: 12px;
+        }}
+
+        div[data-baseweb="popover"] li {{
+            color: var(--text-color) !important;
+            background-color: transparent !important;
+        }}
+
+        div[data-baseweb="popover"] li:hover {{
+            background-color: var(--glass-border) !important;
+        }}
+
+        /* MultiSelect 多选框同样修复 */
+        .stMultiSelect div[data-baseweb="select"] > div {{
+            background-color: var(--input-bg) !important;
+            border-radius: 12px;
+            border: none;
+            box-shadow: 5px 5px 10px var(--shadow-dark),
+                       -5px -5px 10px var(--shadow-light);
+            color: var(--text-color);
+            padding: 4px 12px;
+            min-height: 42px;
+        }}
+
+        .stMultiSelect div[data-baseweb="select"] span {{
+            color: var(--text-color) !important;
+        }}
+
+        /* ====================================================
+           ★★★ 修复结束 ★★★
+           ==================================================== */
+
+        /* --- Glassmorphism Expanders --- */
         div[data-testid="stExpander"] {{
             background: var(--bg-color);
             border-radius: var(--card-radius);
@@ -198,25 +255,25 @@ def inject_custom_css(theme: str = "light"):
             margin-bottom: 1rem;
             overflow: hidden;
         }}
-        
+
         .streamlit-expanderHeader {{
             background-color: transparent !important;
             color: var(--text-color) !important;
             font-weight: 600;
             border-bottom: 1px solid var(--glass-border);
         }}
-        
+
         div[data-testid="stExpander"] > div:last-child {{
             padding: 1rem;
         }}
 
-        /* --- Tabs (标签页) --- */
+        /* --- Tabs --- */
         .stTabs [data-baseweb="tab-list"] {{
             gap: 16px;
             background-color: transparent;
             padding-bottom: 10px;
         }}
-        
+
         .stTabs [data-baseweb="tab"] {{
             height: 45px;
             border-radius: 12px;
@@ -227,20 +284,19 @@ def inject_custom_css(theme: str = "light"):
             border: none;
             padding: 0 20px;
         }}
-        
+
         .stTabs [aria-selected="true"] {{
             color: var(--primary-color);
             box-shadow: inset 3px 3px 6px var(--shadow-dark),
                         inset -3px -3px 6px var(--shadow-light);
         }}
 
-        /* --- Checkbox & Radio (开关与单选) --- */
-        /* 自定义 Checkbox 较难完全覆盖，尝试用容器包裹 */
+        /* --- Checkbox & Radio --- */
         div[data-baseweb="checkbox"] {{
             margin-bottom: 0.5rem;
         }}
-        
-        /* Alert / Info Boxes (提示框) */
+
+        /* --- Alert / Info Boxes --- */
         .stAlert {{
             background-color: var(--bg-color);
             border-radius: 12px;
@@ -249,21 +305,21 @@ def inject_custom_css(theme: str = "light"):
             border: none;
             color: var(--text-color);
         }}
-        
-        /* Code Block */
+
+        /* --- Code Block --- */
         .stCodeBlock {{
             border-radius: 12px;
             box-shadow: inset 3px 3px 6px var(--shadow-dark),
                         inset -3px -3px 6px var(--shadow-light);
         }}
-        
-        /* 隐藏顶部红条和页脚 */
+
+        /* --- 隐藏顶部和页脚 --- */
         header[data-testid="stHeader"] {{
             background: transparent;
         }}
         footer {{visibility: hidden;}}
 
-        /* --- Custom Utility Classes (自定义工具类) --- */
+        /* --- Custom Utility Classes --- */
         .neu-card {{
             background-color: var(--bg-color);
             border-radius: var(--card-radius);
@@ -273,7 +329,7 @@ def inject_custom_css(theme: str = "light"):
             border: 1px solid var(--glass-border);
             height: 100%;
         }}
-        
+
         .glass-card {{
             background: var(--glass-bg);
             backdrop-filter: blur(10px);
@@ -282,16 +338,17 @@ def inject_custom_css(theme: str = "light"):
             border: 1px solid var(--glass-border);
             padding: 20px;
         }}
-        
+
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-def apply_theme(st, CONFIG, hidden_container):
 
+def apply_theme(st, CONFIG, hidden_container):
     """Apply theme using browser's local storage"""
-    if st.session_state.theme == "☀️":
+    theme_choice = getattr(st.session_state, "theme", "☀️")
+    if theme_choice == "☀️":
         theme = "Light"
         CONFIG.theme = "light"
     else:
@@ -299,7 +356,9 @@ def apply_theme(st, CONFIG, hidden_container):
         CONFIG.theme = "dark"
     write_config(CONFIG)
 
-    script = f"<script>localStorage.setItem('stActiveTheme-/-v1', '{{\"name\":\"{theme}\"}}');"
+    theme_json = json.dumps({"name": theme})
+    escaped = theme_json.replace("'", "\\'")
+    script = f"<script>localStorage.setItem('stActiveTheme-/-v1', '{escaped}');"
 
     pages_dir = os.path.join(package_dir, "pages")
     if os.path.isdir(pages_dir):
@@ -307,7 +366,7 @@ def apply_theme(st, CONFIG, hidden_container):
         for page in pages:
             if page.endswith(".py"):
                 page_name = page[4:-3]
-                script += f"localStorage.setItem('stActiveTheme-/{page_name}-v1', '{{\"name\":\"{theme}\"}}');"
+                script += f"localStorage.setItem('stActiveTheme-/{page_name}-v1', '{escaped}');"
 
     script += "parent.location.reload()</script>"
     with hidden_container:
@@ -316,12 +375,9 @@ def apply_theme(st, CONFIG, hidden_container):
 
 def switch_theme(st, CONFIG):
     """Display the option to change theme (Light/Dark)"""
-    # ★★★ 关键：在这里调用 CSS 注入 ★★★
-    theme_val = "light"
-    if CONFIG.theme == "dark":
-        theme_val = "dark"
+    theme_val = "dark" if CONFIG.theme == "dark" else "light"
     inject_custom_css(theme=theme_val)
-    
+
     with st.sidebar:
         st.markdown("---")
         leftpad, content, rightpad = st.columns([0.1, 0.8, 0.1])
@@ -340,5 +396,4 @@ def switch_theme(st, CONFIG):
 
 
 def hide_st(st):
-    # 已在 inject_custom_css 中处理，这里保留用于兼容
     pass
