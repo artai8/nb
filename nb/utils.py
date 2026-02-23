@@ -533,6 +533,71 @@ def _has_spoiler(message: Message) -> bool:
     return getattr(message.media, 'spoiler', False)
 
 
+def _is_protected_chat_error(err: Exception) -> bool:
+    text = str(err).lower()
+    return "protected chat" in text or "you can't forward messages from a protected chat" in text
+
+
+async def _send_album_by_upload(
+    client: TelegramClient,
+    recipient: EntityLike,
+    grouped_messages: List[Message],
+    caption: Optional[str],
+    reply_to: Optional[int],
+) -> Union[Message, List[Message], None]:
+    files = []
+    for msg in grouped_messages:
+        if msg.photo or msg.video or msg.gif or msg.document:
+            try:
+                file = await msg.download_media("")
+                if file:
+                    files.append(file)
+            except Exception as e:
+                logging.warning(f"⚠️ 媒体下载失败: {e}")
+    if not files:
+        return await client.send_message(recipient, caption or "空相册", reply_to=reply_to)
+    try:
+        return await client.send_file(
+            recipient, files,
+            caption=caption or None,
+            reply_to=reply_to,
+            supports_streaming=True,
+            force_document=False,
+            allow_cache=False,
+            parse_mode="md",
+        )
+    finally:
+        cleanup(*files)
+
+
+async def _send_single_by_upload(
+    client: TelegramClient,
+    recipient: EntityLike,
+    message: Message,
+    caption: Optional[str],
+    reply_to: Optional[int],
+) -> Union[Message, None]:
+    try:
+        file = await message.download_media("")
+    except Exception as e:
+        logging.warning(f"⚠️ 媒体下载失败: {e}")
+        file = None
+    if not file:
+        return await client.send_message(recipient, caption or "", reply_to=reply_to)
+    try:
+        return await client.send_file(
+            recipient, file,
+            caption=caption or "",
+            reply_to=reply_to,
+            supports_streaming=True,
+            force_document=False,
+            allow_cache=False,
+            parse_mode="md",
+        )
+    finally:
+        cleanup(file)
+
+
 async def _send_single_with_spoiler(
     client: TelegramClient,
     recipient: EntityLike,
@@ -745,6 +810,15 @@ async def send_message(
                 logging.info(f"✅ 媒体组发送成功")
                 return result
             except Exception as e:
+                if _is_protected_chat_error(e):
+                    logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
+                    return await _send_album_by_upload(
+                        client,
+                        recipient,
+                        grouped_messages,
+                        combined_caption or None,
+                        effective_reply_to,
+                    )
                 if _is_flood_wait(e): await _handle_flood_wait(e)
                 else: logging.error(f"❌ 媒体组发送失败: {e}")
                 attempt += 1
@@ -814,7 +888,17 @@ async def send_message(
             return result
         except Exception as e:
             if _is_flood_wait(e): await _handle_flood_wait(e)
-            else: logging.error(f"❌ copy 失败: {e}")
+            else:
+                if _is_protected_chat_error(e):
+                    if getattr(tm.message, "media", None):
+                        return await _send_single_by_upload(
+                            client,
+                            recipient,
+                            tm.message,
+                            tm.text,
+                            effective_reply_to,
+                        )
+                logging.error(f"❌ copy 失败: {e}")
             attempt += 1
             await asyncio.sleep(5)
     return None
