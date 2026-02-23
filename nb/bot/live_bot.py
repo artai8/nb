@@ -26,11 +26,17 @@ async def forward_command_handler(event):
     Example: suppose you want to forward from a to (b and c)
 
     ```
-    /forward source: a
+    /forward sources: [a]
     dest: [b,c]
     ```
 
     a,b,c are chat ids
+    You can also use:
+
+    ```
+    /forward sources: [a,d]
+    dest: [b,c]
+    ```
 
     """.replace(
         "    ", ""
@@ -44,12 +50,15 @@ async def forward_command_handler(event):
         parsed_args = yaml.safe_load(args)
         if not isinstance(parsed_args, dict):
             raise ValueError("Invalid format. Please provide valid YAML/JSON.")
+        if "source" in parsed_args:
+            raise ValueError("请使用 sources 字段，例如 sources: [a]")
 
         # ✅ Pydantic v2 实例化
         forward = config.Forward(**parsed_args)
         
         try:
-            remove_source(forward.source, config.CONFIG.forwards)
+            for s in forward.sources:
+                remove_source(s, config.CONFIG.forwards)
         except:
             pass
         CONFIG.forwards.append(forward)
