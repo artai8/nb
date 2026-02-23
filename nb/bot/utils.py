@@ -43,9 +43,10 @@ def display_forwards(forwards: List[Forward]) -> str:
         return "Currently no forwards are set"
     forward_str = "This is your configuration"
     for forward in forwards:
+        sources = getattr(forward, "sources", None) or []
         forward_str = (
             forward_str
-            + f"\n\n```\nsource: {forward.source}\ndest: {forward.dest}\n```\n"
+            + f"\n\n```\nsources: {sources}\ndest: {forward.dest}\n```\n"
         )
 
     return forward_str
@@ -54,9 +55,15 @@ def display_forwards(forwards: List[Forward]) -> str:
 def remove_source(source, forwards: List[Forward]) -> List[Forward]:
     """Remove a source from forwards."""
     for i, forward in enumerate(forwards):
-        if forward.source == source:
-            del forwards[i]
-            return forwards
+        sources = list(getattr(forward, "sources", None) or [])
+        if sources:
+            filtered = [s for s in sources if s != source]
+            if len(filtered) != len(sources):
+                forward.sources = filtered
+                if filtered:
+                    return forwards
+                del forwards[i]
+                return forwards
     raise ValueError("The source does not exist")
 
 
