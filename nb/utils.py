@@ -169,8 +169,16 @@ def inject_custom_css(theme: str = "light"):
             box-shadow: inset 5px 5px 10px var(--shadow-dark),
                         inset -5px -5px 10px var(--shadow-light);
             color: var(--text-color);
-            padding: 12px 12px;
-            min-height: 30px;
+            padding: 5px 12px;
+            min-height: 45px;
+            display: flex;
+            align-items: center;
+            position: relative;
+        }}
+        
+        /* 修复选中值被遮挡的问题 */
+        .stSelectbox div[data-baseweb="select"] > div > div {{
+            z-index: 1;
         }}
         
         .stTextInput input:focus, .stTextArea textarea:focus {{
