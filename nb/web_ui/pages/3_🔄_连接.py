@@ -165,7 +165,7 @@ if check_password(st):
                     obj.bot_media_enabled = True if enabled_override else False
 
                     if enabled_override:
-                        ckw1, ckw2 = st.columns(2)
+                        ckw1, ckw2, ckw3 = st.columns(3)
                         with ckw1:
                             keyword_trigger_enabled = st.checkbox(
                                 "关键词触发",
@@ -180,6 +180,13 @@ if check_password(st):
                                 key=f"act{con}",
                             )
                             obj.auto_comment_trigger_enabled = True if auto_comment_enabled else False
+                        with ckw3:
+                            comment_keyword_enabled = st.checkbox(
+                                "评论区高频关键词",
+                                value=obj.comment_keyword_from_comments_enabled is not False,
+                                key=f"ckfc{con}",
+                            )
+                            obj.comment_keyword_from_comments_enabled = True if comment_keyword_enabled else False
 
                         mode_options = ["auto", "any"]
                         mode_labels = {
