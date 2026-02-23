@@ -154,6 +154,26 @@ def termination():
     CONFIG.pid = 0
     write_config(CONFIG)
 
+def _read_log_file(path: str) -> str:
+    try:
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return f.read()
+    except:
+        pass
+    return ""
+
+def get_all_logs_text() -> str:
+    old_content = _read_log_file(OLD_LOG_FILE)
+    new_content = _read_log_file(LOG_FILE)
+    if old_content and new_content:
+        return old_content + "\n" + new_content
+    if old_content:
+        return old_content
+    if new_content:
+        return new_content
+    return "暂无日志。"
+
 # --- UI Code ---
 
 st.set_page_config(page_title="Run Dashboard", page_icon="🏃", layout="wide")
@@ -232,7 +252,7 @@ if check_password(st):
     else:
         c_btn, c_spacer = st.columns([1, 3])
         with c_btn:
-            s1, s2 = st.columns(2)
+            s1, s2, s3 = st.columns(3)
             with s1:
                 if st.button("⏹️ 停止", type="primary", use_container_width=True):
                     if kill_process(pid):
@@ -245,6 +265,14 @@ if check_password(st):
                     termination()
                     time.sleep(1)
                     rerun()
+            with s3:
+                st.download_button(
+                    "📥 下载全部日志",
+                    data=get_all_logs_text(),
+                    file_name="logs_all.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
 
     # --- 修复2: 只在进程运行时才自动刷新 ---
     st.write("")
