@@ -87,9 +87,10 @@ if check_password(st):
                     c_src, c_dst = st.columns(2)
                     with c_src:
                         st.markdown("#### 来源")
-                        src_val = st.text_input("来源 ID / 用户名", value=str(obj.source), key=f"s{con}")
-                        obj.source = _parse_id(src_val)
-                        st.caption("输入 ID (如 -100xxx) 或 用户名")
+                        src_default = getattr(obj, "sources", None) or []
+                        src_raw = st.text_area("来源 (每行一个)", value=get_string(src_default), key=f"s{con}", height=100)
+                        obj.sources = [_parse_id(x) for x in get_list(src_raw)]
+                        st.caption("每行一个：ID (如 -100xxx) 或 用户名")
                     
                     with c_dst:
                         st.markdown("#### 目的地")
