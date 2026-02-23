@@ -1,6 +1,8 @@
 # nb/web_ui/utils.py
 
 import os
+import platform
+import sys
 from typing import Dict, List
 
 import streamlit as st
@@ -45,6 +47,17 @@ def list_to_dict(my_list: List):
         key, val = item.split(":")
         my_dict[key.strip()] = val.strip()
     return my_dict
+
+
+def platform_info() -> str:
+    lines = [
+        f"OS: {platform.platform()}",
+        f"Python: {sys.version.split()[0]}",
+        f"Executable: {sys.executable}",
+        f"Working Dir: {os.getcwd()}",
+        f"Process ID: {os.getpid()}",
+    ]
+    return "\n".join(lines)
 
 
 
