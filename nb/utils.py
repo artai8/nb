@@ -33,6 +33,7 @@ from telethon.tl.types import (
     KeyboardButtonCallback,
     MessageEntityTextUrl,
     MessageEntityUrl,
+    MessageService,
 )
 from telethon.tl.functions.messages import (
     SendMediaRequest,
@@ -201,6 +202,127 @@ def _parse_lines(raw: str) -> List[str]:
         return []
     lines = [line.strip() for line in raw.replace("\r", "\n").split("\n")]
     return [line for line in lines if line]
+
+
+def _parse_start_links_from_text(text: str, forward=None) -> List[tuple]:
+    links = _filter_tme_links(_extract_tme_links(text), forward)
+    found = []
+    for link in links:
+        parsed = _parse_tme_start_link(link)
+        if parsed:
+            found.append(parsed)
+    return found
+
+
+def _parse_start_links_from_entities(message: Message, forward=None) -> List[tuple]:
+    links = _filter_tme_links(_extract_tme_links_from_entities(message), forward)
+    found = []
+    for link in links:
+        parsed = _parse_tme_start_link(link)
+        if parsed:
+            found.append(parsed)
+    return found
+
+
+async def _collect_discussion_comments(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+    post_id: int,
+) -> tuple:
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    if disc_msg is None:
+        return None, []
+    comments: List[Message] = []
+    async for comment in client.iter_messages(
+        disc_msg.chat_id,
+        reply_to=disc_msg.id,
+        reverse=True,
+        limit=CONFIG.bot_media.recent_limit,
+    ):
+        if isinstance(comment, MessageService):
+            continue
+        comments.append(comment)
+    return disc_msg, comments
+
+
+def _find_common_comment_keyword(comments: List[Message]) -> Optional[str]:
+    counts = {}
+    order = []
+    for comment in comments:
+        text = (comment.raw_text or comment.text or "").strip()
+        text = _trim_keyword(text)
+        if not text:
+            continue
+        if text not in counts:
+            counts[text] = 0
+            order.append(text)
+        counts[text] += 1
+    best = None
+    best_count = 0
+    best_idx = None
+    for idx, text in enumerate(order):
+        count = counts.get(text, 0)
+        if count < 3:
+            continue
+        if count > best_count:
+            best = text
+            best_count = count
+            best_idx = idx
+        elif count == best_count and best_idx is not None and idx < best_idx:
+            best = text
+            best_idx = idx
+    return best
+
+
+async def _collect_start_links_from_keyword_reply(
+    client: TelegramClient,
+    disc_msg: Message,
+    keyword: str,
+    forward=None,
+) -> List[tuple]:
+    latest = await client.get_messages(disc_msg.chat_id, limit=1)
+    last_id = latest[0].id if latest else 0
+    try:
+        await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+    except Exception as e:
+        logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
+        return []
+    responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
+    links = []
+    for msg in responses:
+        links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
+        links.extend(_extract_start_links_from_markup(msg.reply_markup, forward))
+        links.extend(_parse_start_links_from_entities(msg, forward))
+    if links:
+        return links
+    await asyncio.sleep(5)
+    if responses:
+        last_id = max(m.id for m in responses)
+    responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
+    for msg in responses:
+        links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
+        links.extend(_extract_start_links_from_markup(msg.reply_markup, forward))
+        links.extend(_parse_start_links_from_entities(msg, forward))
+    return links
+
+
+async def _collect_from_start_links(
+    client: TelegramClient,
+    links: List[tuple],
+    forward=None,
+) -> List[Message]:
+    if not links:
+        return []
+    for bot_username, start_param in links:
+        try:
+            items = await _start_bot_and_collect_album(
+                client, bot_username, start_param, forward=forward
+            )
+            if items:
+                return items
+        except Exception as e:
+            logging.warning(f"⚠️ bot 媒体拉取失败 ({bot_username}): {e}")
+    return []
 
 
 def _trim_keyword(value: str) -> str:
@@ -451,27 +573,71 @@ async def resolve_bot_media_from_message(
         logging.warning("⚠️ bot 媒体拉取需要 user 模式")
         return []
     raw_text = message.raw_text or message.text or ""
-    text_links = _extract_tme_links(raw_text)
-    entity_links = _extract_tme_links_from_entities(message)
-    text_links = _filter_tme_links(text_links + entity_links, forward)
+    collected = await _collect_from_start_links(
+        client,
+        _parse_start_links_from_text(raw_text, forward),
+        forward,
+    )
+    if collected:
+        return collected
+
+    disc_msg = None
+    comments: List[Message] = []
+    if getattr(message, "post", False):
+        disc_msg, comments = await _collect_discussion_comments(client, message.chat_id, message.id)
+    if comments:
+        comment_text_links = []
+        for comment in comments:
+            comment_text_links.extend(
+                _parse_start_links_from_text(comment.raw_text or comment.text or "", forward)
+            )
+        collected = await _collect_from_start_links(client, comment_text_links, forward)
+        if collected:
+            return collected
+
+        comment_button_links = []
+        for comment in comments:
+            comment_button_links.extend(_extract_start_links_from_markup(comment.reply_markup, forward))
+        collected = await _collect_from_start_links(client, comment_button_links, forward)
+        if collected:
+            return collected
+
+        comment_keyword_enabled = getattr(
+            CONFIG.bot_media, "comment_keyword_from_comments_enabled", True
+        )
+        if forward is not None and forward.comment_keyword_from_comments_enabled is not None:
+            comment_keyword_enabled = forward.comment_keyword_from_comments_enabled
+        if comment_keyword_enabled and disc_msg is not None:
+            keyword = _find_common_comment_keyword(comments)
+            if keyword:
+                keyword_links = await _collect_start_links_from_keyword_reply(
+                    client, disc_msg, keyword, forward
+                )
+                collected = await _collect_from_start_links(client, keyword_links, forward)
+                if collected:
+                    return collected
+
+        comment_entity_links = []
+        for comment in comments:
+            comment_entity_links.extend(_parse_start_links_from_entities(comment, forward))
+        collected = await _collect_from_start_links(client, comment_entity_links, forward)
+        if collected:
+            return collected
+
+    message_tail_links = []
+    message_tail_links.extend(_parse_start_links_from_entities(message, forward))
+    message_tail_links.extend(_extract_start_links_from_markup(message.reply_markup, forward))
+    collected = await _collect_from_start_links(client, message_tail_links, forward)
+    if collected:
+        return collected
+
     found = []
-    for link in text_links:
-        parsed = _parse_tme_start_link(link)
-        if parsed:
-            found.append(parsed)
+    found.extend(_parse_start_links_from_text(raw_text, forward))
+    found.extend(_parse_start_links_from_entities(message, forward))
     found.extend(_extract_start_links_from_markup(message.reply_markup, forward))
     if found:
         logging.info(f"🤖 bot 直链命中: {found}")
     collected: List[Message] = []
-    for bot_username, start_param in found:
-        try:
-            items = await _start_bot_and_collect_album(client, bot_username, start_param, forward=forward)
-            if items:
-                collected.extend(items)
-        except Exception as e:
-            logging.warning(f"⚠️ bot 媒体拉取失败 ({bot_username}): {e}")
-    if collected:
-        return collected
     keyword_trigger_enabled = CONFIG.bot_media.enable_keyword_trigger
     if forward is not None and forward.bot_media_keyword_trigger_enabled is not None:
         keyword_trigger_enabled = forward.bot_media_keyword_trigger_enabled
@@ -496,16 +662,11 @@ async def resolve_bot_media_from_message(
             responses = await _collect_new_messages(client, bot, last_id, CONFIG.bot_media.wait_timeout)
             logging.info(f"🤖 bot 关键字响应: @{bot_username} count={len(responses)}")
             for msg in responses:
-                new_links = _filter_tme_links(
-                    _extract_tme_links(msg.raw_text or msg.text or ""),
-                    forward,
-                )
+                new_links = _parse_start_links_from_text(msg.raw_text or msg.text or "", forward)
                 for link in new_links:
-                    parsed = _parse_tme_start_link(link)
-                    if parsed:
-                        items = await _start_bot_and_collect_album(client, parsed[0], parsed[1], forward=forward)
-                        if items:
-                            collected.extend(items)
+                    items = await _start_bot_and_collect_album(client, link[0], link[1], forward=forward)
+                    if items:
+                        collected.extend(items)
             if collected:
                 break
         except Exception as e:
