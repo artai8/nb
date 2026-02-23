@@ -482,26 +482,34 @@ async def _setup_comment_listeners(client: TelegramClient) -> Dict[int, int]:
     for forward in CONFIG.forwards:
         if not forward.use_this or not forward.comments.enabled:
             continue
-        src = forward.source
-        if not isinstance(src, int):
-            try:
-                src = await config.get_id(client, forward.source)
-            except Exception:
-                continue
+        sources = config.get_forward_sources(forward)
+        if not sources:
+            continue
+        for source in sources:
+            src = source
+            if not isinstance(src, int):
+                try:
+                    src = await config.get_id(client, source)
+                except Exception:
+                    continue
 
-        if forward.comments.source_mode == "discussion":
-            dg = forward.comments.source_discussion_group
-            if dg is None: continue
-            if not isinstance(dg, int):
-                try: dg = await config.get_id(client, dg)
-                except Exception: continue
-            comment_sources[dg] = src
-            comment_forward_map[dg] = forward
-        else:
-            dg_id = await get_discussion_group_id(client, src)
-            if dg_id is None: continue
-            comment_sources[dg_id] = src
-            comment_forward_map[dg_id] = forward
+            if forward.comments.source_mode == "discussion":
+                dg = forward.comments.source_discussion_group
+                if dg is None:
+                    continue
+                if not isinstance(dg, int):
+                    try:
+                        dg = await config.get_id(client, dg)
+                    except Exception:
+                        continue
+                comment_sources[dg] = src
+                comment_forward_map[dg] = forward
+            else:
+                dg_id = await get_discussion_group_id(client, src)
+                if dg_id is None:
+                    continue
+                comment_sources[dg_id] = src
+                comment_forward_map[dg_id] = forward
 
     return comment_sources, comment_forward_map
 
