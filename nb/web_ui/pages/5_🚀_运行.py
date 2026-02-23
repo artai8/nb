@@ -10,7 +10,11 @@ import html
 
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    def st_autorefresh(*args, **kwargs):
+        return None
 from nb.config import CONFIG, read_config, write_config
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import switch_theme
