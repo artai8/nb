@@ -10,6 +10,7 @@ import html
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 from nb.config import CONFIG, read_config, write_config
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import switch_theme
@@ -263,34 +264,7 @@ if check_password(st):
 
     # --- Terminal Log ---
     st.write("")
-    
-    # 按钮与刷新设置行
-    c_act1, c_act2, c_act3, c_act4 = st.columns([1, 1, 1, 1])
-    
-    with c_act1:
-        if st.button("🔄 刷新日志", use_container_width=True):
-            rerun()
-
-    with c_act2:
-        refresh_interval = st.selectbox(
-            "间隔 (秒)",
-            [1, 2, 3, 5, 10],
-            index=1,
-            label_visibility="collapsed",
-            disabled=False,
-        )
-
-    with c_act3:
-        # 显示“刷新间隔 (秒)”文本
-        st.markdown("""
-        <div style="display: flex; align-items: center; height: 100%; padding-top: 5px;">
-            <span style="font-size: 0.9em; opacity: 0.8;">刷新间隔 (秒)</span>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c_act4:
-        st.write("") # Spacer to align vertically if needed
-        auto_refresh = st.toggle("自动刷新", value=False)
+    st_autorefresh(interval=1000, key="log_autorefresh", debounce=True)
 
     log_content = "暂无日志。"
     if os.path.exists(LOG_FILE):
@@ -318,6 +292,3 @@ if check_password(st):
         height=420,
         scrolling=False
     )
-    if auto_refresh:
-        time.sleep(refresh_interval)
-        rerun()
