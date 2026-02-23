@@ -546,199 +546,230 @@ async def forward_job() -> None:
     async with TelegramClient(SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH) as client:
         config.from_to = await config.load_from_to(client, CONFIG.forwards)
 
-        for from_to, forward in zip(config.from_to.items(), CONFIG.forwards):
-            src, dest = from_to
-            last_id = 0
-            grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
-            prev_grouped_id: Optional[int] = None
+        for forward in CONFIG.forwards:
+            if not forward.use_this:
+                continue
+            sources = config.get_forward_sources(forward)
+            if not sources:
+                continue
+            dest = []
+            for d in forward.dest:
+                dest_resolved = d
+                if not isinstance(dest_resolved, int):
+                    try:
+                        dest_resolved = await config.get_id(client, d)
+                    except Exception:
+                        continue
+                dest.append(dest_resolved)
+            if not dest:
+                continue
 
-            async for message in client.iter_messages(src, reverse=True, offset_id=forward.offset):
-                if isinstance(message, MessageService):
-                    continue
+            for source in sources:
+                src = source
+                if not isinstance(src, int):
+                    try:
+                        src = await config.get_id(client, source)
+                    except Exception:
+                        continue
+                offset_key = str(src)
+                last_id = 0
+                grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
+                prev_grouped_id: Optional[int] = None
+                start_offset = forward.offsets.get(offset_key, forward.offset)
 
-                if forward.end and message.id > forward.end:
-                    logging.info(f"📍 到达 end={forward.end}, 停止")
-                    break
-
-                try:
-                    current_grouped_id = message.grouped_id
-
-                    if grouped_buffer and (
-                        current_grouped_id is None
-                        or (current_grouped_id is not None
-                            and current_grouped_id not in grouped_buffer)
-                    ):
-                        try:
-                            flushed_last = await _flush_grouped_buffer(
-                                client, src, dest, grouped_buffer, forward
-                            )
-                            if flushed_last:
-                                last_id = max(last_id, flushed_last)
-                        except FloodWaitError as fwe:
-                            logging.warning(f"⛔ FloodWait (组刷新): {fwe.seconds} 秒")
-                            await asyncio.sleep(fwe.seconds)
-                            flushed_last = await _flush_grouped_buffer(
-                                client, src, dest, grouped_buffer, forward
-                            )
-                            if flushed_last:
-                                last_id = max(last_id, flushed_last)
-
-                    if current_grouped_id is not None:
-                        grouped_buffer[current_grouped_id].append(message)
-                        prev_grouped_id = current_grouped_id
+                async for message in client.iter_messages(src, reverse=True, offset_id=start_offset):
+                    if isinstance(message, MessageService):
                         continue
 
-                    prev_grouped_id = None
+                    if forward.end and message.id > forward.end:
+                        logging.info(f"📍 到达 end={forward.end}, 停止")
+                        break
 
-                    bot_media = []
-                    bot_media_allowed = _bot_media_allowed(forward)
-                    auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
-                    if bot_media_allowed and auto_comment_allowed:
-                        keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
-                        if keyword:
-                            await _auto_comment_keyword(client, src, message.id, keyword)
+                    try:
+                        current_grouped_id = message.grouped_id
 
-                    comment_bot_media = await _collect_bot_media_from_comments(client, src, message.id, forward)
-                    if comment_bot_media:
-                        combined_messages = [message] + comment_bot_media
-                        tms = await apply_plugins_to_group(combined_messages)
-                        if tms:
-                            event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
-                            st.stored[event_uid] = {}
-                            for d in dest:
-                                reply_to_id = None
-                                if message.is_reply:
-                                    reply_msg_id = _get_reply_to_msg_id(message)
-                                    if reply_msg_id is not None:
-                                        r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                        r_event_uid = st.EventUid(r_event)
-                                        if r_event_uid in st.stored:
-                                            fwded_reply = st.stored[r_event_uid].get(d)
-                                            if fwded_reply is not None:
-                                                if isinstance(fwded_reply, int):
-                                                    reply_to_id = fwded_reply
-                                                elif hasattr(fwded_reply, 'id'):
-                                                    reply_to_id = fwded_reply.id
-                                try:
-                                    tms[0].reply_to = reply_to_id
-                                    fwded_msg = await send_message(
-                                        d,
-                                        tms[0],
-                                        grouped_messages=[tm.message for tm in tms],
-                                        grouped_tms=tms,
-                                    )
-                                    if fwded_msg is not None:
-                                        st.stored[event_uid][d] = fwded_msg
-                                        fwded_id = _extract_msg_id(fwded_msg)
-                                        if fwded_id is not None:
-                                            st.add_post_mapping(src, message.id, d, fwded_id)
-                                except Exception as e:
-                                    logging.error(f"❌ 合并媒体发送失败: {e}")
-                            for tm in tms:
+                        if grouped_buffer and (
+                            current_grouped_id is None
+                            or (current_grouped_id is not None
+                                and current_grouped_id not in grouped_buffer)
+                        ):
+                            try:
+                                flushed_last = await _flush_grouped_buffer(
+                                    client, src, dest, grouped_buffer, forward
+                                )
+                                if flushed_last:
+                                    last_id = max(last_id, flushed_last)
+                            except FloodWaitError as fwe:
+                                logging.warning(f"⛔ FloodWait (组刷新): {fwe.seconds} 秒")
+                                await asyncio.sleep(fwe.seconds)
+                                flushed_last = await _flush_grouped_buffer(
+                                    client, src, dest, grouped_buffer, forward
+                                )
+                                if flushed_last:
+                                    last_id = max(last_id, flushed_last)
+
+                        if current_grouped_id is not None:
+                            grouped_buffer[current_grouped_id].append(message)
+                            prev_grouped_id = current_grouped_id
+                            continue
+
+                        prev_grouped_id = None
+
+                        bot_media = []
+                        bot_media_allowed = _bot_media_allowed(forward)
+                        auto_comment_allowed = (forward is None or forward.auto_comment_trigger_enabled is not False)
+                        if bot_media_allowed and auto_comment_allowed:
+                            keyword = _extract_comment_keyword(message.raw_text or message.text or "", forward)
+                            if keyword:
+                                await _auto_comment_keyword(client, src, message.id, keyword)
+
+                        comment_bot_media = await _collect_bot_media_from_comments(client, src, message.id, forward)
+                        if comment_bot_media:
+                            combined_messages = [message] + comment_bot_media
+                            tms = await apply_plugins_to_group(combined_messages)
+                            if tms:
+                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
+                                st.stored[event_uid] = {}
+                                for d in dest:
+                                    reply_to_id = None
+                                    if message.is_reply:
+                                        reply_msg_id = _get_reply_to_msg_id(message)
+                                        if reply_msg_id is not None:
+                                            r_event = st.DummyEvent(message.chat_id, reply_msg_id)
+                                            r_event_uid = st.EventUid(r_event)
+                                            if r_event_uid in st.stored:
+                                                fwded_reply = st.stored[r_event_uid].get(d)
+                                                if fwded_reply is not None:
+                                                    if isinstance(fwded_reply, int):
+                                                        reply_to_id = fwded_reply
+                                                    elif hasattr(fwded_reply, 'id'):
+                                                        reply_to_id = fwded_reply.id
+                                    try:
+                                        tms[0].reply_to = reply_to_id
+                                        fwded_msg = await send_message(
+                                            d,
+                                            tms[0],
+                                            grouped_messages=[tm.message for tm in tms],
+                                            grouped_tms=tms,
+                                        )
+                                        if fwded_msg is not None:
+                                            st.stored[event_uid][d] = fwded_msg
+                                            fwded_id = _extract_msg_id(fwded_msg)
+                                            if fwded_id is not None:
+                                                st.add_post_mapping(src, message.id, d, fwded_id)
+                                    except Exception as e:
+                                        logging.error(f"❌ 合并媒体发送失败: {e}")
+                                for tm in tms:
+                                    tm.clear()
+                            else:
+                                logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
+                            last_id = message.id
+                            forward.offsets[offset_key] = last_id
+                            if len(sources) == 1:
+                                forward.offset = last_id
+                            write_config(CONFIG, persist=False)
+                        else:
+                            if bot_media_allowed:
+                                bot_media = await resolve_bot_media_from_message(client, message, forward)
+                            if bot_media:
+                                bot_media = _dedupe_messages(bot_media)
+                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
+                                st.stored[event_uid] = {}
+                                for d in dest:
+                                    reply_to_id = None
+                                    if message.is_reply:
+                                        reply_msg_id = _get_reply_to_msg_id(message)
+                                        if reply_msg_id is not None:
+                                            r_event = st.DummyEvent(message.chat_id, reply_msg_id)
+                                            r_event_uid = st.EventUid(r_event)
+                                            if r_event_uid in st.stored:
+                                                fwded_reply = st.stored[r_event_uid].get(d)
+                                                if fwded_reply is not None:
+                                                    if isinstance(fwded_reply, int):
+                                                        reply_to_id = fwded_reply
+                                                    elif hasattr(fwded_reply, 'id'):
+                                                        reply_to_id = fwded_reply.id
+                                    try:
+                                        fwded_msg = await _send_bot_media_album(
+                                            d,
+                                            bot_media,
+                                            base_text=message.raw_text or message.text or "",
+                                            reply_to=reply_to_id,
+                                        )
+                                        if fwded_msg is not None:
+                                            st.stored[event_uid][d] = fwded_msg
+                                            fwded_id = _extract_msg_id(fwded_msg)
+                                            if fwded_id is not None:
+                                                st.add_post_mapping(src, message.id, d, fwded_id)
+                                    except Exception as e:
+                                        logging.error(f"❌ bot 媒体发送失败: {e}")
+                                last_id = message.id
+                                forward.offsets[offset_key] = last_id
+                                if len(sources) == 1:
+                                    forward.offset = last_id
+                                write_config(CONFIG, persist=False)
+                            else:
+                                tm = await apply_plugins(message)
+                                if not tm:
+                                    continue
+
+                                event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
+                                st.stored[event_uid] = {}
+
+                                for d in dest:
+                                    reply_to_id = None
+                                    if message.is_reply:
+                                        reply_msg_id = _get_reply_to_msg_id(message)
+                                        if reply_msg_id is not None:
+                                            r_event = st.DummyEvent(message.chat_id, reply_msg_id)
+                                            r_event_uid = st.EventUid(r_event)
+                                            if r_event_uid in st.stored:
+                                                fwded_reply = st.stored[r_event_uid].get(d)
+                                                if fwded_reply is not None:
+                                                    if isinstance(fwded_reply, int):
+                                                        reply_to_id = fwded_reply
+                                                    elif hasattr(fwded_reply, 'id'):
+                                                        reply_to_id = fwded_reply.id
+                                    tm.reply_to = reply_to_id
+
+                                    try:
+                                        fwded_msg = await send_message(d, tm)
+                                        if fwded_msg is not None:
+                                            st.stored[event_uid][d] = fwded_msg
+                                            fwded_id = _extract_msg_id(fwded_msg)
+                                            if fwded_id is not None:
+                                                st.add_post_mapping(src, message.id, d, fwded_id)
+                                        else:
+                                            logging.warning(f"⚠️ 发送返回 None, dest={d}, msg={message.id}")
+                                    except Exception as e:
+                                        logging.error(f"❌ 单条发送失败: {e}")
+
                                 tm.clear()
-                        else:
-                            logging.warning("⚠️ 合并媒体组全部被插件过滤，跳过")
-                        last_id = message.id
-                        forward.offset = last_id
-                        write_config(CONFIG, persist=False)
-                    else:
-                        if bot_media_allowed:
-                            bot_media = await resolve_bot_media_from_message(client, message, forward)
-                        if bot_media:
-                            bot_media = _dedupe_messages(bot_media)
-                            event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
-                            st.stored[event_uid] = {}
-                            for d in dest:
-                                reply_to_id = None
-                                if message.is_reply:
-                                    reply_msg_id = _get_reply_to_msg_id(message)
-                                    if reply_msg_id is not None:
-                                        r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                        r_event_uid = st.EventUid(r_event)
-                                        if r_event_uid in st.stored:
-                                            fwded_reply = st.stored[r_event_uid].get(d)
-                                            if fwded_reply is not None:
-                                                if isinstance(fwded_reply, int):
-                                                    reply_to_id = fwded_reply
-                                                elif hasattr(fwded_reply, 'id'):
-                                                    reply_to_id = fwded_reply.id
-                                try:
-                                    fwded_msg = await _send_bot_media_album(
-                                        d,
-                                        bot_media,
-                                        base_text=message.raw_text or message.text or "",
-                                        reply_to=reply_to_id,
-                                    )
-                                    if fwded_msg is not None:
-                                        st.stored[event_uid][d] = fwded_msg
-                                        fwded_id = _extract_msg_id(fwded_msg)
-                                        if fwded_id is not None:
-                                            st.add_post_mapping(src, message.id, d, fwded_id)
-                                except Exception as e:
-                                    logging.error(f"❌ bot 媒体发送失败: {e}")
-                            last_id = message.id
-                            forward.offset = last_id
-                            write_config(CONFIG, persist=False)
-                        else:
-                            tm = await apply_plugins(message)
-                            if not tm:
-                                continue
+                                last_id = message.id
+                                forward.offsets[offset_key] = last_id
+                                if len(sources) == 1:
+                                    forward.offset = last_id
+                                write_config(CONFIG, persist=False)
 
-                            event_uid = st.EventUid(st.DummyEvent(message.chat_id, message.id))
-                            st.stored[event_uid] = {}
+                        if forward.comments.enabled:
+                            try:
+                                await _forward_comments_for_post(client, src, message.id, forward)
+                            except Exception as e:
+                                logging.error(f"❌ 帖子 {message.id} 评论转发失败: {e}")
 
-                            for d in dest:
-                                reply_to_id = None
-                                if message.is_reply:
-                                    reply_msg_id = _get_reply_to_msg_id(message)
-                                    if reply_msg_id is not None:
-                                        r_event = st.DummyEvent(message.chat_id, reply_msg_id)
-                                        r_event_uid = st.EventUid(r_event)
-                                        if r_event_uid in st.stored:
-                                            fwded_reply = st.stored[r_event_uid].get(d)
-                                            if fwded_reply is not None:
-                                                if isinstance(fwded_reply, int):
-                                                    reply_to_id = fwded_reply
-                                                elif hasattr(fwded_reply, 'id'):
-                                                    reply_to_id = fwded_reply.id
-                                tm.reply_to = reply_to_id
+                        delay_seconds = random.randint(60, 300)
+                        logging.info(f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})")
+                        await asyncio.sleep(delay_seconds)
 
-                                try:
-                                    fwded_msg = await send_message(d, tm)
-                                    if fwded_msg is not None:
-                                        st.stored[event_uid][d] = fwded_msg
-                                        fwded_id = _extract_msg_id(fwded_msg)
-                                        if fwded_id is not None:
-                                            st.add_post_mapping(src, message.id, d, fwded_id)
-                                    else:
-                                        logging.warning(f"⚠️ 发送返回 None, dest={d}, msg={message.id}")
-                                except Exception as e:
-                                    logging.error(f"❌ 单条发送失败: {e}")
+                    except FloodWaitError as fwe:
+                        logging.warning(f"⛔ FloodWait: {fwe.seconds} 秒")
+                        await asyncio.sleep(fwe.seconds)
+                    except Exception as err:
+                        logging.exception(err)
 
-                            tm.clear()
-                            last_id = message.id
-                            forward.offset = last_id
-                            write_config(CONFIG, persist=False)
-
-                    if forward.comments.enabled:
-                        try:
-                            await _forward_comments_for_post(client, src, message.id, forward)
-                        except Exception as e:
-                            logging.error(f"❌ 帖子 {message.id} 评论转发失败: {e}")
-
-                    delay_seconds = random.randint(60, 300)
-                    logging.info(f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})")
-                    await asyncio.sleep(delay_seconds)
-
-                except FloodWaitError as fwe:
-                    logging.warning(f"⛔ FloodWait: {fwe.seconds} 秒")
-                    await asyncio.sleep(fwe.seconds)
-                except Exception as err:
-                    logging.exception(err)
-
-            if grouped_buffer:
-                logging.info(f"📦 刷新剩余 {len(grouped_buffer)} 个媒体组")
-                try:
-                    await _flush_grouped_buffer(client, src, dest, grouped_buffer, forward)
-                except Exception as e:
-                    logging.exception(f"🚨 刷新剩余组失败: {e}")
+                if grouped_buffer:
+                    logging.info(f"📦 刷新剩余 {len(grouped_buffer)} 个媒体组")
+                    try:
+                        await _flush_grouped_buffer(client, src, dest, grouped_buffer, forward)
+                    except Exception as e:
+                        logging.exception(f"🚨 刷新剩余组失败: {e}")
