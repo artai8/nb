@@ -7,13 +7,10 @@ from urllib.parse import urlparse, parse_qs
 import os
 import sys
 import platform
-
-def platform_info():
-    return f"{platform.system()} {platform.release()}"
-
+import tempfile
 import random
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union, Tuple
 
 from telethon.client import TelegramClient
 from telethon.hints import EntityLike
@@ -24,7 +21,6 @@ from telethon.tl.types import (
     InputPhoto,
     InputDocument,
     InputSingleMedia,
-    # ✅ 必须引入 InputReplyToMessage 以兼容 Telethon 1.34+
     InputReplyToMessage,
     MessageMediaPhoto,
     MessageMediaDocument,
@@ -34,6 +30,12 @@ from telethon.tl.types import (
     MessageEntityTextUrl,
     MessageEntityUrl,
     MessageService,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityStrike,
+    MessageEntityUnderline,
 )
 from telethon.errors.rpcerrorlist import MsgIdInvalidError
 from telethon.tl.functions.messages import (
@@ -53,6 +55,23 @@ if TYPE_CHECKING:
 
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 5
+
+# 下载临时目录
+_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "nb_downloads")
+os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
+
+
+# =====================================================================
+#  平台信息（只保留一个定义）
+# =====================================================================
+
+def platform_info():
+    nl = "\n"
+    return f"""Running nb {__version__}\
+    \nPython {sys.version.replace(nl, "")}\
+    \nOS {os.name}\
+    \nPlatform {platform.system()} {platform.release()}\
+    \n{platform.architecture()} {platform.processor()}"""
 
 
 # =====================================================================
@@ -79,7 +98,7 @@ def _get_reply_to_top_id(message) -> Optional[int]:
 
 def _make_reply_to(msg_id: Optional[int]):
     """
-    ✅ 核心修复：构造 reply_to 参数
+    构造 reply_to 参数
     Telethon 1.34+ 底层 API 要求使用 InputReplyToMessage
     """
     if msg_id is None:
@@ -89,6 +108,10 @@ def _make_reply_to(msg_id: Optional[int]):
     except Exception:
         return msg_id
 
+
+# =====================================================================
+#  讨论区 / 评论辅助
+# =====================================================================
 
 async def get_discussion_message(
     client: TelegramClient,
@@ -123,6 +146,10 @@ async def get_discussion_group_id(
     return None
 
 
+# =====================================================================
+#  链接提取 / 解析
+# =====================================================================
+
 def _extract_tme_links(text: str) -> List[str]:
     if not text:
         return []
@@ -142,7 +169,7 @@ def _extract_tme_links_from_entities(message: Message) -> List[str]:
                 links.append(ent.url)
         elif isinstance(ent, MessageEntityUrl):
             if text:
-                url = text[ent.offset : ent.offset + ent.length]
+                url = text[ent.offset: ent.offset + ent.length]
                 if url:
                     links.append(url)
     return links
@@ -224,6 +251,10 @@ def _parse_start_links_from_entities(message: Message, forward=None) -> List[tup
             found.append(parsed)
     return found
 
+
+# =====================================================================
+#  评论区收集
+# =====================================================================
 
 async def _collect_discussion_comments(
     client: TelegramClient,
@@ -338,10 +369,14 @@ async def _collect_from_start_links(
     return []
 
 
+# =====================================================================
+#  配置辅助
+# =====================================================================
+
 def _trim_keyword(value: str) -> str:
     if not value:
         return value
-    return value.strip().strip(" \"'“”‘’()（）[]【】{}<>《》")
+    return value.strip().strip(" \"'""''()（）[]【】{}<>《》")
 
 
 def _get_bot_media_value(forward, name: str, default: str = "") -> str:
@@ -453,6 +488,10 @@ def _find_next_callback_button(reply_markup, forward=None) -> Optional[KeyboardB
     return None
 
 
+# =====================================================================
+#  自动评论
+# =====================================================================
+
 async def _auto_comment_keyword(
     client: TelegramClient,
     channel_id: Union[int, str],
@@ -472,6 +511,10 @@ async def _auto_comment_keyword(
         return False
 
 
+# =====================================================================
+#  消息轮询收集（修复 Bug7：更新 min_id 提升效率）
+# =====================================================================
+
 async def _collect_new_messages(
     client: TelegramClient,
     peer,
@@ -481,14 +524,18 @@ async def _collect_new_messages(
     start = asyncio.get_running_loop().time()
     seen = set()
     collected: List[Message] = []
+    current_min_id = min_id
     while True:
         new_found = False
-        async for msg in client.iter_messages(peer, min_id=min_id, reverse=True):
+        async for msg in client.iter_messages(peer, min_id=current_min_id, reverse=True):
             if msg.id in seen:
                 continue
             seen.add(msg.id)
             collected.append(msg)
             new_found = True
+            # 更新 min_id 避免重复扫描已处理的消息
+            if msg.id > current_min_id:
+                current_min_id = msg.id
         if collected and not new_found:
             break
         if asyncio.get_running_loop().time() - start >= timeout:
@@ -497,13 +544,19 @@ async def _collect_new_messages(
     return collected
 
 
+# =====================================================================
+#  Bot 媒体组收集（修复 Bug2：增大扫描范围、补全缺失视频）
+# =====================================================================
+
 async def _get_grouped_messages_from_bot(
     client: TelegramClient,
     bot,
     grouped_id: int,
 ) -> List[Message]:
     result = []
-    async for msg in client.iter_messages(bot, limit=CONFIG.bot_media.recent_limit):
+    # 增大扫描范围，避免相册消息被截断
+    scan_limit = max(getattr(CONFIG.bot_media, 'recent_limit', 50), 100)
+    async for msg in client.iter_messages(bot, limit=scan_limit):
         if msg.grouped_id == grouped_id:
             result.append(msg)
     result.sort(key=lambda m: m.id)
@@ -524,7 +577,10 @@ async def _start_bot_and_collect_album(
         max_pages = 0
     if wait_timeout is None:
         wait_timeout = CONFIG.bot_media.wait_timeout
-    logging.info(f"🤖 bot 拉取开始: @{bot_username} start={start_param} pages={max_pages} timeout={wait_timeout}")
+    logging.info(
+        f"🤖 bot 拉取开始: @{bot_username} start={start_param} "
+        f"pages={max_pages} timeout={wait_timeout}"
+    )
     bot = await client.get_entity(bot_username)
     latest = await client.get_messages(bot, limit=1)
     last_id = latest[0].id if latest else 0
@@ -539,20 +595,31 @@ async def _start_bot_and_collect_album(
             logging.info(f"🤖 bot 拉取结束: @{bot_username} 无新消息")
             break
         last_id = max(m.id for m in new_msgs)
-        logging.info(f"🤖 bot 新消息: @{bot_username} count={len(new_msgs)} last_id={last_id}")
+        logging.info(
+            f"🤖 bot 新消息: @{bot_username} count={len(new_msgs)} last_id={last_id}"
+        )
         for msg in new_msgs:
             if msg.grouped_id:
                 if msg.grouped_id in seen_grouped:
+                    # 即使 grouped_id 已见过，仍然把此条消息加入（补全相册）
+                    if msg.id not in seen_ids and _msg_has_media(msg):
+                        collected.append(msg)
+                        seen_ids.add(msg.id)
                     continue
                 grouped = await _get_grouped_messages_from_bot(client, bot, msg.grouped_id)
                 if grouped:
                     for gmsg in grouped:
-                        if gmsg.media and gmsg.id not in seen_ids:
+                        if _msg_has_media(gmsg) and gmsg.id not in seen_ids:
                             collected.append(gmsg)
                             seen_ids.add(gmsg.id)
                 seen_grouped.add(msg.grouped_id)
             else:
-                if msg.media and msg.id not in seen_ids:
+                if _msg_has_media(msg) and msg.id not in seen_ids:
+                    collected.append(msg)
+                    seen_ids.add(msg.id)
+                # 修复 Bug2：即使没有传统 media，也收集含文本的消息
+                # （某些 bot 会先发文本说明再发媒体）
+                elif msg.web_page and msg.id not in seen_ids:
                     collected.append(msg)
                     seen_ids.add(msg.id)
         next_btn = None
@@ -565,7 +632,9 @@ async def _start_bot_and_collect_album(
         if next_btn and next_msg:
             try:
                 logging.info(f"🤖 bot 翻页: @{bot_username} msg_id={next_msg.id}")
-                await client(GetBotCallbackAnswerRequest(peer=bot, msg_id=next_msg.id, data=next_btn.data))
+                await client(GetBotCallbackAnswerRequest(
+                    peer=bot, msg_id=next_msg.id, data=next_btn.data
+                ))
                 pages += 1
                 continue
             except Exception:
@@ -576,6 +645,22 @@ async def _start_bot_and_collect_album(
     logging.info(f"🤖 bot 拉取完成: @{bot_username} collected={len(collected)}")
     return collected
 
+
+def _msg_has_media(msg: Message) -> bool:
+    """判断消息是否包含可转发的媒体（photo/video/gif/document/web_page 内嵌媒体）。"""
+    if msg.photo or msg.video or msg.gif or msg.document:
+        return True
+    # web_page 内嵌的视频/图片
+    web_page = getattr(msg, 'web_page', None)
+    if web_page is not None:
+        if getattr(web_page, 'document', None) or getattr(web_page, 'photo', None):
+            return True
+    return False
+
+
+# =====================================================================
+#  bot 媒体解析入口
+# =====================================================================
 
 async def resolve_bot_media_from_message(
     client: TelegramClient,
@@ -597,12 +682,16 @@ async def resolve_bot_media_from_message(
     disc_msg = None
     comments: List[Message] = []
     if getattr(message, "post", False):
-        disc_msg, comments = await _collect_discussion_comments(client, message.chat_id, message.id)
+        disc_msg, comments = await _collect_discussion_comments(
+            client, message.chat_id, message.id
+        )
     if comments:
         comment_text_links = []
         for comment in comments:
             comment_text_links.extend(
-                _parse_start_links_from_text(comment.raw_text or comment.text or "", forward)
+                _parse_start_links_from_text(
+                    comment.raw_text or comment.text or "", forward
+                )
             )
         collected = await _collect_from_start_links(client, comment_text_links, forward)
         if collected:
@@ -610,7 +699,9 @@ async def resolve_bot_media_from_message(
 
         comment_button_links = []
         for comment in comments:
-            comment_button_links.extend(_extract_start_links_from_markup(comment.reply_markup, forward))
+            comment_button_links.extend(
+                _extract_start_links_from_markup(comment.reply_markup, forward)
+            )
         collected = await _collect_from_start_links(client, comment_button_links, forward)
         if collected:
             return collected
@@ -626,20 +717,26 @@ async def resolve_bot_media_from_message(
                 keyword_links = await _collect_start_links_from_keyword_reply(
                     client, disc_msg, keyword, forward
                 )
-                collected = await _collect_from_start_links(client, keyword_links, forward)
+                collected = await _collect_from_start_links(
+                    client, keyword_links, forward
+                )
                 if collected:
                     return collected
 
         comment_entity_links = []
         for comment in comments:
-            comment_entity_links.extend(_parse_start_links_from_entities(comment, forward))
+            comment_entity_links.extend(
+                _parse_start_links_from_entities(comment, forward)
+            )
         collected = await _collect_from_start_links(client, comment_entity_links, forward)
         if collected:
             return collected
 
     message_tail_links = []
     message_tail_links.extend(_parse_start_links_from_entities(message, forward))
-    message_tail_links.extend(_extract_start_links_from_markup(message.reply_markup, forward))
+    message_tail_links.extend(
+        _extract_start_links_from_markup(message.reply_markup, forward)
+    )
     collected = await _collect_from_start_links(client, message_tail_links, forward)
     if collected:
         return collected
@@ -650,7 +747,7 @@ async def resolve_bot_media_from_message(
     found.extend(_extract_start_links_from_markup(message.reply_markup, forward))
     if found:
         logging.info(f"🤖 bot 直链命中: {found}")
-    collected: List[Message] = []
+
     keyword_trigger_enabled = CONFIG.bot_media.enable_keyword_trigger
     if forward is not None and forward.bot_media_keyword_trigger_enabled is not None:
         keyword_trigger_enabled = forward.bot_media_keyword_trigger_enabled
@@ -666,28 +763,41 @@ async def resolve_bot_media_from_message(
         logging.info("🤖 bot 关键字为空")
         return []
     logging.info(f"🤖 bot 关键字触发: @{bot_names[0]} keyword={keyword}")
+    collected_kw: List[Message] = []
     for bot_username in bot_names[:1]:
         try:
             bot = await client.get_entity(bot_username)
             latest = await client.get_messages(bot, limit=1)
             last_id = latest[0].id if latest else 0
             await client.send_message(bot, keyword)
-            responses = await _collect_new_messages(client, bot, last_id, CONFIG.bot_media.wait_timeout)
-            logging.info(f"🤖 bot 关键字响应: @{bot_username} count={len(responses)}")
+            responses = await _collect_new_messages(
+                client, bot, last_id, CONFIG.bot_media.wait_timeout
+            )
+            logging.info(
+                f"🤖 bot 关键字响应: @{bot_username} count={len(responses)}"
+            )
             for msg in responses:
-                new_links = _parse_start_links_from_text(msg.raw_text or msg.text or "", forward)
+                new_links = _parse_start_links_from_text(
+                    msg.raw_text or msg.text or "", forward
+                )
                 for link in new_links:
-                    items = await _start_bot_and_collect_album(client, link[0], link[1], forward=forward)
+                    items = await _start_bot_and_collect_album(
+                        client, link[0], link[1], forward=forward
+                    )
                     if items:
-                        collected.extend(items)
-            if collected:
+                        collected_kw.extend(items)
+            if collected_kw:
                 break
         except Exception as e:
             logging.warning(f"⚠️ bot 关键字请求失败 ({bot_username}): {e}")
-    if not collected:
+    if not collected_kw:
         logging.info("🤖 bot 拉取结束: collected=0")
-    return collected
+    return collected_kw
 
+
+# =====================================================================
+#  FloodWait / 错误检测
+# =====================================================================
 
 def _is_flood_wait(e: Exception) -> bool:
     return "FLOOD_WAIT" in str(e).upper() or "flood" in str(e).lower()
@@ -701,16 +811,91 @@ async def _handle_flood_wait(e: Exception) -> int:
     return wait_sec
 
 
+def _is_protected_chat_error(err: Exception) -> bool:
+    text = str(err).lower()
+    return "protected chat" in text or "you can't forward messages from a protected chat" in text
+
+
+# =====================================================================
+#  Spoiler 检测
+# =====================================================================
+
 def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
         return False
     return getattr(message.media, 'spoiler', False)
 
 
-def _is_protected_chat_error(err: Exception) -> bool:
-    text = str(err).lower()
-    return "protected chat" in text or "you can't forward messages from a protected chat" in text
+# =====================================================================
+#  文本 entities 解析辅助（修复 Bug4：保留格式化）
+# =====================================================================
 
+def _parse_caption_entities(text: str, parse_mode: str = "md"):
+    """
+    将带格式文本解析为 (纯文本, entities) 元组。
+    如果解析失败则返回 (原始文本, [])。
+    """
+    if not text:
+        return "", []
+    try:
+        from telethon.extensions import markdown, html
+        if parse_mode == "html":
+            return html.parse(text)
+        else:
+            return markdown.parse(text)
+    except Exception:
+        return text, []
+
+
+# =====================================================================
+#  安全下载媒体（修复 Bug5：使用临时目录）
+# =====================================================================
+
+async def _safe_download_media(message: Message) -> Optional[str]:
+    """安全下载消息中的媒体到临时目录，返回文件路径或 None。"""
+    try:
+        file = await message.download_media(file=_DOWNLOAD_DIR)
+        return file
+    except Exception as e:
+        logging.warning(f"⚠️ 媒体下载失败: {e}")
+        return None
+
+
+# =====================================================================
+#  构建 InputMedia（统一处理 photo/document）
+# =====================================================================
+
+def _build_input_media(media, spoiler: bool = False):
+    """
+    从 MessageMedia 构建 InputMediaPhoto 或 InputMediaDocument。
+    返回 None 如果不支持的类型。
+    """
+    if isinstance(media, MessageMediaPhoto) and media.photo:
+        photo = media.photo
+        return InputMediaPhoto(
+            id=InputPhoto(
+                id=photo.id,
+                access_hash=photo.access_hash,
+                file_reference=photo.file_reference,
+            ),
+            spoiler=spoiler,
+        )
+    elif isinstance(media, MessageMediaDocument) and media.document:
+        doc = media.document
+        return InputMediaDocument(
+            id=InputDocument(
+                id=doc.id,
+                access_hash=doc.access_hash,
+                file_reference=doc.file_reference,
+            ),
+            spoiler=spoiler,
+        )
+    return None
+
+
+# =====================================================================
+#  发送相册（下载后重新上传）—— 修复 Bug5/Bug10
+# =====================================================================
 
 async def _send_album_by_upload(
     client: TelegramClient,
@@ -721,15 +906,14 @@ async def _send_album_by_upload(
 ) -> Union[Message, List[Message], None]:
     files = []
     for msg in grouped_messages:
-        if msg.photo or msg.video or msg.gif or msg.document:
-            try:
-                file = await msg.download_media("")
-                if file:
-                    files.append(file)
-            except Exception as e:
-                logging.warning(f"⚠️ 媒体下载失败: {e}")
+        if _msg_has_media(msg):
+            file = await _safe_download_media(msg)
+            if file:
+                files.append(file)
     if not files:
-        return await client.send_message(recipient, caption or "空相册", reply_to=reply_to)
+        return await client.send_message(
+            recipient, caption or "空相册", reply_to=reply_to
+        )
     try:
         return await client.send_file(
             recipient, files,
@@ -744,6 +928,10 @@ async def _send_album_by_upload(
         cleanup(*files)
 
 
+# =====================================================================
+#  发送单条（下载后重新上传）
+# =====================================================================
+
 async def _send_single_by_upload(
     client: TelegramClient,
     recipient: EntityLike,
@@ -751,13 +939,11 @@ async def _send_single_by_upload(
     caption: Optional[str],
     reply_to: Optional[int],
 ) -> Union[Message, None]:
-    try:
-        file = await message.download_media("")
-    except Exception as e:
-        logging.warning(f"⚠️ 媒体下载失败: {e}")
-        file = None
+    file = await _safe_download_media(message)
     if not file:
-        return await client.send_message(recipient, caption or "", reply_to=reply_to)
+        return await client.send_message(
+            recipient, caption or "", reply_to=reply_to
+        )
     try:
         return await client.send_file(
             recipient, file,
@@ -772,6 +958,10 @@ async def _send_single_by_upload(
         cleanup(file)
 
 
+# =====================================================================
+#  Spoiler 单条发送
+# =====================================================================
+
 async def _send_single_with_spoiler(
     client: TelegramClient,
     recipient: EntityLike,
@@ -782,36 +972,21 @@ async def _send_single_with_spoiler(
     media = message.media
     peer = await client.get_input_entity(recipient)
 
-    if isinstance(media, MessageMediaPhoto) and media.photo:
-        photo = media.photo
-        input_media = InputMediaPhoto(
-            id=InputPhoto(
-                id=photo.id,
-                access_hash=photo.access_hash,
-                file_reference=photo.file_reference,
-            ),
-            spoiler=True,
-        )
-    elif isinstance(media, MessageMediaDocument) and media.document:
-        doc = media.document
-        input_media = InputMediaDocument(
-            id=InputDocument(
-                id=doc.id,
-                access_hash=doc.access_hash,
-                file_reference=doc.file_reference,
-            ),
-            spoiler=True,
-        )
-    else:
+    input_media = _build_input_media(media, spoiler=True)
+    if input_media is None:
         raise ValueError(f"不支持的媒体类型: {type(media)}")
 
-    # ✅ 修复：使用 _make_reply_to 处理
+    # 解析 caption 中的格式化 entities
+    msg_text, msg_entities = _parse_caption_entities(caption or "")
+
     kwargs = {
         'peer': peer,
         'media': input_media,
-        'message': caption or '',
-        'random_id': random.randrange(-2**63, 2**63),
+        'message': msg_text,
+        'random_id': random.randrange(-2 ** 63, 2 ** 63),
     }
+    if msg_entities:
+        kwargs['entities'] = msg_entities
     if reply_to is not None:
         kwargs['reply_to'] = _make_reply_to(reply_to)
 
@@ -823,6 +998,10 @@ async def _send_single_with_spoiler(
                 return update.message
     return result
 
+
+# =====================================================================
+#  Spoiler 相册发送（修复 Bug4：传入 entities；修复 Bug8：统一返回类型）
+# =====================================================================
 
 async def _send_album_with_spoiler(
     client: TelegramClient,
@@ -837,46 +1016,30 @@ async def _send_album_with_spoiler(
     for i, msg in enumerate(grouped_messages):
         media = msg.media
         is_spoiler = _has_spoiler(msg)
-        msg_text = caption if (i == 0 and caption) else ""
 
-        input_media = None
-
-        if isinstance(media, MessageMediaPhoto) and media.photo:
-            photo = media.photo
-            input_media = InputMediaPhoto(
-                id=InputPhoto(
-                    id=photo.id,
-                    access_hash=photo.access_hash,
-                    file_reference=photo.file_reference,
-                ),
-                spoiler=is_spoiler,
-            )
-        elif isinstance(media, MessageMediaDocument) and media.document:
-            doc = media.document
-            input_media = InputMediaDocument(
-                id=InputDocument(
-                    id=doc.id,
-                    access_hash=doc.access_hash,
-                    file_reference=doc.file_reference,
-                ),
-                spoiler=is_spoiler,
-            )
-
+        input_media = _build_input_media(media, spoiler=is_spoiler)
         if input_media is None:
             logging.warning(f"⚠️ 跳过无法识别的媒体类型: {type(media)}")
             continue
 
+        # 只有第一条消息携带 caption
+        if i == 0 and caption:
+            msg_text, msg_entities = _parse_caption_entities(caption)
+        else:
+            msg_text = ""
+            msg_entities = []
+
         single = InputSingleMedia(
             media=input_media,
-            random_id=random.randrange(-2**63, 2**63),
+            random_id=random.randrange(-2 ** 63, 2 ** 63),
             message=msg_text,
+            entities=msg_entities if msg_entities else [],
         )
         multi_media.append(single)
 
     if not multi_media:
         raise ValueError("没有有效的媒体可发送")
 
-    # ✅ 修复：使用 _make_reply_to 处理
     kwargs = {
         'peer': peer,
         'multi_media': multi_media,
@@ -886,14 +1049,89 @@ async def _send_album_with_spoiler(
 
     result = await client(SendMultiMediaRequest(**kwargs))
 
+    # 修复 Bug8：统一返回 List[Message]
     sent_messages = []
     if hasattr(result, 'updates'):
         for update in result.updates:
             if hasattr(update, 'message'):
                 sent_messages.append(update.message)
 
-    return sent_messages if sent_messages else result
+    if sent_messages:
+        return sent_messages
 
+    # 如果无法从 updates 中提取消息，返回空列表而非原始 result
+    logging.warning("⚠️ SendMultiMediaRequest 返回结果中未找到消息")
+    return []
+
+
+# =====================================================================
+#  统一相册发送（修复 Bug1：先尝试引用方式，失败后下载重传）
+# =====================================================================
+
+async def _send_album_via_input_media(
+    client: TelegramClient,
+    recipient: EntityLike,
+    grouped_messages: List[Message],
+    caption: Optional[str] = None,
+    reply_to: Optional[int] = None,
+) -> Optional[List[Message]]:
+    """
+    通过 InputMedia 引用方式发送相册（不下载文件）。
+    如果 file_reference 过期等原因失败，返回 None。
+    """
+    peer = await client.get_input_entity(recipient)
+    multi_media = []
+
+    for i, msg in enumerate(grouped_messages):
+        media = msg.media
+        if media is None:
+            continue
+        is_spoiler = _has_spoiler(msg)
+        input_media = _build_input_media(media, spoiler=is_spoiler)
+        if input_media is None:
+            logging.warning(f"⚠️ 跳过无法识别的媒体类型: {type(media)}")
+            continue
+
+        if i == 0 and caption:
+            msg_text, msg_entities = _parse_caption_entities(caption)
+        else:
+            msg_text = ""
+            msg_entities = []
+
+        single = InputSingleMedia(
+            media=input_media,
+            random_id=random.randrange(-2 ** 63, 2 ** 63),
+            message=msg_text,
+            entities=msg_entities if msg_entities else [],
+        )
+        multi_media.append(single)
+
+    if not multi_media:
+        return None
+
+    kwargs = {
+        'peer': peer,
+        'multi_media': multi_media,
+    }
+    if reply_to is not None:
+        kwargs['reply_to'] = _make_reply_to(reply_to)
+
+    try:
+        result = await client(SendMultiMediaRequest(**kwargs))
+        sent_messages = []
+        if hasattr(result, 'updates'):
+            for update in result.updates:
+                if hasattr(update, 'message'):
+                    sent_messages.append(update.message)
+        return sent_messages if sent_messages else []
+    except Exception as e:
+        logging.warning(f"⚠️ InputMedia 相册发送失败（可能 file_reference 过期）: {e}")
+        return None
+
+
+# =====================================================================
+#  辅助：获取下载用 client
+# =====================================================================
 
 def _get_download_client(tm: "NbMessage") -> TelegramClient:
     msg_client = getattr(tm.message, '_client', None) or getattr(tm.message, 'client', None)
@@ -902,14 +1140,9 @@ def _get_download_client(tm: "NbMessage") -> TelegramClient:
     return tm.client
 
 
-def platform_info():
-    nl = "\n"
-    return f"""Running nb {__version__}\
-    \nPython {sys.version.replace(nl,"")}\
-    \nOS {os.name}\
-    \nPlatform {platform.system()} {platform.release()}\
-    \n{platform.architecture()} {platform.processor()}"""
-
+# =====================================================================
+#  核心发送函数（修复所有已知 bug）
+# =====================================================================
 
 async def send_message(
     recipient: EntityLike,
@@ -922,7 +1155,9 @@ async def send_message(
     client: TelegramClient = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
 
+    # ================================================================
     # 1. 转发消息 (Show Forwarded From)
+    # ================================================================
     if CONFIG.show_forwarded_from:
         if grouped_messages:
             attempt = 0
@@ -930,7 +1165,7 @@ async def send_message(
             while attempt < MAX_RETRIES:
                 try:
                     result = await client.forward_messages(recipient, grouped_messages)
-                    logging.info(f"✅ 直接转发媒体组成功")
+                    logging.info("✅ 直接转发媒体组成功")
                     return result
                 except Exception as e:
                     if _is_protected_chat_error(e):
@@ -938,19 +1173,22 @@ async def send_message(
                             grouped_caption
                             if grouped_caption is not None
                             else "\n\n".join(
-                                [gtm.text.strip() for gtm in grouped_tms or [] if gtm.text and gtm.text.strip()]
+                                [
+                                    gtm.text.strip()
+                                    for gtm in grouped_tms or []
+                                    if gtm.text and gtm.text.strip()
+                                ]
                             )
                         )
                         logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
                         return await _send_album_by_upload(
-                            client,
-                            recipient,
-                            grouped_messages,
-                            combined_caption or None,
-                            effective_reply_to,
+                            client, recipient, grouped_messages,
+                            combined_caption or None, effective_reply_to,
                         )
-                    if _is_flood_wait(e): await _handle_flood_wait(e)
-                    else: logging.error(f"❌ 转发失败: {e}")
+                    if _is_flood_wait(e):
+                        await _handle_flood_wait(e)
+                    else:
+                        logging.error(f"❌ 转发失败: {e}")
                     attempt += 1
                     await asyncio.sleep(delay)
             return None
@@ -960,34 +1198,54 @@ async def send_message(
             while attempt < MAX_RETRIES:
                 try:
                     result = await client.forward_messages(
-                        recipient, tm.message.id, from_peer=tm.message.chat_id,
+                        recipient, tm.message.id,
+                        from_peer=tm.message.chat_id,
                     )
-                    if isinstance(result, list): result = result[0] if result else None
+                    if isinstance(result, list):
+                        result = result[0] if result else None
                     logging.info(f"✅ forward 成功 msg={tm.message.id}")
                     return result
                 except Exception as e:
                     if _is_protected_chat_error(e):
-                        logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
+                        logging.warning("⚠️ 保护聊天，改为下载后重新发送")
                         if getattr(tm.message, "media", None):
                             return await _send_single_by_upload(
-                                client,
-                                recipient,
-                                tm.message,
-                                tm.text,
-                                effective_reply_to,
+                                client, recipient, tm.message,
+                                tm.text, effective_reply_to,
                             )
-                    if _is_flood_wait(e): await _handle_flood_wait(e)
-                    else: logging.error(f"❌ forward 失败: {e}")
+                        else:
+                            # 修复 Bug11：纯文本受保护消息回退
+                            try:
+                                return await client.send_message(
+                                    recipient, tm.text or "",
+                                    reply_to=effective_reply_to,
+                                )
+                            except Exception as e_text:
+                                logging.error(f"❌ 纯文本回退失败: {e_text}")
+                                return None
+                    if _is_flood_wait(e):
+                        await _handle_flood_wait(e)
+                    else:
+                        logging.error(f"❌ forward 失败: {e}")
                     attempt += 1
                     await asyncio.sleep(delay)
             return None
 
+    # ================================================================
     # 2. 媒体组发送 (Send Album)
+    #    修复 Bug1：先用 InputMedia 引用发送，失败后下载重传
+    # ================================================================
     if grouped_messages and grouped_tms:
         combined_caption = (
             grouped_caption
             if grouped_caption is not None
-            else "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
+            else "\n\n".join(
+                [
+                    gtm.text.strip()
+                    for gtm in grouped_tms
+                    if gtm.text and gtm.text.strip()
+                ]
+            )
         )
         any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
         attempt = 0
@@ -1000,39 +1258,41 @@ async def send_message(
                         reply_to=effective_reply_to,
                     )
                 else:
-                    files_to_send = [msg for msg in grouped_messages if msg.photo or msg.video or msg.gif or msg.document]
-                    if not files_to_send:
-                        return await client.send_message(recipient, combined_caption or "空相册", reply_to=effective_reply_to)
-                    result = await client.send_file(
-                        recipient, files_to_send,
+                    # 先尝试用 InputMedia 引用方式发送（不下载）
+                    result = await _send_album_via_input_media(
+                        client, recipient, grouped_messages,
                         caption=combined_caption or None,
                         reply_to=effective_reply_to,
-                        supports_streaming=True,
-                        force_document=False,
-                        allow_cache=False,
-                        parse_mode="md",
                     )
-                logging.info(f"✅ 媒体组发送成功")
+                    if result is None:
+                        # InputMedia 失败，回退到下载重传
+                        logging.warning("⚠️ 引用方式失败，改为下载后重新发送")
+                        result = await _send_album_by_upload(
+                            client, recipient, grouped_messages,
+                            combined_caption or None, effective_reply_to,
+                        )
+                logging.info("✅ 媒体组发送成功")
                 return result
             except Exception as e:
                 if _is_protected_chat_error(e):
                     logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
                     return await _send_album_by_upload(
-                        client,
-                        recipient,
-                        grouped_messages,
-                        combined_caption or None,
-                        effective_reply_to,
+                        client, recipient, grouped_messages,
+                        combined_caption or None, effective_reply_to,
                     )
-                if _is_flood_wait(e): await _handle_flood_wait(e)
-                else: logging.error(f"❌ 媒体组发送失败: {e}")
+                if _is_flood_wait(e):
+                    await _handle_flood_wait(e)
+                else:
+                    logging.error(f"❌ 媒体组发送失败: {e}")
                 attempt += 1
                 await asyncio.sleep(5)
         return None
 
+    # ================================================================
     # 3. 单条消息发送
+    # ================================================================
     processed_markup = getattr(tm, 'reply_markup', None)
-    
+
     # 3a. 插件生成的新文件
     if tm.new_file:
         try:
@@ -1056,7 +1316,7 @@ async def send_message(
                 logging.error(f"❌ 新文件发送最终失败: {e2}")
                 return None
 
-    # 3b. Spoiler 媒体
+    # 3b. Spoiler 媒体（修复 Bug9：回退时下载重传而非落入 3c）
     if _has_spoiler(tm.message):
         try:
             result = await _send_single_with_spoiler(
@@ -1066,56 +1326,113 @@ async def send_message(
             logging.info("✅ Spoiler 消息发送成功")
             return result
         except Exception as e:
-            logging.warning(f"⚠️ spoiler 发送失败，回退: {e}")
+            logging.warning(f"⚠️ spoiler 发送失败，回退为下载重传: {e}")
+            return await _send_single_by_upload(
+                client, recipient, tm.message,
+                tm.text, effective_reply_to,
+            )
 
-    # 3c. 普通消息
+    # 3c. 普通消息（修复 Bug3：不再修改原始 message.text）
     attempt = 0
     while attempt < MAX_RETRIES:
         try:
-            tm.message.text = tm.text
-            if processed_markup is not None:
+            has_media = getattr(tm.message, "media", None) is not None
+            if has_media:
+                # ===== 带媒体的消息：使用 send_file 正确设置 caption =====
                 try:
-                    result = await client.send_message(
-                        recipient, tm.message,
+                    result = await client.send_file(
+                        recipient,
+                        tm.message.media,
+                        caption=tm.text or "",
                         reply_to=effective_reply_to,
                         buttons=processed_markup,
+                        supports_streaming=True,
+                        parse_mode="md",
                     )
-                    logging.info(f"✅ copy 成功(带按钮) msg={tm.message.id}")
+                    logging.info(f"✅ 媒体消息发送成功 msg={tm.message.id}")
                     return result
-                except Exception as e_btn:
-                    logging.warning(f"⚠️ 带按钮失败: {e_btn}")
+                except Exception as e_media:
+                    if _is_protected_chat_error(e_media):
+                        logging.warning("⚠️ 保护聊天，改为下载重传")
+                        return await _send_single_by_upload(
+                            client, recipient, tm.message,
+                            tm.text, effective_reply_to,
+                        )
+                    # 媒体引用失败（如 file_reference 过期），下载重传
+                    if "FILE_REFERENCE" in str(e_media).upper():
+                        logging.warning("⚠️ file_reference 过期，下载重传")
+                        return await _send_single_by_upload(
+                            client, recipient, tm.message,
+                            tm.text, effective_reply_to,
+                        )
+                    raise
+            else:
+                # ===== 纯文本消息：使用 send_message 发送文本 =====
+                if processed_markup is not None:
+                    try:
+                        result = await client.send_message(
+                            recipient,
+                            tm.text or "",
+                            reply_to=effective_reply_to,
+                            buttons=processed_markup,
+                            parse_mode="md",
+                        )
+                        logging.info(f"✅ 文本消息发送成功(带按钮) msg={tm.message.id}")
+                        return result
+                    except Exception as e_btn:
+                        logging.warning(f"⚠️ 带按钮发送失败: {e_btn}")
 
-            result = await client.send_message(
-                recipient, tm.message,
-                reply_to=effective_reply_to,
-            )
-            logging.info(f"✅ copy 成功 msg={tm.message.id}")
-            return result
+                result = await client.send_message(
+                    recipient,
+                    tm.text or "",
+                    reply_to=effective_reply_to,
+                    parse_mode="md",
+                )
+                logging.info(f"✅ 文本消息发送成功 msg={tm.message.id}")
+                return result
         except Exception as e:
-            if _is_flood_wait(e): await _handle_flood_wait(e)
+            if _is_flood_wait(e):
+                await _handle_flood_wait(e)
             else:
                 if _is_protected_chat_error(e):
+                    # 修复 Bug11：纯文本受保护消息回退
                     if getattr(tm.message, "media", None):
                         return await _send_single_by_upload(
-                            client,
-                            recipient,
-                            tm.message,
-                            tm.text,
-                            effective_reply_to,
+                            client, recipient, tm.message,
+                            tm.text, effective_reply_to,
                         )
-                logging.error(f"❌ copy 失败: {e}")
+                    else:
+                        try:
+                            return await client.send_message(
+                                recipient, tm.text or "",
+                                reply_to=effective_reply_to,
+                            )
+                        except Exception:
+                            pass
+                logging.error(f"❌ 消息发送失败: {e}")
             attempt += 1
             await asyncio.sleep(5)
     return None
 
 
+# =====================================================================
+#  文件清理
+# =====================================================================
+
 def cleanup(*files: str) -> None:
     for file in files:
+        if not file:
+            continue
         try:
-            os.remove(file)
-        except FileNotFoundError:
-            pass
+            if os.path.isfile(file):
+                os.remove(file)
+        except Exception as e:
+            logging.debug(f"⚠️ 清理临时文件失败 {file}: {e}")
 
+
+# =====================================================================
+#  工具函数
+# =====================================================================
 
 def stamp(file: str, user: str) -> str:
     now = str(datetime.now())
@@ -1123,7 +1440,7 @@ def stamp(file: str, user: str) -> str:
     try:
         os.rename(file, outf)
         return outf
-    except Exception as err:
+    except Exception:
         return file
 
 
