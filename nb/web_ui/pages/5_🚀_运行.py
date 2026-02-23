@@ -5,7 +5,6 @@ import signal
 import subprocess
 import sys
 import time
-# ✅ 新增：导入 html 库用于转义特殊字符
 import html
 
 import streamlit as st
@@ -25,7 +24,7 @@ PID_FILE = os.path.join(os.getcwd(), "nb.pid")
 LOG_FILE = os.path.join(os.getcwd(), "logs.txt")
 OLD_LOG_FILE = os.path.join(os.getcwd(), "old_logs.txt")
 
-# --- Process Utils (保持不变) ---
+# --- Process Utils ---
 def rerun():
     if hasattr(st, 'rerun'): st.rerun()
     elif hasattr(st, 'experimental_rerun'): st.experimental_rerun()
@@ -107,7 +106,6 @@ def _kill_posix(pid: int, force: bool) -> bool:
         _remove_pid_file()
     return res
 
-
 def _kill_windows(pid: int, force: bool) -> bool:
     if not is_process_alive(pid):
         _remove_pid_file()
@@ -122,7 +120,6 @@ def _kill_windows(pid: int, force: bool) -> bool:
     if res:
         _remove_pid_file()
     return res
-
 
 def kill_process(pid: int, force: bool = False) -> bool:
     if not is_process_alive(pid):
@@ -163,26 +160,22 @@ st.set_page_config(page_title="Run Dashboard", page_icon="🏃", layout="wide")
 switch_theme(st, CONFIG)
 
 if check_password(st):
-    # CSS for Status Card & Terminal (Neumorphism Enhanced)
     st.markdown("""
     <style>
-    /* Terminal Wrapper */
     .terminal-wrapper {
-        background: #1e293b; /* Dark background for terminal */
+        background: #1e293b;
         border-radius: 15px;
         box-shadow:  9px 9px 16px var(--shadow-dark),
                     -9px -9px 16px var(--shadow-light);
         overflow: hidden;
         border: 1px solid var(--glass-border);
     }
-    
     .terminal-head {
         background: #0f172a;
         padding: 12px 20px;
         display: flex; gap: 8px; align-items: center;
         border-bottom: 1px solid #334155;
     }
-    
     .terminal-body {
         padding: 20px;
         height: 400px;
@@ -191,12 +184,11 @@ if check_password(st):
         font-family: 'Consolas', 'Monaco', monospace;
         font-size: 13px;
         white-space: pre-wrap;
-        box-shadow: inset 0 0 20px rgba(0,0,0,0.2); /* Inner shadow for depth */
+        box-shadow: inset 0 0 20px rgba(0,0,0,0.2);
     }
-
     .dot { width: 12px; height: 12px; border-radius: 50%; }
-    .red { background: #ef4444; box-shadow: 0 0 5px #ef4444; } 
-    .yellow { background: #f59e0b; box-shadow: 0 0 5px #f59e0b; } 
+    .red { background: #ef4444; box-shadow: 0 0 5px #ef4444; }
+    .yellow { background: #f59e0b; box-shadow: 0 0 5px #f59e0b; }
     .green { background: #10b981; box-shadow: 0 0 5px #10b981; }
     </style>
     """, unsafe_allow_html=True)
@@ -204,41 +196,31 @@ if check_password(st):
     pid = get_running_pid()
 
     with st.container():
-        # 4列布局：转发自 | 模式 | 同步删除 | 状态指示器
         c1, c2, c3, c4 = st.columns(4)
-        
         with c1:
-            CONFIG.show_forwarded_from = st.checkbox("显示 “转发自”", value=CONFIG.show_forwarded_from)
-        
+            CONFIG.show_forwarded_from = st.checkbox("显示 "转发自"", value=CONFIG.show_forwarded_from)
         with c2:
-            # 模式映射：0->live(居住), 1->past(过去的)
-            mode_label = "居住" if CONFIG.mode == 0 else "过去的"
             mode = st.radio("模式", ["居住", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
-        
         with c3:
             if mode == "过去的":
                 CONFIG.mode = 1
-                st.write("") # 占位
+                st.write("")
             else:
                 CONFIG.live.delete_sync = st.checkbox("同步删除", value=CONFIG.live.delete_sync)
                 CONFIG.mode = 0
-                
         with c4:
-            # 状态指示器：缩小到按钮大小
             if pid > 0:
                 st.button(f"🟢 运行中 ({pid})", disabled=True, use_container_width=True, key="status_btn")
             else:
                 st.button("🔴 已停止", disabled=True, use_container_width=True, key="status_btn")
 
     st.write("---")
-    
+
     # 启动/停止按钮区
     if pid == 0:
-        # 左对齐放置开始按钮
         c_btn, c_spacer = st.columns([1, 3])
         with c_btn:
             if st.button("▶️ 开始流程", type="primary", use_container_width=True):
-                # 传入 "live" 或 "past" 对应的英文参数
                 mode_arg = "live" if CONFIG.mode == 0 else "past"
                 new_pid = start_nb_process(mode_arg)
                 if new_pid > 0:
@@ -249,7 +231,6 @@ if check_password(st):
                 else:
                     st.error("启动失败")
     else:
-        # 左对齐放置停止按钮
         c_btn, c_spacer = st.columns([1, 3])
         with c_btn:
             s1, s2 = st.columns(2)
@@ -266,31 +247,50 @@ if check_password(st):
                     time.sleep(1)
                     rerun()
 
-    # --- Terminal Log ---
+    # --- 修复2: 只在进程运行时才自动刷新 ---
     st.write("")
-    st_autorefresh(interval=1000, key="log_autorefresh", debounce=True)
+    if pid > 0:
+        st_autorefresh(interval=1000, key="log_autorefresh")
 
+    # --- 读取日志内容 ---
     log_content = "暂无日志。"
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r") as f:
                 lines = f.readlines()
                 raw_content = "".join(lines[-100:]) if lines else "等待输出..."
-                # ✅ 关键修复：转义 HTML 字符，防止破坏 DOM 结构
                 log_content = html.escape(raw_content)
-        except: pass
-    
-    # 恢复日志显示框样式（白色背景）
+        except:
+            pass
+
+    # --- 修复3: 用户滚动时不强制拉到底部 ---
+    # 逻辑：JS 检测用户是否在底部附近（距底部<50px），
+    # 只有在底部时才自动滚动，用户向上翻看时保持位置不变。
     st.components.v1.html(
         f"""
-        <div id="log-container" style="height:400px; overflow-y:auto; padding:16px; background:#ffffff; color:#000000; font-family:Consolas, Monaco, monospace; font-size:13px; white-space:pre-wrap; border-radius:15px; border:1px solid #ccc;">
-            {log_content}
-        </div>
+        <div id="log-container" style="
+            height:400px;
+            overflow-y:auto;
+            padding:16px;
+            background:#ffffff;
+            color:#000000;
+            font-family:Consolas, Monaco, monospace;
+            font-size:13px;
+            white-space:pre-wrap;
+            border-radius:15px;
+            border:1px solid #ccc;
+        ">{log_content}</div>
         <script>
-            const box = document.getElementById('log-container');
-            if (box) {{
-                box.scrollTop = box.scrollHeight;
-            }}
+            (function() {{
+                const box = document.getElementById('log-container');
+                if (!box) return;
+                // 判断用户是否已经在底部附近（距底部 50px 以内）
+                const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+                if (distanceFromBottom < 50) {{
+                    box.scrollTop = box.scrollHeight;
+                }}
+                // 否则保持用户当前滚动位置，不做任何操作
+            }})();
         </script>
         """,
         height=420,
