@@ -758,6 +758,18 @@ async def send_message(
                     logging.info(f"✅ 直接转发媒体组成功")
                     return result
                 except Exception as e:
+                    if _is_protected_chat_error(e):
+                        combined_caption = "\n\n".join(
+                            [gtm.text.strip() for gtm in grouped_tms or [] if gtm.text and gtm.text.strip()]
+                        )
+                        logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
+                        return await _send_album_by_upload(
+                            client,
+                            recipient,
+                            grouped_messages,
+                            combined_caption or None,
+                            effective_reply_to,
+                        )
                     if _is_flood_wait(e): await _handle_flood_wait(e)
                     else: logging.error(f"❌ 转发失败: {e}")
                     attempt += 1
@@ -775,6 +787,16 @@ async def send_message(
                     logging.info(f"✅ forward 成功 msg={tm.message.id}")
                     return result
                 except Exception as e:
+                    if _is_protected_chat_error(e):
+                        logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
+                        if getattr(tm.message, "media", None):
+                            return await _send_single_by_upload(
+                                client,
+                                recipient,
+                                tm.message,
+                                tm.text,
+                                effective_reply_to,
+                            )
                     if _is_flood_wait(e): await _handle_flood_wait(e)
                     else: logging.error(f"❌ forward 失败: {e}")
                     attempt += 1
