@@ -35,6 +35,7 @@ from telethon.tl.types import (
     MessageEntityUrl,
     MessageService,
 )
+from telethon.errors.rpcerrorlist import MsgIdInvalidError
 from telethon.tl.functions.messages import (
     SendMediaRequest,
     SendMultiMediaRequest,
@@ -233,15 +234,21 @@ async def _collect_discussion_comments(
     if disc_msg is None:
         return None, []
     comments: List[Message] = []
-    async for comment in client.iter_messages(
-        disc_msg.chat_id,
-        reply_to=disc_msg.id,
-        reverse=True,
-        limit=CONFIG.bot_media.recent_limit,
-    ):
-        if isinstance(comment, MessageService):
-            continue
-        comments.append(comment)
+    try:
+        async for comment in client.iter_messages(
+            disc_msg.chat_id,
+            reply_to=disc_msg.id,
+            reverse=True,
+            limit=CONFIG.bot_media.recent_limit,
+        ):
+            if isinstance(comment, MessageService):
+                continue
+            comments.append(comment)
+    except MsgIdInvalidError as e:
+        logging.warning(
+            f"⚠️ 讨论区消息 ID 无效, 跳过评论拉取 post={post_id}: {e}"
+        )
+        return disc_msg, []
     return disc_msg, comments
 
 
@@ -288,10 +295,13 @@ async def _collect_start_links_from_keyword_reply(
         logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
         return []
     responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
+    for msg in responses:
+        button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
+        if button_links:
+            return button_links
     links = []
     for msg in responses:
         links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
-        links.extend(_extract_start_links_from_markup(msg.reply_markup, forward))
         links.extend(_parse_start_links_from_entities(msg, forward))
     if links:
         return links
@@ -300,8 +310,11 @@ async def _collect_start_links_from_keyword_reply(
         last_id = max(m.id for m in responses)
     responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
     for msg in responses:
+        button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
+        if button_links:
+            return button_links
+    for msg in responses:
         links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
-        links.extend(_extract_start_links_from_markup(msg.reply_markup, forward))
         links.extend(_parse_start_links_from_entities(msg, forward))
     return links
 
