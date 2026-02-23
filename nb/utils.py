@@ -742,6 +742,7 @@ async def send_message(
     tm: "NbMessage",
     grouped_messages: Optional[List[Message]] = None,
     grouped_tms: Optional[List["NbMessage"]] = None,
+    grouped_caption: Optional[str] = None,
     comment_to_post: Optional[int] = None,
 ) -> Union[Message, List[Message], None]:
     client: TelegramClient = tm.client
@@ -759,8 +760,12 @@ async def send_message(
                     return result
                 except Exception as e:
                     if _is_protected_chat_error(e):
-                        combined_caption = "\n\n".join(
-                            [gtm.text.strip() for gtm in grouped_tms or [] if gtm.text and gtm.text.strip()]
+                        combined_caption = (
+                            grouped_caption
+                            if grouped_caption is not None
+                            else "\n\n".join(
+                                [gtm.text.strip() for gtm in grouped_tms or [] if gtm.text and gtm.text.strip()]
+                            )
                         )
                         logging.warning("⚠️ 保护聊天媒体，改为下载后重新发送")
                         return await _send_album_by_upload(
@@ -805,7 +810,11 @@ async def send_message(
 
     # 2. 媒体组发送 (Send Album)
     if grouped_messages and grouped_tms:
-        combined_caption = "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
+        combined_caption = (
+            grouped_caption
+            if grouped_caption is not None
+            else "\n\n".join([gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()])
+        )
         any_spoiler = any(_has_spoiler(msg) for msg in grouped_messages)
         attempt = 0
         while attempt < MAX_RETRIES:
