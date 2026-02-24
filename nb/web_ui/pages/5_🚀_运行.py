@@ -23,6 +23,7 @@ CONFIG = read_config()
 PID_FILE = os.path.join(os.getcwd(), "nb.pid")
 LOG_FILE = os.path.join(os.getcwd(), "logs.txt")
 OLD_LOG_FILE = os.path.join(os.getcwd(), "old_logs.txt")
+LOG_MAX_BYTES = 1024 * 1024
 
 # --- Process Utils ---
 def rerun():
@@ -73,6 +74,14 @@ def get_running_pid() -> int:
             CONFIG.pid = 0
             write_config(CONFIG)
     return 0
+
+def _trim_log_file(path: str) -> None:
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            with open(path, "w"):
+                return
+    except:
+        pass
 
 def _kill_posix(pid: int, force: bool) -> bool:
     if not is_process_alive(pid):
@@ -164,6 +173,8 @@ def _read_log_file(path: str) -> str:
     return ""
 
 def get_all_logs_text() -> str:
+    _trim_log_file(LOG_FILE)
+    _trim_log_file(OLD_LOG_FILE)
     old_content = _read_log_file(OLD_LOG_FILE)
     new_content = _read_log_file(LOG_FILE)
     if old_content and new_content:
@@ -282,6 +293,7 @@ if check_password(st):
     # --- 读取日志 ---
     log_content = "暂无日志。"
     if os.path.exists(LOG_FILE):
+        _trim_log_file(LOG_FILE)
         try:
             with open(LOG_FILE, "r") as f:
                 lines = f.readlines()
