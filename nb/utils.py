@@ -299,28 +299,27 @@ async def _collect_start_links_from_keyword_reply(
     except Exception as e:
         logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
         return []
-    responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
-    for msg in responses:
-        button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
-        if button_links:
-            return button_links
     links = []
-    for msg in responses:
-        links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
-        links.extend(_parse_start_links_from_entities(msg, forward))
-    if links:
-        return links
-    await asyncio.sleep(5)
-    if responses:
-        last_id = max(m.id for m in responses)
-    responses = await _collect_new_messages(client, disc_msg.chat_id, last_id, 5)
-    for msg in responses:
-        button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
-        if button_links:
-            return button_links
-    for msg in responses:
-        links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
-        links.extend(_parse_start_links_from_entities(msg, forward))
+    wait_timeout = getattr(CONFIG.bot_media, "wait_timeout", 5)
+    total_timeout = max(wait_timeout * 2, 8)
+    start = asyncio.get_running_loop().time()
+    while True:
+        responses = await _collect_new_messages(
+            client, disc_msg.chat_id, last_id, wait_timeout
+        )
+        if responses:
+            last_id = max(m.id for m in responses)
+        for msg in responses:
+            button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
+            if button_links:
+                return button_links
+        for msg in responses:
+            links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
+            links.extend(_parse_start_links_from_entities(msg, forward))
+        if links:
+            return links
+        if asyncio.get_running_loop().time() - start >= total_timeout:
+            break
     return links
 
 
