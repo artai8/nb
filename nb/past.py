@@ -24,6 +24,10 @@ from nb.utils import (
     get_discussion_group_id,
     _auto_comment_keyword,
     _extract_comment_keyword,
+    _collect_start_links_from_keyword_reply,
+    _collect_from_start_links,
+    _filter_bot_media_by_blacklist,
+    _trim_keyword,
     resolve_bot_media_from_message,
     _msg_has_media,
 )
@@ -118,10 +122,13 @@ async def _collect_bot_media_from_comments(
 
     comment_count = 0
     collected: List[Message] = []
+    counts = {}
+    keyword_hint = None
 
     try:
         async for comment in client.iter_messages(
             src_discussion_id, reply_to=src_top_id, reverse=True,
+            limit=CONFIG.bot_media.recent_limit,
         ):
             if isinstance(comment, MessageService):
                 logging.debug(f"🤖 跳过 MessageService #{comment.id}")
@@ -132,10 +139,16 @@ async def _collect_bot_media_from_comments(
             has_markup = comment.reply_markup is not None
             sender_id = comment.sender_id
             fwd = comment.fwd_from
-            logging.info(
+            logging.debug(
                 f"🤖 评论#{comment.id} sender={sender_id} fwd={fwd is not None} "
                 f"markup={has_markup} text={text_preview!r}"
             )
+            text = _trim_keyword((comment.raw_text or comment.text or "").strip())
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+                if counts[text] >= 5:
+                    keyword_hint = text
+                    break
 
             try:
                 bot_media = await resolve_bot_media_from_message(client, comment, forward)
@@ -150,6 +163,20 @@ async def _collect_bot_media_from_comments(
                 logging.debug(f"🤖 评论#{comment.id} 无bot媒体")
     except MsgIdInvalidError as e:
         logging.warning(f"⚠️ 讨论区消息 ID 无效, 跳过评论拉取 post={src_post_id}: {e}")
+        return []
+
+    if keyword_hint and disc_msg is not None:
+        logging.info(
+            f"🤖 评论区关键词命中 post={src_post_id} keyword={keyword_hint!r}"
+        )
+        keyword_links = await _collect_start_links_from_keyword_reply(
+            client, disc_msg, keyword_hint, forward
+        )
+        collected_kw = await _collect_from_start_links(client, keyword_links, forward)
+        if collected_kw:
+            return _filter_bot_media_by_blacklist(collected_kw)
+        if collected:
+            return _dedupe_messages(collected)
         return []
 
     logging.info(
