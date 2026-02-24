@@ -237,8 +237,10 @@ async def _collect_discussion_comments(
 ) -> tuple:
     disc_msg = await get_discussion_message(client, channel_id, post_id)
     if disc_msg is None:
-        return None, []
+        return None, [], None
     comments: List[Message] = []
+    counts = {}
+    keyword_hint = None
     try:
         async for comment in client.iter_messages(
             disc_msg.chat_id, reply_to=disc_msg.id,
@@ -247,10 +249,17 @@ async def _collect_discussion_comments(
             if isinstance(comment, MessageService):
                 continue
             comments.append(comment)
+            text = (comment.raw_text or comment.text or "").strip()
+            text = _trim_keyword(text)
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+                if counts[text] >= 5:
+                    keyword_hint = text
+                    break
     except MsgIdInvalidError as e:
         logging.warning(f"⚠️ 讨论区消息 ID 无效 post={post_id}: {e}")
-        return disc_msg, []
-    return disc_msg, comments
+        return disc_msg, [], None
+    return disc_msg, comments, keyword_hint
 
 
 def _find_common_comment_keyword(comments: List[Message]) -> Optional[str]:
@@ -631,8 +640,13 @@ async def resolve_bot_media_from_message(
     disc_msg = None
     comments: List[Message] = []
     if getattr(message, "post", False):
-        disc_msg, comments = await _collect_discussion_comments(client, message.chat_id, message.id)
+        disc_msg, comments, keyword_hint = await _collect_discussion_comments(client, message.chat_id, message.id)
     if comments:
+        if keyword_hint and disc_msg is not None:
+            keyword_links = await _collect_start_links_from_keyword_reply(client, disc_msg, keyword_hint, forward)
+            collected = await _collect_from_start_links(client, keyword_links, forward)
+            if collected:
+                return _filter_bot_media_by_blacklist(collected)
         for src_fn in [
             lambda c: _parse_start_links_from_text(c.raw_text or c.text or "", forward),
             lambda c: _extract_start_links_from_markup(c.reply_markup, forward),
