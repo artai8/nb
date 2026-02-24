@@ -78,10 +78,25 @@ def get_running_pid() -> int:
 def _trim_log_file(path: str) -> None:
     try:
         if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
-            with open(path, "w"):
-                return
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > LOG_MAX_BYTES:
+                    f.seek(-LOG_MAX_BYTES, os.SEEK_END)
+                data = f.read()
+            with open(path, "wb") as f:
+                f.write(data)
     except:
         pass
+
+def _read_log_tail(path: str, max_lines: int = 100) -> str:
+    try:
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                lines = f.readlines()
+                return "".join(lines[-max_lines:]) if lines else ""
+    except:
+        pass
+    return ""
 
 def _kill_posix(pid: int, force: bool) -> bool:
     if not is_process_alive(pid):
@@ -297,7 +312,11 @@ if check_password(st):
         try:
             with open(LOG_FILE, "r") as f:
                 lines = f.readlines()
-                raw_content = "".join(lines[-100:]) if lines else "等待输出..."
+                raw_content = "".join(lines[-100:]) if lines else ""
+                if not raw_content:
+                    _trim_log_file(OLD_LOG_FILE)
+                    raw_content = _read_log_tail(OLD_LOG_FILE, 100)
+                raw_content = raw_content or "等待输出..."
                 log_content = html.escape(raw_content)
         except:
             pass
