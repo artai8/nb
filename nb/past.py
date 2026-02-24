@@ -511,6 +511,13 @@ async def _forward_comments_for_post(
             await asyncio.sleep(delay)
 
         # 单条评论处理
+        tm = await apply_plugins(comment)
+        if not tm:
+            comment_count += 1
+            delay = random.randint(60, 300)
+            await asyncio.sleep(delay)
+            continue
+
         bot_media = []
         bot_media_allowed = _bot_media_allowed(forward)
         if bot_media_allowed:
@@ -532,8 +539,9 @@ async def _forward_comments_for_post(
                         )
                 except Exception as e:
                     logging.error(f"❌ 评论 bot 媒体发送失败: {e}")
+            tm.clear()
         else:
-            await _send_single_comment(client, comment, dest_targets)
+            await _send_single_comment(client, comment, dest_targets, tm=tm)
         comment_count += 1
 
         delay = random.randint(60, 300)
@@ -556,10 +564,12 @@ async def _send_single_comment(
     client: TelegramClient,
     comment: Message,
     dest_targets: Dict[int, Optional[int]],
+    tm: Optional["NbMessage"] = None,
 ) -> None:
-    tm = await apply_plugins(comment)
-    if not tm:
-        return
+    if tm is None:
+        tm = await apply_plugins(comment)
+        if not tm:
+            return
 
     for dest_disc_id, dest_top_id in dest_targets.items():
         try:
