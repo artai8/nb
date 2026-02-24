@@ -569,6 +569,48 @@ def _msg_has_media(msg: Message) -> bool:
     return False
 
 
+def _guess_message_file_type(message: Message) -> str:
+    for ft in ["photo", "video", "gif", "audio", "document", "sticker", "contact"]:
+        if getattr(message, ft, None):
+            return ft
+    return "nofile"
+
+
+def _message_hits_filter_blacklist(message: Message) -> bool:
+    filters = getattr(CONFIG.plugins, "filter", None)
+    if not filters or not getattr(filters, "check", False):
+        return False
+
+    sender = str(getattr(message, "sender_id", ""))
+    users = getattr(filters, "users", None)
+    if users is not None and sender in (users.blacklist or []):
+        return True
+
+    flist = getattr(filters, "files", None)
+    if flist is not None:
+        file_type = _guess_message_file_type(message)
+        bl_values = [f.value if hasattr(f, "value") else f for f in (flist.blacklist or [])]
+        if file_type in bl_values:
+            return True
+
+    textf = getattr(filters, "text", None)
+    if textf is not None:
+        text = message.raw_text or message.text or ""
+        blacklist = list(textf.blacklist or [])
+        if not textf.case_sensitive and not textf.regex:
+            text = text.lower()
+            blacklist = [item.lower() for item in blacklist]
+        for forbidden in blacklist:
+            if match(forbidden, text, textf.regex):
+                return True
+
+    return False
+
+
+def _filter_bot_media_by_blacklist(messages: List[Message]) -> List[Message]:
+    return [m for m in (messages or []) if not _message_hits_filter_blacklist(m)]
+
+
 # =====================================================================
 #  bot 媒体解析入口
 # =====================================================================
@@ -578,12 +620,14 @@ async def resolve_bot_media_from_message(
 ) -> List[Message]:
     if CONFIG.login.user_type == 0:
         return []
+    if _message_hits_filter_blacklist(message):
+        return []
     raw_text = message.raw_text or message.text or ""
     collected = await _collect_from_start_links(
         client, _parse_start_links_from_text(raw_text, forward), forward,
     )
     if collected:
-        return collected
+        return _filter_bot_media_by_blacklist(collected)
     disc_msg = None
     comments: List[Message] = []
     if getattr(message, "post", False):
@@ -599,7 +643,7 @@ async def resolve_bot_media_from_message(
                 all_links.extend(src_fn(comment))
             collected = await _collect_from_start_links(client, all_links, forward)
             if collected:
-                return collected
+                return _filter_bot_media_by_blacklist(collected)
         comment_keyword_enabled = getattr(CONFIG.bot_media, "comment_keyword_from_comments_enabled", True)
         if forward is not None and forward.comment_keyword_from_comments_enabled is not None:
             comment_keyword_enabled = forward.comment_keyword_from_comments_enabled
@@ -609,13 +653,13 @@ async def resolve_bot_media_from_message(
                 keyword_links = await _collect_start_links_from_keyword_reply(client, disc_msg, keyword, forward)
                 collected = await _collect_from_start_links(client, keyword_links, forward)
                 if collected:
-                    return collected
+                    return _filter_bot_media_by_blacklist(collected)
     tail_links = []
     tail_links.extend(_parse_start_links_from_entities(message, forward))
     tail_links.extend(_extract_start_links_from_markup(message.reply_markup, forward))
     collected = await _collect_from_start_links(client, tail_links, forward)
     if collected:
-        return collected
+        return _filter_bot_media_by_blacklist(collected)
     keyword_trigger_enabled = CONFIG.bot_media.enable_keyword_trigger
     if forward is not None and forward.bot_media_keyword_trigger_enabled is not None:
         keyword_trigger_enabled = forward.bot_media_keyword_trigger_enabled
@@ -644,6 +688,8 @@ async def resolve_bot_media_from_message(
                 break
         except Exception as e:
             logging.warning(f"⚠️ bot 关键字请求失败 ({bot_username}): {e}")
+    if collected_kw:
+        return _filter_bot_media_by_blacklist(collected_kw)
     return collected_kw
 
 
