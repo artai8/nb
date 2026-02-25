@@ -959,6 +959,14 @@ async def _send_album_by_upload(
         cleanup(*files)
 
 
+async def _refetch_message(client: TelegramClient, message: Message) -> Message:
+    try:
+        fresh = await client.get_messages(message.chat_id, ids=message.id)
+        return fresh or message
+    except Exception:
+        return message
+
+
 # =====================================================================
 #  Spoiler 单条发送（带自动回退）
 # =====================================================================
@@ -997,7 +1005,22 @@ async def _send_single_with_spoiler(
         return result
     except Exception as e:
         if _is_file_reference_error(e):
-            logging.warning(f"⚠️ spoiler file_reference 过期，下载重传")
+            logging.warning("⚠️ spoiler file_reference 过期，尝试刷新")
+            refreshed = await _refetch_message(client, message)
+            try:
+                input_media = _build_input_media(refreshed.media, spoiler=True)
+                if input_media is not None:
+                    kwargs['media'] = input_media
+                    result = await client(SendMediaRequest(**kwargs))
+                    if hasattr(result, 'updates'):
+                        for update in result.updates:
+                            if hasattr(update, 'message'):
+                                return update.message
+                    return result
+            except Exception as e2:
+                if not _is_file_reference_error(e2):
+                    logging.warning(f"⚠️ spoiler 刷新后发送失败: {e2}")
+            logging.warning("⚠️ spoiler 刷新失败，下载重传")
             result = await _send_single_by_upload(
                 client, recipient, message, caption, reply_to,
                 preserve_spoiler=True,
@@ -1056,7 +1079,46 @@ async def _send_album_with_spoiler(
         return sent if sent else []
     except Exception as e:
         if _is_file_reference_error(e):
-            logging.warning(f"⚠️ spoiler 相册 file_reference 过期，下载重传")
+            logging.warning("⚠️ spoiler 相册 file_reference 过期，尝试刷新")
+            refreshed_messages = []
+            for msg in grouped_messages:
+                refreshed_messages.append(await _refetch_message(client, msg))
+            try:
+                multi_media = []
+                for i, msg in enumerate(refreshed_messages):
+                    media = msg.media
+                    is_spoiler = _has_spoiler(msg)
+                    input_media = _build_input_media(media, spoiler=is_spoiler)
+                    if input_media is None:
+                        continue
+                    if i == 0 and caption:
+                        msg_text, msg_entities = _parse_caption_entities(caption)
+                    else:
+                        msg_text = ""
+                        msg_entities = []
+                    single = InputSingleMedia(
+                        media=input_media,
+                        random_id=random.randrange(-2 ** 63, 2 ** 63),
+                        message=msg_text,
+                        entities=msg_entities if msg_entities else [],
+                    )
+                    multi_media.append(single)
+                if multi_media:
+                    kwargs = {'peer': peer, 'multi_media': multi_media}
+                    if reply_to is not None:
+                        kwargs['reply_to'] = _make_reply_to(reply_to)
+                    result = await client(SendMultiMediaRequest(**kwargs))
+                    sent = []
+                    if hasattr(result, 'updates'):
+                        for update in result.updates:
+                            if hasattr(update, 'message'):
+                                sent.append(update.message)
+                    if sent:
+                        return sent
+            except Exception as e2:
+                if not _is_file_reference_error(e2):
+                    logging.warning(f"⚠️ spoiler 相册刷新后发送失败: {e2}")
+            logging.warning("⚠️ spoiler 相册刷新失败，下载重传")
             result = await _send_album_by_upload(
                 client, recipient, grouped_messages,
                 caption, reply_to, preserve_spoiler=True,
