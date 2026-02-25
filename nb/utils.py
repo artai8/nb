@@ -1179,7 +1179,49 @@ async def _send_album_via_input_media(
                     sent.append(update.message)
         return sent if sent else []
     except Exception as e:
-        logging.warning(f"⚠️ InputMedia 相册失败: {e}")
+        if _is_file_reference_error(e):
+            logging.warning("⚠️ InputMedia 相册 file_reference 过期，尝试刷新")
+            refreshed_messages = []
+            for msg in grouped_messages:
+                refreshed_messages.append(await _refetch_message(client, msg))
+            multi_media = []
+            for i, msg in enumerate(refreshed_messages):
+                media = msg.media
+                if media is None:
+                    continue
+                is_spoiler = _has_spoiler(msg)
+                input_media = _build_input_media(media, spoiler=is_spoiler)
+                if input_media is None:
+                    continue
+                if i == 0 and caption:
+                    msg_text, msg_entities = _parse_caption_entities(caption)
+                else:
+                    msg_text = ""
+                    msg_entities = []
+                single = InputSingleMedia(
+                    media=input_media,
+                    random_id=random.randrange(-2 ** 63, 2 ** 63),
+                    message=msg_text,
+                    entities=msg_entities if msg_entities else [],
+                )
+                multi_media.append(single)
+            if not multi_media:
+                return None
+            kwargs = {'peer': peer, 'multi_media': multi_media}
+            if reply_to is not None:
+                kwargs['reply_to'] = _make_reply_to(reply_to)
+            try:
+                result = await client(SendMultiMediaRequest(**kwargs))
+                sent = []
+                if hasattr(result, 'updates'):
+                    for update in result.updates:
+                        if hasattr(update, 'message'):
+                            sent.append(update.message)
+                return sent if sent else []
+            except Exception as e2:
+                logging.warning(f"⚠️ InputMedia 相册刷新后失败: {e2}")
+        else:
+            logging.warning(f"⚠️ InputMedia 相册失败: {e}")
         return None
 
 
@@ -1228,13 +1270,31 @@ async def _send_media_with_caption(
     # 注意：SendMediaRequest 不支持 buttons 参数
     # 带按钮需要通过 bot API 或 send_message
 
-    result = await client(SendMediaRequest(**kwargs))
-
-    if hasattr(result, 'updates'):
-        for update in result.updates:
-            if hasattr(update, 'message'):
-                return update.message
-    return result
+    try:
+        result = await client(SendMediaRequest(**kwargs))
+        if hasattr(result, 'updates'):
+            for update in result.updates:
+                if hasattr(update, 'message'):
+                    return update.message
+        return result
+    except Exception as e:
+        if _is_file_reference_error(e):
+            logging.warning("⚠️ file_reference 过期，尝试刷新")
+            refreshed = await _refetch_message(client, message)
+            input_media = _build_input_media(refreshed.media, spoiler=is_spoiler)
+            if input_media is None:
+                return None
+            kwargs['media'] = input_media
+            try:
+                result = await client(SendMediaRequest(**kwargs))
+                if hasattr(result, 'updates'):
+                    for update in result.updates:
+                        if hasattr(update, 'message'):
+                            return update.message
+                return result
+            except Exception as e2:
+                logging.warning(f"⚠️ 刷新后发送失败: {e2}")
+        raise
 
 
 # =====================================================================
@@ -1275,6 +1335,17 @@ async def send_message(
                     logging.info("✅ 直接转发媒体组成功")
                     return result
                 except Exception as e:
+                    if _is_file_reference_error(e):
+                        logging.warning("⚠️ 直接转发媒体组 file_reference 过期，尝试刷新")
+                        refreshed_messages = []
+                        for msg in grouped_messages:
+                            refreshed_messages.append(await _refetch_message(client, msg))
+                        try:
+                            result = await client.forward_messages(recipient, refreshed_messages)
+                            logging.info("✅ 直接转发媒体组刷新后成功")
+                            return result
+                        except Exception as e2:
+                            logging.warning(f"⚠️ 直接转发媒体组刷新后失败: {e2}")
                     if _is_protected_chat_error(e):
                         combined_caption = (
                             grouped_caption if grouped_caption is not None
@@ -1306,6 +1377,17 @@ async def send_message(
                     logging.info(f"✅ forward 成功 msg={tm.message.id}")
                     return result
                 except Exception as e:
+                    if _is_file_reference_error(e):
+                        logging.warning("⚠️ 直接转发 file_reference 过期，尝试刷新")
+                        refreshed = await _refetch_message(client, tm.message)
+                        try:
+                            result = await client.forward_messages(recipient, refreshed)
+                            if isinstance(result, list):
+                                result = result[0] if result else None
+                            logging.info(f"✅ forward 刷新后成功 msg={tm.message.id}")
+                            return result
+                        except Exception as e2:
+                            logging.warning(f"⚠️ 直接转发刷新后失败: {e2}")
                     if _is_protected_chat_error(e):
                         if getattr(tm.message, "media", None):
                             return await _send_single_by_upload(
