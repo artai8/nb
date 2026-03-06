@@ -1,3 +1,15 @@
+---
+title: NB Forwarder
+emoji: "🚀"
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "latest"
+python_version: "3.10"
+app_file: app.py
+pinned: false
+---
+
 # NB on Hugging Face Spaces
 
 NB is a Telegram forwarding automation tool with a Streamlit Web UI.
