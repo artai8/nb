@@ -193,9 +193,6 @@ class NbPlugin:
     def modify(self, tm: NbMessage) -> NbMessage:
         return tm
 
-    def modify_group(self, tms: List[NbMessage]) -> List[NbMessage]:
-        return [self.modify(tm) for tm in tms if tm]
-
 
 PLUGINS = CONFIG.plugins
 _plugins: Dict[str, NbPlugin] = {}
