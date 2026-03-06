@@ -1652,6 +1652,120 @@ def replace(pattern: str, new: str, string: str, regex: bool) -> str:
         return string.replace(pattern, new)
 
 
+# =====================================================================
+#  评论区媒体合并收集
+# =====================================================================
+
+async def collect_all_comment_media(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+    post_id: int,
+    comments_cfg,
+) -> List[Message]:
+    """
+    收集帖子评论区中所有带媒体的消息。
+    用于评论区媒体合并模式：将主消息 + 评论区媒体作为一个媒体组转发。
+
+    Args:
+        client: Telegram 客户端
+        channel_id: 频道 ID
+        post_id: 帖子 ID
+        comments_cfg: CommentsConfig 实例
+    Returns:
+        带媒体的评论消息列表
+    """
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    if disc_msg is None:
+        return []
+
+    media_messages: List[Message] = []
+    try:
+        async for comment in client.iter_messages(
+            disc_msg.chat_id, reply_to=disc_msg.id,
+            reverse=True, limit=CONFIG.bot_media.recent_limit,
+        ):
+            if isinstance(comment, MessageService):
+                continue
+
+            # 跳过频道转发副本（讨论区顶部的帖子镜像）
+            if hasattr(comment, 'fwd_from') and comment.fwd_from:
+                if getattr(comment.fwd_from, 'channel_post', None):
+                    continue
+
+            # 跳过 bot 评论
+            if getattr(comments_cfg, 'skip_bot_comments', False):
+                try:
+                    sender = await comment.get_sender()
+                    if sender and getattr(sender, 'bot', False):
+                        continue
+                except Exception:
+                    pass
+
+            # 跳过管理员评论
+            if getattr(comments_cfg, 'skip_admin_comments', False):
+                try:
+                    sender = await comment.get_sender()
+                    if sender and getattr(sender, 'admin', False):
+                        continue
+                except Exception:
+                    pass
+
+            # 只收集带媒体的消息
+            if _msg_has_media(comment):
+                media_messages.append(comment)
+
+    except MsgIdInvalidError as e:
+        logging.warning(f"⚠️ 讨论区消息 ID 无效 post={post_id}: {e}")
+    except Exception as e:
+        logging.warning(f"⚠️ 评论区媒体收集失败 post={post_id}: {e}")
+
+    logging.info(
+        f"📦 评论区媒体收集完成 post={post_id}: {len(media_messages)} 个媒体文件"
+    )
+    return media_messages
+
+
+# =====================================================================
+#  共用辅助函数（供 live.py / past.py 共用）
+# =====================================================================
+
+def extract_msg_id(fwded) -> Optional[int]:
+    """从转发结果中提取消息 ID"""
+    if fwded is None:
+        return None
+    if isinstance(fwded, int):
+        return fwded
+    if isinstance(fwded, list):
+        if fwded and hasattr(fwded[0], 'id'):
+            return fwded[0].id
+        return None
+    if hasattr(fwded, 'id'):
+        return fwded.id
+    return None
+
+
+def dedupe_messages(messages: List[Message]) -> List[Message]:
+    """按消息 ID 去重"""
+    seen = set()
+    result = []
+    for msg in messages:
+        if msg.id in seen:
+            continue
+        seen.add(msg.id)
+        result.append(msg)
+    return result
+
+
+def chunk_list(items: List, size: int) -> List[List]:
+    """将列表按 size 分块"""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def bot_media_allowed(forward) -> bool:
+    """检查 forward 配置是否允许 bot 媒体"""
+    return forward is None or forward.bot_media_enabled is not False
+
+
 def clean_session_files():
     for item in os.listdir():
         if item.endswith(".session") or item.endswith(".session-journal"):
