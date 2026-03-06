@@ -924,6 +924,8 @@ async def _send_album_by_upload(
             )
         return None
 
+    any_spoiler = preserve_spoiler and _any_has_spoiler(grouped_messages)
+
     try:
         kwargs = {
             'entity': recipient,
@@ -935,8 +937,10 @@ async def _send_album_by_upload(
             'allow_cache': False,
             'parse_mode': "md",
         }
+        if any_spoiler and _SUPPORTS_SPOILER:
+            kwargs['has_spoiler'] = True
         result = await client.send_file(**kwargs)
-        logging.info(f"✅ 相册下载重传成功 ({len(files)} 个文件)")
+        logging.info(f"✅ 相册下载重传成功 ({len(files)} 个文件, spoiler={any_spoiler})")
         return result
     except Exception as e:
         logging.error(f"❌ 相册下载重传失败: {e}")
@@ -944,13 +948,17 @@ async def _send_album_by_upload(
         results = []
         for i, file in enumerate(files):
             try:
-                r = await client.send_file(
-                    recipient, file,
-                    caption=(caption or "") if i == 0 else "",
-                    reply_to=reply_to if i == 0 else None,
-                    supports_streaming=True,
-                    parse_mode="md",
-                )
+                single_kwargs = {
+                    'entity': recipient,
+                    'file': file,
+                    'caption': (caption or "") if i == 0 else "",
+                    'reply_to': reply_to if i == 0 else None,
+                    'supports_streaming': True,
+                    'parse_mode': "md",
+                }
+                if any_spoiler and _SUPPORTS_SPOILER:
+                    single_kwargs['has_spoiler'] = True
+                r = await client.send_file(**single_kwargs)
                 results.append(r)
             except Exception as e2:
                 logging.error(f"❌ 逐条发送失败 ({i}): {e2}")
@@ -1087,8 +1095,7 @@ async def _send_album_with_spoiler(
                 multi_media = []
                 for i, msg in enumerate(refreshed_messages):
                     media = msg.media
-                    is_spoiler = _has_spoiler(msg)
-                    input_media = _build_input_media(media, spoiler=is_spoiler)
+                    input_media = _build_input_media(media, spoiler=True)
                     if input_media is None:
                         continue
                     if i == 0 and caption:
@@ -1470,20 +1477,32 @@ async def send_message(
 
     # 3a. 插件生成的新文件
     if tm.new_file:
+        is_spoiler = _has_spoiler(tm.message)
         try:
-            return await client.send_file(
-                recipient, tm.new_file,
-                caption=tm.text, reply_to=effective_reply_to,
-                supports_streaming=True, buttons=processed_markup,
-            )
+            send_kwargs = {
+                'entity': recipient,
+                'file': tm.new_file,
+                'caption': tm.text,
+                'reply_to': effective_reply_to,
+                'supports_streaming': True,
+                'buttons': processed_markup,
+            }
+            if is_spoiler and _SUPPORTS_SPOILER:
+                send_kwargs['has_spoiler'] = True
+            return await client.send_file(**send_kwargs)
         except Exception as e:
             logging.warning(f"⚠️ 新文件发送失败: {e}")
             try:
-                return await client.send_file(
-                    recipient, tm.new_file,
-                    caption=tm.text, reply_to=effective_reply_to,
-                    supports_streaming=True,
-                )
+                retry_kwargs = {
+                    'entity': recipient,
+                    'file': tm.new_file,
+                    'caption': tm.text,
+                    'reply_to': effective_reply_to,
+                    'supports_streaming': True,
+                }
+                if is_spoiler and _SUPPORTS_SPOILER:
+                    retry_kwargs['has_spoiler'] = True
+                return await client.send_file(**retry_kwargs)
             except Exception as e2:
                 logging.error(f"❌ 新文件发送最终失败: {e2}")
                 return None
