@@ -154,6 +154,27 @@ if check_password(st):
                                 else: comments.manual_post_mapping = {}
                             except: comments.manual_post_mapping = {}
 
+                        st.markdown("---")
+                        st.markdown("**📦 评论区资源提取（合并模式）**")
+                        st.caption("启用后，将主消息和评论区媒体合并为媒体组转发，超过10个自动分组。与常规评论转发互斥。")
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            comments.merge_comment_media = st.checkbox(
+                                "启用评论区媒体合并",
+                                value=comments.merge_comment_media,
+                                key=f"mcm{con}",
+                            )
+                        with mc2:
+                            comments.merge_wait_seconds = st.number_input(
+                                "合并等待时间（秒）",
+                                min_value=10,
+                                max_value=600,
+                                value=comments.merge_wait_seconds,
+                                step=10,
+                                key=f"mws{con}",
+                                help="等待评论区媒体的时间，超时后触发合并发送",
+                            )
+
                     obj.comments = comments
 
                 with st.expander("🤖 机器人媒体覆盖设置", expanded=bool(obj.bot_media_enabled)):
