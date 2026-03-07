@@ -53,20 +53,7 @@ if check_password(st):
         with st.expander("如何获取 Session String？"):
             st.markdown(
                 """
-            Replit 链接: https://replit.com/@artai8/tg-login?v=1
-
-            _点击上方链接并输入 API ID、API Hash 和手机号以生成 Session String。_
-
-            **开发者提示：**
-
-            由于某些问题，此 Web 界面不支持直接使用手机号登录用户账户。
-
-            我已经构建了一个名为 tg-login (https://github.com/artai8/tg-login) 的命令行程序，它可以为您生成 Session String。
-
-            您可以在您的计算机上运行 tg-login，或者在上述 Replit 中安全地运行。tg-login 是开源的，您也可以检查在 Replit 中运行的 bash 脚本。
-
-            什么是 Session String？
-            https://docs.telethon.dev/en/stable/concepts/sessions.html#string-sessions
+            问开发者：https://t.me/aibot798
             """
             )
 
@@ -80,3 +67,4 @@ if check_password(st):
         CONFIG.login.API_HASH = input_api_hash
         write_config(CONFIG)
         st.success("配置保存成功！")
+
