@@ -394,7 +394,7 @@ async def _flush_grouped_buffer(
             f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}"
         )
 
-        delay_seconds = random.randint(30, 120)
+        delay_seconds = random.randint(300, 600)
         logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
@@ -503,7 +503,7 @@ async def _forward_comments_for_post(
                 )
                 comment_count += len(grouped_buffer[old_gid])
                 del grouped_buffer[old_gid]
-                delay = random.randint(30, 120)
+                delay = random.randint(300, 600)
                 await asyncio.sleep(delay)
 
             grouped_buffer[comment.grouped_id].append(comment)
@@ -516,14 +516,14 @@ async def _forward_comments_for_post(
             )
             comment_count += len(grouped_buffer[old_gid])
             del grouped_buffer[old_gid]
-            delay = random.randint(30, 120)
+            delay = random.randint(300, 600)
             await asyncio.sleep(delay)
 
         # 单条评论处理
         tm = await apply_plugins(comment)
         if not tm:
             comment_count += 1
-            delay = random.randint(30, 120)
+            delay = random.randint(300, 600)
             await asyncio.sleep(delay)
             continue
 
@@ -553,7 +553,7 @@ async def _forward_comments_for_post(
             await _send_single_comment(client, comment, dest_targets, tm=tm)
         comment_count += 1
 
-        delay = random.randint(30, 120)
+        delay = random.randint(300, 600)
         await asyncio.sleep(delay)
 
     # 刷新剩余 grouped 缓冲
