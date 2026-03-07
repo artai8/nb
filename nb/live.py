@@ -69,7 +69,7 @@ async def _queue_worker() -> None:
             logging.error(f"❌ live 队列处理失败: {e}")
         finally:
             LIVE_QUEUE.task_done()
-        delay_seconds = random.randint(30, 120)
+        delay_seconds = random.randint(300, 600)
         logging.info(f"⏸️ live 队列休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
