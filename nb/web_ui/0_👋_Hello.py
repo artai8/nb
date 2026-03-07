@@ -65,7 +65,7 @@ with c_info:
     **如何开始？**
     请查看侧边栏菜单来配置您的 **TG 登录**，设置 **连接**，并启动 **运行仪表盘**。
     """)
-    st.markdown("[在 GitHub Wiki 查看文档](https://github.com/artai8/nb/wiki)")
+    st.markdown("[来 telegram 交流群](https://t.me/aibot798)")
 
 with c_dev:
     st.markdown("""
