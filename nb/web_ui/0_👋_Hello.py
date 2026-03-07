@@ -16,7 +16,7 @@ switch_theme(st, CONFIG)
 # --- Hero Header ---
 col_logo, col_txt = st.columns([1, 6])
 with col_logo:
-    st.image("https://user-images.githubusercontent.com/66209958/115183360-3fa4d500-a0f9-11eb-9c0f-c5ed03a9ae17.png", width=100)
+    st.markdown("<div style='font-size:4rem;padding-top:10px;'>🚀</div>", unsafe_allow_html=True)
 with col_txt:
     st.markdown("""
     <div style='padding-top: 10px;'>
@@ -65,7 +65,7 @@ with c_info:
     **如何开始？**
     请查看侧边栏菜单来配置您的 **TG 登录**，设置 **连接**，并启动 **运行仪表盘**。
     """)
-    st.markdown("[在 GitHub Wiki 查看文档](https://github.com/artai8/nb/wiki)")
+    st.markdown("查看文档以了解更多信息。")
 
 with c_dev:
     st.markdown("""

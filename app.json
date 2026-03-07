@@ -1,11 +1,11 @@
 {
   "name": "nb",
   "stack": "container",
-  "description": "https://t.me/babasou",
+  "description": "The ultimate tool to automate custom telegram message forwarding.",
   "keywords": ["telegram", "forwarding", "automation"],
-  "website": "https://t.me/babasou",
-  "repository": "https://github.com/artai8/nb",
-  "logo": "https://github.com/fluidicon.png",
+  "website": "",
+  "repository": "",
+  "logo": "",
   "env": {
     "PASSWORD": {
       "description": "Web界面密码",

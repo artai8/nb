@@ -175,7 +175,7 @@ if check_password(st):
                     '原始文本': '新文本'
 
                     ```
-                - 查看 [文档](https://github.com/artai8/nb/wiki/Replace-Plugin) 了解高级用法。"""
+                - 查看文档了解高级用法。"""
             )
 
     with st.expander("标题/页脚"):
@@ -215,16 +215,15 @@ if check_password(st):
                     """
                 <div class="glass-card">
                     <h6 style="margin-top:0">如何获取 Session String？</h6>
-                    <p>Replit 链接: <a href="https://replit.com/@artai8/tg-login?v=1" target="_blank">https://replit.com/@artai8/tg-login?v=1</a></p>
-                    <p style="margin-bottom:1em"><i>点击上方链接并输入 API ID、API Hash 和手机号以生成 Session String。</i></p>
+                    <p>您可以通过 <code>pip install tg-login</code> 安装并运行 tg-login 来生成 Session String。</p>
+                    <p style="margin-bottom:1em"><i>输入 API ID、API Hash 和手机号以生成 Session String。</i></p>
                     
                     <div style="background:rgba(0,0,0,0.05); padding:10px; border-radius:8px; font-size:0.9em">
                         <strong>开发者提示：</strong><br>
                         由于某些问题，此 Web 界面不支持直接使用手机号登录用户账户。<br>
-                        我已经构建了一个名为 tg-login (https://github.com/artai8/tg-login) 的命令行程序，它可以为您生成 Session String。<br>
-                        您可以在您的计算机上运行 tg-login，或者在上述 Replit 中安全地运行。tg-login 是开源的，您也可以检查在 Replit 中运行的 bash 脚本。<br>
+                        您可以通过 <code>pip install tg-login</code> 安装并运行 tg-login 来生成 Session String。tg-login 是开源的。<br>
                         <br>
-                        <a href="https://docs.telethon.dev/en/stable/concepts/sessions.html#string-sessions" target="_blank">什么是 Session String？</a>
+                        什么是 Session String？Session String 是 Telethon 会话的字符串表示形式，可以用来免密码登录。
                     </div>
                 </div>
                 """,

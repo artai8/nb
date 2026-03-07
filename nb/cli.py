@@ -71,8 +71,7 @@ def version_check():
         latver = latest_release("nb").version
         if __version__ != latver:
             con.print(
-                f"nb has a newer release {latver} available!\n"
-                "Visit http://bit.ly/update-nb",
+                f"nb has a newer release {latver} available!",
                 style="bold yellow",
             )
         else:
@@ -103,8 +102,6 @@ def main(
     ),
 ):
     """The ultimate tool to automate custom telegram message forwarding.
-
-    Source Code: https://github.com/artai8/nb
 
     For updates join telegram channel @aahniks_code
 
