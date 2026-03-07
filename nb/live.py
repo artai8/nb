@@ -25,44 +25,12 @@ from nb.utils import (
     _extract_comment_keyword,
     _auto_comment_keyword,
     _msg_has_media,
+    extract_msg_id as _extract_msg_id,
+    dedupe_messages as _dedupe_messages,
+    chunk_list as _chunk_list,
+    bot_media_allowed as _bot_media_allowed,
+    collect_all_comment_media,
 )
-
-
-# =====================================================================
-#  共用辅助函数
-# =====================================================================
-
-def _extract_msg_id(fwded) -> Optional[int]:
-    if fwded is None:
-        return None
-    if isinstance(fwded, int):
-        return fwded
-    if isinstance(fwded, list):
-        if fwded and hasattr(fwded[0], 'id'):
-            return fwded[0].id
-        return None
-    if hasattr(fwded, 'id'):
-        return fwded.id
-    return None
-
-
-def _dedupe_messages(messages: List[Message]) -> List[Message]:
-    seen = set()
-    result = []
-    for msg in messages:
-        if msg.id in seen:
-            continue
-        seen.add(msg.id)
-        result.append(msg)
-    return result
-
-
-def _chunk_list(items: List, size: int) -> List[List]:
-    return [items[i:i + size] for i in range(0, len(items), size)]
-
-
-def _bot_media_allowed(forward) -> bool:
-    return forward is None or forward.bot_media_enabled is not False
 
 
 def _resolve_reply_to_id_from_event(
@@ -101,13 +69,159 @@ async def _queue_worker() -> None:
             logging.error(f"❌ live 队列处理失败: {e}")
         finally:
             LIVE_QUEUE.task_done()
-        delay_seconds = random.randint(30, 120)
+        delay_seconds = random.randint(300, 600)
         logging.info(f"⏸️ live 队列休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
 
 async def _enqueue_task(handler, payload) -> None:
     await LIVE_QUEUE.put((handler, payload))
+
+
+# =====================================================================
+#  评论区媒体合并缓冲系统
+# =====================================================================
+
+_MAX_MERGE_BUFFER = 100  # 防止内存泄漏
+
+
+class MergeContext:
+    """缓冲主消息和评论区媒体，等待超时后合并发送。"""
+
+    def __init__(
+        self,
+        src_channel_id: int,
+        src_post_id: int,
+        main_messages: List[Message],
+        forward: config.Forward,
+        dest: List[int],
+        client: TelegramClient,
+    ):
+        self.src_channel_id = src_channel_id
+        self.src_post_id = src_post_id
+        self.main_messages = main_messages
+        self.comment_media: List[Message] = []
+        self.forward = forward
+        self.dest = dest
+        self.client = client
+
+
+# (src_channel_id, post_id) -> MergeContext
+_MERGE_BUFFER: Dict[Tuple[int, int], MergeContext] = {}
+_MERGE_TIMERS: Dict[Tuple[int, int], asyncio.TimerHandle] = {}
+
+
+async def _flush_merge_buffer(key: Tuple[int, int]) -> None:
+    """定时器到期时合并主消息 + 评论区媒体，发送为媒体组。"""
+    ctx = _MERGE_BUFFER.pop(key, None)
+    _MERGE_TIMERS.pop(key, None)
+    if ctx is None:
+        return
+
+    src = ctx.src_channel_id
+    post_id = ctx.src_post_id
+
+    combined = _dedupe_messages(ctx.main_messages + ctx.comment_media)
+
+    if len(combined) > 1 or any(_msg_has_media(m) for m in ctx.main_messages):
+        # 有媒体：合并发送
+        for d in ctx.dest:
+            try:
+                reply_to_id = _resolve_reply_to_id_from_event_key(
+                    ctx.main_messages[0], d
+                )
+                fwded_msg = await _send_combined_album(
+                    d, combined, reply_to=reply_to_id,
+                )
+                if fwded_msg is not None:
+                    for msg in ctx.main_messages:
+                        event_uid = st.EventUid(
+                            st.DummyEvent(src, msg.id)
+                        )
+                        if event_uid not in st.stored:
+                            st.stored[event_uid] = {}
+                        st.stored[event_uid][d] = fwded_msg
+                    fwded_id = _extract_msg_id(fwded_msg)
+                    if fwded_id is not None:
+                        st.add_post_mapping(src, post_id, d, fwded_id)
+            except Exception as e:
+                logging.error(f"❌ 合并缓冲发送失败: {e}")
+    else:
+        # 纯文本，无评论媒体，正常单条发送
+        for msg in ctx.main_messages:
+            tm = await apply_plugins(msg)
+            if not tm:
+                continue
+            event_uid = st.EventUid(st.DummyEvent(src, msg.id))
+            st.stored[event_uid] = {}
+            for d in ctx.dest:
+                reply_to_id = _resolve_reply_to_id_from_event_key(msg, d)
+                tm.reply_to = reply_to_id
+                try:
+                    fwded_msg = await send_message(d, tm)
+                    if fwded_msg is not None:
+                        st.stored[event_uid][d] = fwded_msg
+                        fwded_id = _extract_msg_id(fwded_msg)
+                        if fwded_id is not None:
+                            st.add_post_mapping(src, msg.id, d, fwded_id)
+                except Exception as e:
+                    logging.error(f"❌ 合并模式单条发送失败: {e}")
+            tm.clear()
+
+    logging.info(
+        f"📦 合并缓冲刷新完成: post={post_id}, "
+        f"主消息={len(ctx.main_messages)}, 评论媒体={len(ctx.comment_media)}"
+    )
+
+
+def _resolve_reply_to_id_from_event_key(
+    message: Message,
+    dest: int,
+) -> Optional[int]:
+    """从消息中解析 reply_to 映射（非 event 版本）。"""
+    if not getattr(message, 'is_reply', False):
+        return None
+    reply_msg_id = _get_reply_to_msg_id(message)
+    if reply_msg_id is None:
+        return None
+    chat_id = message.chat_id
+    r_event = st.DummyEvent(chat_id, reply_msg_id)
+    r_event_uid = st.EventUid(r_event)
+    if r_event_uid not in st.stored:
+        return None
+    fwded_reply = st.stored[r_event_uid].get(dest)
+    return _extract_msg_id(fwded_reply)
+
+
+def _start_merge_timer(key: Tuple[int, int], wait_seconds: int) -> None:
+    """启动或重置合并缓冲的定时器。"""
+    old_timer = _MERGE_TIMERS.pop(key, None)
+    if old_timer is not None:
+        old_timer.cancel()
+
+    loop = asyncio.get_running_loop()
+    _MERGE_TIMERS[key] = loop.call_later(
+        wait_seconds,
+        lambda k=key: asyncio.ensure_future(
+            _enqueue_task(_flush_merge_buffer_wrapper, k)
+        ),
+    )
+
+
+async def _flush_merge_buffer_wrapper(key: Tuple[int, int]) -> None:
+    """定时器回调包装：通过队列执行刷新。"""
+    await _flush_merge_buffer(key)
+
+
+def _evict_oldest_merge_buffer() -> None:
+    """驱逐最旧的合并缓冲，防止内存泄漏。"""
+    if len(_MERGE_BUFFER) > _MAX_MERGE_BUFFER:
+        oldest_key = next(iter(_MERGE_BUFFER))
+        _MERGE_BUFFER.pop(oldest_key, None)
+        timer = _MERGE_TIMERS.pop(oldest_key, None)
+        if timer is not None:
+            timer.cancel()
+        logging.warning(f"⚠️ 合并缓冲已满，驱逐最旧条目: {oldest_key}")
 
 
 # =====================================================================
@@ -167,9 +281,9 @@ async def _send_combined_album(
         return None
 
     chunks = _chunk_list(tms, 10)
-    # 只第一个 chunk 携带 caption
-    first_caption = "\n\n".join(
-        [tm.text.strip() for tm in chunks[0] if tm.text and tm.text.strip()]
+    # 所有 chunk 都携带相同的消息文本
+    combined_caption = "\n\n".join(
+        [tm.text.strip() for tm in tms if tm.text and tm.text.strip()]
     )
 
     fwded_first = None
@@ -177,7 +291,6 @@ async def _send_combined_album(
         if not chunk:
             continue
         chunk_reply = reply_to if idx == 0 else None
-        chunk_caption = first_caption if idx == 0 else None
 
         if chunk_reply is not None and idx == 0:
             chunk[0].reply_to = chunk_reply
@@ -187,7 +300,7 @@ async def _send_combined_album(
             chunk[0],
             grouped_messages=[tm.message for tm in chunk],
             grouped_tms=chunk,
-            grouped_caption=chunk_caption,
+            grouped_caption=combined_caption or None,
             comment_to_post=comment_to_post if idx == 0 else None,
         )
         if fwded_first is None:
@@ -286,6 +399,39 @@ async def _send_grouped_messages(grouped_id: int) -> None:
 
         dest = config.from_to.get(chat_id)
         forward = config.forward_map.get(chat_id)
+
+        # 评论区媒体合并模式：将相册缓冲到 MergeContext
+        if (
+            forward is not None
+            and forward.comments.merge_comment_media
+            and messages
+        ):
+            first_msg = messages[0]
+            if getattr(first_msg, 'post', False):
+                merge_key = (chat_id, first_msg.id)
+                _evict_oldest_merge_buffer()
+                msg_client = (
+                    getattr(first_msg, '_client', None)
+                    or getattr(first_msg, 'client', None)
+                )
+                ctx = MergeContext(
+                    src_channel_id=chat_id,
+                    src_post_id=first_msg.id,
+                    main_messages=list(messages),
+                    forward=forward,
+                    dest=list(dest),
+                    client=msg_client,
+                )
+                _MERGE_BUFFER[merge_key] = ctx
+                wait_secs = forward.comments.merge_wait_seconds
+                _start_merge_timer(merge_key, wait_secs)
+                logging.info(
+                    f"📦 合并模式：缓冲相册 {first_msg.id} "
+                    f"({len(messages)} 条)，等待 {wait_secs} 秒"
+                )
+                # 清理 grouped 缓存后继续下一个 chat
+                continue
+
         bot_media_allowed = _bot_media_allowed(forward)
 
         # 自动评论关键字触发（修复 Bug8：在相册完整后才触发）
@@ -466,6 +612,30 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
 
     dest = config.from_to.get(chat_id)
 
+    # 评论区媒体合并模式：缓冲主消息，等待评论媒体到达后合并发送
+    if (
+        forward is not None
+        and forward.comments.merge_comment_media
+        and getattr(message, 'post', False)
+    ):
+        merge_key = (chat_id, message.id)
+        _evict_oldest_merge_buffer()
+        ctx = MergeContext(
+            src_channel_id=chat_id,
+            src_post_id=message.id,
+            main_messages=[message],
+            forward=forward,
+            dest=list(dest),
+            client=event.client,
+        )
+        _MERGE_BUFFER[merge_key] = ctx
+        wait_secs = forward.comments.merge_wait_seconds
+        _start_merge_timer(merge_key, wait_secs)
+        logging.info(
+            f"📦 合并模式：缓冲帖子 {message.id}，等待 {wait_secs} 秒收集评论媒体"
+        )
+        return
+
     # Bot 媒体拉取
     bot_media = []
     if bot_media_allowed:
@@ -640,6 +810,55 @@ async def _handle_comment_message(
             ] = channel_post
             return
 
+    # ---- 评论区媒体合并模式：将媒体追加到 MergeContext ----
+    if forward.comments.merge_comment_media and _msg_has_media(message):
+        src_channel_id = config.comment_sources.get(chat_id)
+        if src_channel_id is not None:
+            top_id = _get_reply_to_top_id(message)
+            channel_post_id = None
+            if top_id is not None:
+                channel_post_id = st.discussion_to_channel_post.get(
+                    (chat_id, top_id)
+                )
+                if channel_post_id is None:
+                    try:
+                        top_msg = await event.client.get_messages(
+                            chat_id, ids=top_id
+                        )
+                        if (
+                            top_msg
+                            and hasattr(top_msg, 'fwd_from')
+                            and top_msg.fwd_from
+                        ):
+                            channel_post_id = getattr(
+                                top_msg.fwd_from, 'channel_post', None
+                            )
+                            if channel_post_id:
+                                st.discussion_to_channel_post[
+                                    (chat_id, top_id)
+                                ] = channel_post_id
+                    except Exception:
+                        pass
+
+            if channel_post_id is not None:
+                merge_key = (src_channel_id, channel_post_id)
+                ctx = _MERGE_BUFFER.get(merge_key)
+                if ctx is not None:
+                    ctx.comment_media.append(message)
+                    wait = forward.comments.merge_wait_seconds
+                    _start_merge_timer(merge_key, wait)
+                    logging.info(
+                        f"📎 评论媒体加入合并缓冲: "
+                        f"post={channel_post_id}, "
+                        f"累计评论媒体={len(ctx.comment_media)}"
+                    )
+                    return
+        # 没有匹配的缓冲，走正常评论转发流程
+
+    # 合并模式下跳过常规评论转发
+    if forward.comments.merge_comment_media:
+        return
+
     # 修复 Bug5：处理评论中的 grouped 消息
     if message.grouped_id is not None:
         gid = message.grouped_id
@@ -758,15 +977,9 @@ async def edited_message_handler(event) -> None:
         mid = _extract_msg_id(fwded)
         if mid is not None:
             try:
-                # 修复 Bug14：带媒体的消息也更新 caption
-                if getattr(event.message, 'media', None):
-                    await event.client.edit_message(
-                        d, mid, tm.text, parse_mode="md"
-                    )
-                else:
-                    await event.client.edit_message(
-                        d, mid, tm.text, parse_mode="md"
-                    )
+                await event.client.edit_message(
+                    d, mid, tm.text, parse_mode="md"
+                )
             except Exception as e:
                 logging.error(f"❌ 编辑同步失败: {e}")
     tm.clear()

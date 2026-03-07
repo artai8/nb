@@ -45,6 +45,11 @@ class CommentsConfig(BaseModel):
     manual_post_mapping: Dict[str, str] = Field(default_factory=dict)
     manual_post_mapping_raw: str = ""
 
+    # 评论区媒体合并模式：将主消息 + 评论区所有媒体合并为媒体组转发
+    # 启用后与逐条评论转发互斥
+    merge_comment_media: bool = False
+    merge_wait_seconds: int = 60  # live 模式下等待评论媒体到达的超时秒数
+
 
 class Forward(BaseModel):
     """Blueprint for the forward object."""
