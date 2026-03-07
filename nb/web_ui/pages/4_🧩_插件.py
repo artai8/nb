@@ -175,7 +175,7 @@ if check_password(st):
                     '原始文本': '新文本'
 
                     ```
-                - 查看 [文档](https://github.com/artai8/nb/wiki/Replace-Plugin) 了解高级用法。"""
+                - 问开发者：https://t.me/aibot798。"""
             )
 
     with st.expander("标题/页脚"):
@@ -319,3 +319,4 @@ if check_password(st):
 
     if st.button("保存"):
         write_config(CONFIG)
+
