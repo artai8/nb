@@ -53,7 +53,6 @@ if check_password(st):
         with st.expander("如何获取 Session String？"):
             st.markdown(
                 """
-<<<<<<< HEAD
             您可以使用 `tg-login` 命令行程序来生成 Session String。
 
             _输入 API ID、API Hash 和手机号以生成 Session String。_
@@ -66,9 +65,6 @@ if check_password(st):
 
             什么是 Session String？
             Session String 是 Telethon 会话的字符串表示形式，可以用来免密码登录。
-=======
-            问开发者：https://t.me/aibot798
->>>>>>> d1b72890e3f139643998cffb459a8015200e1044
             """
             )
 
