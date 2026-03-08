@@ -65,7 +65,11 @@ with c_info:
     **如何开始？**
     请查看侧边栏菜单来配置您的 **TG 登录**，设置 **连接**，并启动 **运行仪表盘**。
     """)
+<<<<<<< HEAD
     st.markdown("查看文档以了解更多信息。")
+=======
+    st.markdown("[来 telegram 交流群](https://t.me/aibot798)")
+>>>>>>> d1b72890e3f139643998cffb459a8015200e1044
 
 with c_dev:
     st.markdown("""

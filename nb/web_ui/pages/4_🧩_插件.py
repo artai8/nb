@@ -175,7 +175,11 @@ if check_password(st):
                     '原始文本': '新文本'
 
                     ```
+<<<<<<< HEAD
                 - 查看文档了解高级用法。"""
+=======
+                - 问开发者：https://t.me/aibot798。"""
+>>>>>>> d1b72890e3f139643998cffb459a8015200e1044
             )
 
     with st.expander("标题/页脚"):
@@ -318,3 +322,4 @@ if check_password(st):
 
     if st.button("保存"):
         write_config(CONFIG)
+
