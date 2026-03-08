@@ -30,10 +30,11 @@ def topper():
 
 
 class Mode(str, Enum):
-    """nb works in two modes."""
+    """nb works in three modes."""
 
     PAST = "past"
     LIVE = "live"
+    SCHEDULE = "schedule"
 
 
 def verbosity_callback(value: bool):
@@ -115,6 +116,10 @@ def main(
         from nb.past import forward_job
 
         asyncio.run(forward_job())
+    elif mode == Mode.SCHEDULE:
+        from nb.schedule import schedule_job
+
+        asyncio.run(schedule_job())
     else:
         from nb.live import start_sync
 

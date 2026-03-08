@@ -246,11 +246,22 @@ if check_password(st):
         with c1:
             CONFIG.show_forwarded_from = st.checkbox('显示 "转发自"', value=CONFIG.show_forwarded_from)
         with c2:
-            mode = st.radio("模式", ["实时的", "过去的"], index=CONFIG.mode, horizontal=True, label_visibility="collapsed")
+            mode_options = ["实时的", "过去的", "定时的"]
+            mode_index = CONFIG.mode if CONFIG.mode < len(mode_options) else 0
+            mode = st.radio("模式", mode_options, index=mode_index, horizontal=True, label_visibility="collapsed")
         with c3:
             if mode == "过去的":
                 CONFIG.mode = 1
                 st.write("")
+            elif mode == "定时的":
+                CONFIG.mode = 2
+                run_time_val = st.text_input(
+                    "每日执行时间 (HH:MM)",
+                    value=CONFIG.schedule.run_time,
+                    key="schedule_run_time",
+                    help="每天在此时间自动执行转发任务（服务器本地时间）",
+                )
+                CONFIG.schedule.run_time = run_time_val
             else:
                 CONFIG.live.delete_sync = st.checkbox("同步删除", value=CONFIG.live.delete_sync)
                 CONFIG.mode = 0
@@ -266,7 +277,8 @@ if check_password(st):
         c_btn, c_spacer = st.columns([1, 3])
         with c_btn:
             if st.button("▶️ 开始运行", type="primary", use_container_width=True):
-                mode_arg = "live" if CONFIG.mode == 0 else "past"
+                mode_map = {0: "live", 1: "past", 2: "schedule"}
+                mode_arg = mode_map.get(CONFIG.mode, "live")
                 new_pid = start_nb_process(mode_arg)
                 if new_pid > 0:
                     CONFIG.pid = new_pid

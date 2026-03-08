@@ -72,6 +72,7 @@ class Forward(BaseModel):
     comment_keyword_prefixes_raw: str = ""
     comment_keyword_suffixes_raw: str = ""
     comment_keyword_from_comments_enabled: Optional[bool] = None
+    daily_limit: int = 0  # 每日转发限额，0=不限制
 
 
 class LiveSettings(BaseModel):
@@ -97,6 +98,26 @@ class PastSettings(BaseModel):
                 val = 100
             if val < 0:
                 val = 0
+        return val
+
+
+class ScheduleSettings(BaseModel):
+    """定时调度模式配置。"""
+
+    run_time: str = "08:00"  # 每日执行时间 HH:MM
+
+    @field_validator("run_time")
+    @classmethod
+    def validate_run_time(cls, val):
+        import re
+        if not re.match(r'^\d{1,2}:\d{2}$', val):
+            logging.warning(f"run_time 格式无效: {val!r}, 使用默认 08:00")
+            return "08:00"
+        parts = val.split(":")
+        h, m = int(parts[0]), int(parts[1])
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            logging.warning(f"run_time 超出范围: {val!r}, 使用默认 08:00")
+            return "08:00"
         return val
 
 
@@ -147,6 +168,7 @@ class Config(BaseModel):
     mode: int = 0
     live: LiveSettings = Field(default_factory=LiveSettings)
     past: PastSettings = Field(default_factory=PastSettings)
+    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
 
     plugins: PluginConfig = Field(default_factory=PluginConfig)
     bot_messages: BotMessages = Field(default_factory=BotMessages)

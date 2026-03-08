@@ -253,14 +253,23 @@ if check_password(st):
                             key=f"bps{con}",
                         )
 
-                with st.expander("🕰️ 历史模式设置 (Past Mode)"):
-                    hc1, hc2 = st.columns(2)
+                with st.expander("🕰️ 历史/定时模式设置"):
+                    hc1, hc2, hc3 = st.columns(3)
                     with hc1:
                         off_val = st.text_input("起始消息 ID", value=str(obj.offset), key=f"off{con}")
                         obj.offset = _safe_int(off_val)
                     with hc2:
                         end_val = st.text_input("结束消息 ID (可选)", value=str(obj.end) if obj.end else "", key=f"end{con}")
                         obj.end = _safe_int(end_val, None) if end_val else None
+                    with hc3:
+                        obj.daily_limit = st.number_input(
+                            "每日转发限额",
+                            min_value=0,
+                            value=obj.daily_limit,
+                            step=1,
+                            key=f"dl{con}",
+                            help="定时模式下每天最多转发消息数。0 表示不限制。来源消息不足时，剩余配额传递给下一个连接。",
+                        )
 
                 st.markdown("---")
                 # 底部按钮区
