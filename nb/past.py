@@ -989,7 +989,7 @@ async def forward_job() -> None:
                                     f"❌ 帖子 {message.id} 评论转发失败: {e}"
                                 )
 
-                        delay_seconds = random.randint(30, 120)
+                            delay_seconds = random.randint(300, 600)
                         logging.info(
                             f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})"
                         )
