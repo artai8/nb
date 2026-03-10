@@ -16,9 +16,11 @@ class NbSpoiler(NbPlugin):
             return tm
         media = msg.media
         try:
+            setattr(msg, "_nb_spoiler", True)
             setattr(media, "spoiler", True)
-        except Exception:
-            pass
+            logging.info(f"🫥 已为消息 {getattr(msg, 'id', 'unknown')} 标记 spoiler")
+        except Exception as err:
+            logging.warning(f"⚠️ 剧透插件设置 spoiler 失败: {err}")
         return tm
 
     def modify(self, tm: NbMessage) -> NbMessage:

@@ -447,11 +447,8 @@ async def _auto_comment_keyword(
 ) -> bool:
     if CONFIG.login.user_type == 0:
         return False
-    disc_msg = await get_discussion_message(client, channel_id, post_id)
-    if disc_msg is None:
-        return False
     try:
-        await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+        await client.send_message(channel_id, keyword, comment_to=post_id)
         return True
     except Exception as e:
         logging.warning(f"⚠️ 评论区触发失败: {e}")
@@ -738,6 +735,8 @@ def _is_file_reference_error(err: Exception) -> bool:
 def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
         return False
+    if getattr(message, '_nb_spoiler', False):
+        return True
     return getattr(message.media, 'spoiler', False)
 
 
@@ -1329,6 +1328,7 @@ async def send_message(
 ) -> Union[Message, List[Message], None]:
     client: TelegramClient = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
+    should_preserve_spoiler = _has_spoiler(tm.message)
 
     # ================================================================
     # 1. 转发消息 (Show Forwarded From)
@@ -1548,6 +1548,7 @@ async def send_message(
                 return await _send_single_by_upload(
                     client, recipient, tm.message,
                     tm.text, effective_reply_to,
+                    preserve_spoiler=should_preserve_spoiler,
                 )
 
             except Exception as e:
@@ -1557,12 +1558,14 @@ async def send_message(
                     return await _send_single_by_upload(
                         client, recipient, tm.message,
                         tm.text, effective_reply_to,
+                        preserve_spoiler=should_preserve_spoiler,
                     )
                 if _is_protected_chat_error(e):
                     logging.warning("⚠️ 受保护聊天，下载重传")
                     return await _send_single_by_upload(
                         client, recipient, tm.message,
                         tm.text, effective_reply_to,
+                        preserve_spoiler=should_preserve_spoiler,
                     )
                 if _is_flood_wait(e):
                     await _handle_flood_wait(e)
@@ -1575,6 +1578,7 @@ async def send_message(
         return await _send_single_by_upload(
             client, recipient, tm.message,
             tm.text, effective_reply_to,
+            preserve_spoiler=should_preserve_spoiler,
         )
 
     # 3d. 纯文本消息

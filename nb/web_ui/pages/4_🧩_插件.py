@@ -4,6 +4,7 @@ import streamlit as st
 import yaml
 
 from nb.config import CONFIG, read_config, write_config
+from nb.plugins import reload_plugins
 from nb.plugin_models import FileType, Replace, Style, InlineButtonMode
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import get_list, get_string, hide_st, switch_theme
@@ -164,7 +165,7 @@ if check_password(st):
 
         if st.checkbox("显示规则和用法"):
             st.markdown(
-                """
+                r"""
                 将一个词或表达式替换为另一个。
 
                 - 每行写一个替换规则。
@@ -175,7 +176,6 @@ if check_password(st):
                     '原始文本': '新文本'
 
                     ```
-                - 查看文档了解高级用法。"""
                 - 查看文档了解高级用法。"""
             )
 
@@ -319,4 +319,6 @@ if check_password(st):
 
     if st.button("保存"):
         write_config(CONFIG)
+        reload_plugins(reload_async=False)
+        st.success("插件配置已保存，当前进程中的同步插件已重载")
 

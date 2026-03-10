@@ -2,6 +2,7 @@
 
 """Subpackage of nb: plugins."""
 
+import asyncio
 import inspect
 import logging
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,7 @@ from telethon.tl.types import (
     KeyboardButtonRow,
 )
 
-from nb.config import CONFIG
+import nb.config as config_module
 from nb.plugin_models import ASYNC_PLUGIN_IDS, InlineButtonMode
 from nb.utils import cleanup, stamp
 
@@ -146,7 +147,7 @@ class NbMessage:
         if original_markup is None:
             return None
 
-        inline_cfg = CONFIG.plugins.inline
+        inline_cfg = config_module.CONFIG.plugins.inline
         if not inline_cfg.check:
             # 插件未启用 → 默认移除，避免转发报错
             return None
@@ -193,17 +194,16 @@ class NbPlugin:
     def modify(self, tm: NbMessage) -> NbMessage:
         return tm
 
-
-PLUGINS = CONFIG.plugins
 _plugins: Dict[str, NbPlugin] = {}
 
 
 def load_plugins() -> Dict[str, NbPlugin]:
     global _plugins
     _plugins = {}
+    plugins_config = config_module.CONFIG.plugins
 
     for pid in PLUGIN_ORDER:
-        cfg = getattr(PLUGINS, pid, None)
+        cfg = getattr(plugins_config, pid, None)
         if not cfg or not getattr(cfg, "check", False):
             continue
 
@@ -220,6 +220,25 @@ def load_plugins() -> Dict[str, NbPlugin]:
             logging.error(f"❌ 加载失败 {pid}: {e}")
 
     return _plugins
+
+
+def reload_plugins(reload_async: bool = True) -> Dict[str, NbPlugin]:
+    plugins = load_plugins()
+    if not reload_async:
+        return plugins
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.create_task(load_async_plugins())
+        logging.info("🔄 插件已重载，异步插件初始化已加入事件循环")
+    else:
+        asyncio.run(load_async_plugins())
+        logging.info("🔄 插件已重载")
+    return plugins
 
 
 async def apply_plugins(message: Message) -> Optional[NbMessage]:

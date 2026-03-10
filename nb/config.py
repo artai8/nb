@@ -235,6 +235,18 @@ def write_config(config: Config, persist=True):
     elif stg.CONFIG_TYPE == 2:
         if persist:
             update_db(config)
+    apply_runtime_config(config)
+
+
+def apply_runtime_config(config: Config) -> Config:
+    """Keep the module-level CONFIG object in sync without breaking imports."""
+    field_names = getattr(Config, "model_fields", None)
+    if field_names is None:
+        field_names = getattr(Config, "__fields__", {})
+
+    for field_name in field_names:
+        setattr(CONFIG, field_name, getattr(config, field_name))
+    return CONFIG
 
 
 def get_env_var(name: str, optional: bool = False) -> str:
