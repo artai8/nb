@@ -249,6 +249,17 @@ def apply_runtime_config(config: Config) -> Config:
     return CONFIG
 
 
+def get_env_var(name: str, optional: bool = False) -> str:
+    """Fetch an env var."""
+    var = os.getenv(name, "")
+
+    while not var:
+        if optional:
+            return ""
+        var = input(f"Enter {name}: ")
+    return var
+
+
 async def get_id(client: TelegramClient, peer):
     return await client.get_peer_id(peer)
 
