@@ -2275,13 +2275,13 @@ watchdog = {version = "*", markers = "platform_system != \"Darwin\""}
 
 [[package]]
 name = "telethon"
-version = "1.26.0"
+version = "1.42.0"
 description = "Full-featured Telegram client library for Python 3"
 optional = false
 python-versions = ">=3.5"
 files = [
-    {file = "Telethon-1.26.0-py3-none-any.whl", hash = "sha256:148ac8c27908853d5d8a116d55ce947e9ba167bb697c75226ae95645b2e5a504"},
-    {file = "Telethon-1.26.0.tar.gz", hash = "sha256:de7a1619110a2c06390fb5340839c6503c6b108b5f1a2f3bbe1ef60f02cecacb"},
+    {file = "telethon-1.42.0-py3-none-any.whl", hash = "sha256:cf361c9458bcacd6d0fc8959a2bce509d1bb37007fe6476a80c4fb4a2decc29"},
+    {file = "telethon-1.42.0.tar.gz", hash = "sha256:032e9551161d5ead719f75494c6c85ece2ce71816b54f3c65d6ccc371d6994d"},
 ]
 
 [package.dependencies]
@@ -2766,4 +2766,4 @@ testing = ["flake8 (<5)", "func-timeout", "jaraco.functools", "jaraco.itertools"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "ab00f45e26b932fbe18d5b608422271fded280ae315aa9d81f48499b9c89dec5"
+content-hash = "a67a0ec6403a90ac7ba9f1d80bf2d88a85e67cc0ef24089870ea12f6de63e577"
