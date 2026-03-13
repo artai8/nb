@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore --prefer-binary \
     "PyYAML>=6.0.1,<7.0" \
     "requests>=2.31.0" \
     "typer>=0.12.3" \
-    "Telethon>=1.34.0" \
+    "Telethon==1.42.0" \
     "aiohttp>=3.9.5" \
     "Pillow>=10.3.0" \
     "hachoir>=3.3.0" \
