@@ -275,6 +275,7 @@ async def _send_bot_media_album(
             tms[0],
             grouped_messages=[tm.message for tm in tms],
             grouped_tms=tms,
+            grouped_caption=base_text or None,
             comment_to_post=comment_to_post if idx == 0 else None,
         )
         if fwded_first is None:

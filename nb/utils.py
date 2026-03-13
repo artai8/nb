@@ -784,9 +784,19 @@ def _is_file_reference_error(err: Exception) -> bool:
 #  Spoiler 检测
 # =====================================================================
 
+_SPOILER_MARKS: set = set()
+
+
+def mark_spoiler(message: Message) -> None:
+    """标记消息为 spoiler（使用 Python 对象 id，不依赖 TL 对象 setattr）。"""
+    _SPOILER_MARKS.add(id(message))
+
+
 def _has_spoiler(message: Message) -> bool:
     if not message or not message.media:
         return False
+    if id(message) in _SPOILER_MARKS:
+        return True
     if getattr(message, '_nb_spoiler', False):
         return True
     return getattr(message.media, 'spoiler', False)
@@ -1153,74 +1163,44 @@ async def _send_album_by_upload(
             )
         return None
 
-    any_spoiler = preserve_spoiler and _any_has_spoiler(grouped_messages)
+    any_spoiler = _any_has_spoiler(grouped_messages)
 
     try:
-        if any_spoiler:
-            result = await _send_uploaded_album_media(
-                client,
-                recipient,
-                file_items,
-                caption,
-                reply_to,
-                preserve_spoiler=True,
-            )
-            logging.info(
-                f"✅ 相册下载重传成功 ({len(file_items)} 个文件, spoiler={any_spoiler})"
-            )
-            return result
-
-        kwargs = {
-            'entity': recipient,
-            'file': files,
-            'caption': caption or "",
-            'reply_to': reply_to,
-            'supports_streaming': True,
-            'force_document': False,
-            'allow_cache': False,
-            'parse_mode': "md",
-        }
-        if any_spoiler and _SUPPORTS_SPOILER:
-            kwargs['has_spoiler'] = True
-        result = await client.send_file(**kwargs)
-        logging.info(f"✅ 相册下载重传成功 ({len(files)} 个文件, spoiler={any_spoiler})")
+        # 统一使用 SendMultiMediaRequest 以保证相册整体发送 + spoiler
+        result = await _send_uploaded_album_media(
+            client,
+            recipient,
+            file_items,
+            caption,
+            reply_to,
+            preserve_spoiler=any_spoiler,
+        )
+        logging.info(
+            f"✅ 相册下载重传成功 ({len(file_items)} 个文件, spoiler={any_spoiler})"
+        )
         return result
     except Exception as e:
-        logging.error(f"❌ 相册下载重传失败: {e}")
-        # 兜底：逐条发送
-        results = []
-        for i, (msg, file) in enumerate(file_items):
-            try:
-                single_spoiler = preserve_spoiler and _has_spoiler(msg)
-                if single_spoiler:
-                    r = await _send_uploaded_single_media(
-                        client,
-                        recipient,
-                        file,
-                        msg,
-                        (caption or "") if i == 0 else "",
-                        reply_to if i == 0 else None,
-                        spoiler=True,
-                    )
-                    if r is not None:
-                        results.append(r)
-                        continue
-
-                single_kwargs = {
-                    'entity': recipient,
-                    'file': file,
-                    'caption': (caption or "") if i == 0 else "",
-                    'reply_to': reply_to if i == 0 else None,
-                    'supports_streaming': True,
-                    'parse_mode': "md",
-                }
-                if single_spoiler and _SUPPORTS_SPOILER:
-                    single_kwargs['has_spoiler'] = True
-                r = await client.send_file(**single_kwargs)
-                results.append(r)
-            except Exception as e2:
-                logging.error(f"❌ 逐条发送失败 ({i}): {e2}")
-        return results if results else None
+        logging.error(f"❌ 相册下载重传失败(SendMultiMedia): {e}")
+        # 兜底：尝试 client.send_file 批量上传（仍然保持相册形式）
+        try:
+            kwargs = {
+                'entity': recipient,
+                'file': files,
+                'caption': caption or "",
+                'reply_to': reply_to,
+                'supports_streaming': True,
+                'force_document': False,
+                'allow_cache': False,
+                'parse_mode': "md",
+            }
+            if any_spoiler and _SUPPORTS_SPOILER:
+                kwargs['has_spoiler'] = True
+            result = await client.send_file(**kwargs)
+            logging.info(f"✅ 相册批量上传成功 ({len(files)} 个文件)")
+            return result
+        except Exception as e2:
+            logging.error(f"❌ 相册批量上传也失败: {e2}")
+            return None
     finally:
         cleanup(*files)
 
@@ -1752,6 +1732,7 @@ async def send_message(
                         result = await _send_album_by_upload(
                             client, recipient, grouped_messages,
                             combined_caption or None, effective_reply_to,
+                            preserve_spoiler=any_spoiler,
                         )
                 logging.info("✅ 媒体组发送成功")
                 return result

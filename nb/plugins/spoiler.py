@@ -1,6 +1,7 @@
 import logging
 
 from nb.plugins import NbMessage, NbPlugin
+from nb.utils import mark_spoiler
 
 
 class NbSpoiler(NbPlugin):
@@ -14,13 +15,10 @@ class NbSpoiler(NbPlugin):
         msg = tm.message
         if not msg or not getattr(msg, "media", None):
             return tm
-        media = msg.media
+        # 使用独立的 Python set 标记，不依赖 TL 对象 setattr
+        mark_spoiler(msg)
         try:
-            setattr(msg, "_nb_spoiler", True)
-        except Exception:
-            pass
-        try:
-            setattr(media, "spoiler", True)
+            setattr(msg.media, "spoiler", True)
         except Exception:
             pass
         return tm
