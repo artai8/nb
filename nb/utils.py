@@ -477,23 +477,22 @@ async def trigger_comment_keyword_and_resolve_bot_media(
     if not keyword or CONFIG.login.user_type == 0:
         return []
 
-    sent = await _auto_comment_keyword(client, channel_id, post_id, keyword)
-    if not sent:
-        return []
-
+    # 必须先获取讨论消息，再发送关键词
+    # 保证 _collect_start_links_from_keyword_reply 能在发送前快照 last_id
     disc_msg = await get_discussion_message(client, channel_id, post_id)
     if disc_msg is None:
         logging.info(
-            f"🤖 自动评论后未找到讨论消息 channel={channel_id} post={post_id}"
+            f"🤖 未找到讨论消息 channel={channel_id} post={post_id}"
         )
         return []
 
+    # send_keyword=True: 内部先快照 last_id → 发送关键词 → 等待机器人回复
     keyword_links = await _collect_start_links_from_keyword_reply(
-        client, disc_msg, keyword, forward, send_keyword=False
+        client, disc_msg, keyword, forward, send_keyword=True
     )
     if not keyword_links:
         logging.info(
-            f"🤖 自动评论后未等到 start 链接 post={post_id} keyword={keyword!r}"
+            f"🤖 评论区未等到 start 链接 post={post_id} keyword={keyword!r}"
         )
         return []
 
