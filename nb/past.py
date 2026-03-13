@@ -38,6 +38,29 @@ from nb.utils import (
 )
 
 
+# =====================================================================
+#  断连检测 & 自动重连
+# =====================================================================
+
+_MAX_RECONNECT_ATTEMPTS = 5
+
+async def _ensure_connected(client: TelegramClient) -> None:
+    """检测客户端是否断连，如已断连则尝试重连。"""
+    if client.is_connected():
+        return
+    for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
+        logging.warning(f"⚠️ 检测到断连, 尝试重连 ({attempt}/{_MAX_RECONNECT_ATTEMPTS})")
+        try:
+            await client.connect()
+            if client.is_connected():
+                logging.info("✅ 重连成功")
+                return
+        except Exception as e:
+            logging.error(f"❌ 重连失败: {e}")
+        await asyncio.sleep(5 * attempt)
+    logging.critical("🚨 多次重连均失败, 将继续尝试后续操作")
+
+
 def _resolve_reply_to_id(
     message: Message,
     dest: int,
@@ -336,6 +359,7 @@ async def _send_past_grouped(
         logging.warning("⚠️ 模板消息为 None，跳过该媒体组")
         return False
 
+    any_success = False
     for d in dest:
         try:
             reply_to_id = _resolve_reply_to_id(messages[0], d)
@@ -348,6 +372,11 @@ async def _send_past_grouped(
                 grouped_tms=tms,
             )
 
+            if fwded_msgs is None:
+                logging.error(f"❌ 媒体组发送返回 None, dest={d}")
+                continue
+
+            any_success = True
             first_msg_id = messages[0].id
             event_uid = st.EventUid(st.DummyEvent(src, first_msg_id))
             if event_uid not in st.stored:
@@ -363,7 +392,7 @@ async def _send_past_grouped(
 
     for tm in tms:
         tm.clear()
-    return True
+    return any_success
 
 
 # =====================================================================
@@ -382,17 +411,22 @@ async def _flush_grouped_buffer(
         if not msgs:
             continue
 
-        await _send_past_grouped(client, src, dest, msgs, forward)
+        await _ensure_connected(client)
+        success = await _send_past_grouped(client, src, dest, msgs, forward)
 
         group_last_id = max(m.id for m in msgs)
-        last_id = max(last_id, group_last_id)
 
-        forward.offset = group_last_id
-        write_config(CONFIG, persist=False)
-
-        logging.info(
-            f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}"
-        )
+        if success:
+            last_id = max(last_id, group_last_id)
+            forward.offset = group_last_id
+            write_config(CONFIG, persist=False)
+            logging.info(
+                f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}"
+            )
+        else:
+            logging.error(
+                f"❌ 媒体组 {gid} ({len(msgs)} 条) 发送失败, offset 未更新"
+            )
 
         delay_seconds = random.randint(300, 600)
         logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
@@ -967,11 +1001,14 @@ async def forward_with_limit(
                                 )
                                 continue
 
+                            await _ensure_connected(client)
+
                             event_uid = st.EventUid(
                                 st.DummyEvent(message.chat_id, message.id)
                             )
                             st.stored[event_uid] = {}
 
+                            any_send_ok = False
                             for d in dest:
                                 reply_to_id = _resolve_reply_to_id(message, d)
                                 tm.reply_to = reply_to_id
@@ -979,6 +1016,7 @@ async def forward_with_limit(
                                 try:
                                     fwded_msg = await send_message(d, tm)
                                     if fwded_msg is not None:
+                                        any_send_ok = True
                                         st.stored[event_uid][d] = fwded_msg
                                         fwded_id = _extract_msg_id(fwded_msg)
                                         if fwded_id is not None:
@@ -994,11 +1032,16 @@ async def forward_with_limit(
                                     logging.error(f"❌ 单条发送失败: {e}")
 
                             tm.clear()
-                            message_sent = True
+                            message_sent = any_send_ok
 
-                # 统一更新 offset（修复 Bug3）
-                last_id = message.id
-                _update_offset(forward, offset_key, message.id, sources)
+                # 统一更新 offset（修复 Bug3）—— 仅在发送成功时推进
+                if message_sent:
+                    last_id = message.id
+                    _update_offset(forward, offset_key, message.id, sources)
+                else:
+                    logging.warning(
+                        f"⚠️ 消息 {message.id} 发送失败, offset 未更新"
+                    )
 
                 if message_sent:
                     total_forwarded += 1

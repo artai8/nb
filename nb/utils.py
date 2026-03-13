@@ -714,6 +714,11 @@ def _is_flood_wait(e: Exception) -> bool:
     return "FLOOD_WAIT" in str(e).upper() or "flood" in str(e).lower()
 
 
+def _is_disconnected_error(e: Exception) -> bool:
+    text = str(e).lower()
+    return "cannot send requests while disconnected" in text
+
+
 async def _handle_flood_wait(e: Exception) -> int:
     wait_match = re.search(r'(\d+)', str(e))
     wait_sec = int(wait_match.group()) if wait_match else 30
@@ -1536,6 +1541,9 @@ async def send_message(
                             combined_caption or None, effective_reply_to,
                             preserve_spoiler=_any_has_spoiler(grouped_messages),
                         )
+                    if _is_disconnected_error(e):
+                        logging.error(f"❌ 转发失败(断连): {e}")
+                        return None
                     if _is_flood_wait(e):
                         await _handle_flood_wait(e)
                     else:
@@ -1581,6 +1589,9 @@ async def send_message(
                                 )
                             except Exception:
                                 return None
+                    if _is_disconnected_error(e):
+                        logging.error(f"❌ forward 失败(断连): {e}")
+                        return None
                     if _is_flood_wait(e):
                         await _handle_flood_wait(e)
                     else:
@@ -1663,6 +1674,9 @@ async def send_message(
                         combined_caption or None, effective_reply_to,
                         preserve_spoiler=any_spoiler,
                     )
+                if _is_disconnected_error(e):
+                    logging.error(f"❌ 媒体组发送失败(断连): {e}")
+                    return None
                 if _is_flood_wait(e):
                     await _handle_flood_wait(e)
                 else:
@@ -1768,6 +1782,9 @@ async def send_message(
                         tm.text, effective_reply_to,
                         preserve_spoiler=should_preserve_spoiler,
                     )
+                if _is_disconnected_error(e):
+                    logging.error(f"❌ 媒体消息发送失败(断连): {e}")
+                    return None
                 if _is_flood_wait(e):
                     await _handle_flood_wait(e)
                 else:
