@@ -13,12 +13,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional, Union, Tuple
 import inspect
 
+from telethon import utils as telethon_utils
 from telethon.client import TelegramClient
 from telethon.hints import EntityLike
 from telethon.tl.custom.message import Message
 from telethon.tl.types import (
     InputMediaPhoto,
     InputMediaDocument,
+    InputMediaUploadedPhoto,
+    InputMediaUploadedDocument,
     InputPhoto,
     InputDocument,
     InputSingleMedia,
@@ -825,6 +828,129 @@ def _build_input_media(media, spoiler: bool = False):
     return None
 
 
+def _extract_sent_messages(result) -> List[Message]:
+    sent = []
+    if hasattr(result, 'updates'):
+        for update in result.updates:
+            if hasattr(update, 'message'):
+                sent.append(update.message)
+    elif result is not None:
+        if isinstance(result, list):
+            sent.extend([msg for msg in result if msg is not None])
+        else:
+            sent.append(result)
+    return sent
+
+
+async def _build_uploaded_input_media(
+    client: TelegramClient,
+    file_path: str,
+    message: Message,
+    spoiler: bool = False,
+):
+    uploaded_file = await client.upload_file(file_path)
+    media = getattr(message, 'media', None)
+
+    if isinstance(media, MessageMediaPhoto):
+        return InputMediaUploadedPhoto(file=uploaded_file, spoiler=spoiler)
+
+    if isinstance(media, MessageMediaDocument):
+        is_video = bool(message.video or message.gif)
+        voice = getattr(message.document, 'voice', False) if message.document else False
+        video_note = bool(getattr(message, 'video_note', None))
+        attributes, mime_type = telethon_utils.get_attributes(
+            file_path,
+            voice_note=voice,
+            video_note=video_note,
+            supports_streaming=is_video,
+        )
+        return InputMediaUploadedDocument(
+            file=uploaded_file,
+            mime_type=mime_type,
+            attributes=attributes,
+            force_file=False,
+            spoiler=spoiler,
+        )
+
+    return None
+
+
+async def _send_uploaded_single_media(
+    client: TelegramClient,
+    recipient: EntityLike,
+    file_path: str,
+    message: Message,
+    caption: Optional[str],
+    reply_to: Optional[int],
+    spoiler: bool = False,
+) -> Optional[Message]:
+    peer = await client.get_input_entity(recipient)
+    input_media = await _build_uploaded_input_media(
+        client, file_path, message, spoiler=spoiler,
+    )
+    if input_media is None:
+        return None
+
+    msg_text, msg_entities = _parse_caption_entities(caption or "")
+    kwargs = {
+        'peer': peer,
+        'media': input_media,
+        'message': msg_text,
+        'random_id': random.randrange(-2 ** 63, 2 ** 63),
+    }
+    if msg_entities:
+        kwargs['entities'] = msg_entities
+    if reply_to is not None:
+        kwargs['reply_to'] = _make_reply_to(reply_to)
+
+    result = await client(SendMediaRequest(**kwargs))
+    sent = _extract_sent_messages(result)
+    return sent[0] if sent else result
+
+
+async def _send_uploaded_album_media(
+    client: TelegramClient,
+    recipient: EntityLike,
+    file_items: List[Tuple[Message, str]],
+    caption: Optional[str],
+    reply_to: Optional[int],
+    preserve_spoiler: bool = False,
+) -> List[Message]:
+    peer = await client.get_input_entity(recipient)
+    multi_media = []
+
+    for index, (message, file_path) in enumerate(file_items):
+        is_spoiler = preserve_spoiler and _has_spoiler(message)
+        input_media = await _build_uploaded_input_media(
+            client, file_path, message, spoiler=is_spoiler,
+        )
+        if input_media is None:
+            continue
+        if index == 0 and caption:
+            msg_text, msg_entities = _parse_caption_entities(caption)
+        else:
+            msg_text = ""
+            msg_entities = []
+        multi_media.append(
+            InputSingleMedia(
+                media=input_media,
+                random_id=random.randrange(-2 ** 63, 2 ** 63),
+                message=msg_text,
+                entities=msg_entities if msg_entities else [],
+            )
+        )
+
+    if not multi_media:
+        return []
+
+    kwargs = {'peer': peer, 'multi_media': multi_media}
+    if reply_to is not None:
+        kwargs['reply_to'] = _make_reply_to(reply_to)
+
+    result = await client(SendMultiMediaRequest(**kwargs))
+    return _extract_sent_messages(result)
+
+
 # =====================================================================
 #  核心修复：下载重传（单条）—— 正确传 caption 和 spoiler
 # =====================================================================
@@ -858,6 +984,20 @@ async def _send_single_by_upload(
     video_note = bool(getattr(message, 'video_note', None))
 
     try:
+        if is_spoiler:
+            result = await _send_uploaded_single_media(
+                client,
+                recipient,
+                file,
+                message,
+                caption,
+                reply_to,
+                spoiler=True,
+            )
+            if result is not None:
+                logging.info(f"✅ 下载重传成功 (spoiler={is_spoiler})")
+                return result
+
         kwargs = {
             'entity': recipient,
             'file': file,
@@ -907,14 +1047,16 @@ async def _send_album_by_upload(
     下载所有媒体后重新上传为相册。
     关键：使用文件路径列表而非 Message 对象，确保 caption 和视频都生效。
     """
-    files = []
+    file_items: List[Tuple[Message, str]] = []
     for msg in grouped_messages:
         if _msg_has_media(msg):
             file = await _safe_download_media(msg, client)
             if file:
-                files.append(file)
+                file_items.append((msg, file))
             else:
                 logging.warning(f"⚠️ 相册成员 {msg.id} 下载失败，跳过")
+
+    files = [file for _, file in file_items]
 
     if not files:
         if caption:
@@ -926,6 +1068,20 @@ async def _send_album_by_upload(
     any_spoiler = preserve_spoiler and _any_has_spoiler(grouped_messages)
 
     try:
+        if any_spoiler:
+            result = await _send_uploaded_album_media(
+                client,
+                recipient,
+                file_items,
+                caption,
+                reply_to,
+                preserve_spoiler=True,
+            )
+            logging.info(
+                f"✅ 相册下载重传成功 ({len(file_items)} 个文件, spoiler={any_spoiler})"
+            )
+            return result
+
         kwargs = {
             'entity': recipient,
             'file': files,
@@ -945,8 +1101,23 @@ async def _send_album_by_upload(
         logging.error(f"❌ 相册下载重传失败: {e}")
         # 兜底：逐条发送
         results = []
-        for i, file in enumerate(files):
+        for i, (msg, file) in enumerate(file_items):
             try:
+                single_spoiler = preserve_spoiler and _has_spoiler(msg)
+                if single_spoiler:
+                    r = await _send_uploaded_single_media(
+                        client,
+                        recipient,
+                        file,
+                        msg,
+                        (caption or "") if i == 0 else "",
+                        reply_to if i == 0 else None,
+                        spoiler=True,
+                    )
+                    if r is not None:
+                        results.append(r)
+                        continue
+
                 single_kwargs = {
                     'entity': recipient,
                     'file': file,
@@ -955,7 +1126,7 @@ async def _send_album_by_upload(
                     'supports_streaming': True,
                     'parse_mode': "md",
                 }
-                if any_spoiler and _SUPPORTS_SPOILER:
+                if single_spoiler and _SUPPORTS_SPOILER:
                     single_kwargs['has_spoiler'] = True
                 r = await client.send_file(**single_kwargs)
                 results.append(r)
@@ -1422,6 +1593,36 @@ async def send_message(
     # 2. 媒体组发送 (Send Album)
     # ================================================================
     if grouped_messages and grouped_tms:
+        if len(grouped_messages) > 10:
+            logging.warning(
+                f"⚠️ 媒体组共 {len(grouped_messages)} 条，自动拆分为最多 10 条/组发送"
+            )
+            source_caption = (
+                grouped_caption if grouped_caption is not None
+                else "\n\n".join(
+                    [gtm.text.strip() for gtm in grouped_tms if gtm.text and gtm.text.strip()]
+                )
+            )
+            sent_messages = []
+            grouped_pairs = list(zip(grouped_messages, grouped_tms))
+            for index in range(0, len(grouped_pairs), 10):
+                pair_chunk = grouped_pairs[index:index + 10]
+                message_chunk = [message for message, _ in pair_chunk]
+                tm_chunk = [chunk_tm for _, chunk_tm in pair_chunk]
+                chunk_result = await send_message(
+                    recipient,
+                    tm_chunk[0],
+                    grouped_messages=message_chunk,
+                    grouped_tms=tm_chunk,
+                    grouped_caption=source_caption if index == 0 else None,
+                    comment_to_post=comment_to_post if index == 0 else None,
+                )
+                if isinstance(chunk_result, list):
+                    sent_messages.extend([msg for msg in chunk_result if msg is not None])
+                elif chunk_result is not None:
+                    sent_messages.append(chunk_result)
+            return sent_messages if sent_messages else None
+
         combined_caption = (
             grouped_caption if grouped_caption is not None
             else "\n\n".join(
