@@ -32,8 +32,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip setuptool
 # 使用 --no-deps 防止它们自动安装旧版 Pydantic
 RUN pip install --no-cache-dir --root-user-action=ignore --prefer-binary \
     "tg-login>=0.0.4" \
-    "watermark.py>=0.0.3" \
-    "verlat>=0.1.0"
+    "watermark.py>=0.0.3"
 
 # Step B: 安装核心库与 Pydantic V2
 # 这里会覆盖掉任何可能的旧依赖

@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 5
+FORWARD_DELAY_MIN_SECONDS = 180
+FORWARD_DELAY_MAX_SECONDS = 300
 
 _DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "nb_downloads")
 os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
@@ -229,6 +231,10 @@ def _parse_start_links_from_entities(message: Message, forward=None) -> List[tup
     return [p for p in ((_parse_tme_start_link(l)) for l in links) if p]
 
 
+def get_random_forward_delay() -> int:
+    return random.randint(FORWARD_DELAY_MIN_SECONDS, FORWARD_DELAY_MAX_SECONDS)
+
+
 # =====================================================================
 #  评论区收集
 # =====================================================================
@@ -294,14 +300,16 @@ def _find_common_comment_keyword(comments: List[Message]) -> Optional[str]:
 async def _collect_start_links_from_keyword_reply(
     client: TelegramClient, disc_msg: Message,
     keyword: str, forward=None,
+    send_keyword: bool = True,
 ) -> List[tuple]:
     latest = await client.get_messages(disc_msg.chat_id, limit=1)
     last_id = latest[0].id if latest else 0
-    try:
-        await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
-    except Exception as e:
-        logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
-        return []
+    if send_keyword:
+        try:
+            await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+        except Exception as e:
+            logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
+            return []
     links = []
     wait_timeout = getattr(CONFIG.bot_media, "wait_timeout", 5)
     total_timeout = max(wait_timeout * 2, 8)
@@ -456,6 +464,43 @@ async def _auto_comment_keyword(
     except Exception as e:
         logging.warning(f"⚠️ 评论区触发失败: {e}")
         return False
+
+
+async def trigger_comment_keyword_and_resolve_bot_media(
+    client: TelegramClient,
+    channel_id: Union[int, str],
+    post_id: int,
+    keyword: str,
+    forward=None,
+) -> List[Message]:
+    keyword = _trim_keyword(keyword or "")
+    if not keyword or CONFIG.login.user_type == 0:
+        return []
+
+    sent = await _auto_comment_keyword(client, channel_id, post_id, keyword)
+    if not sent:
+        return []
+
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    if disc_msg is None:
+        logging.info(
+            f"🤖 自动评论后未找到讨论消息 channel={channel_id} post={post_id}"
+        )
+        return []
+
+    keyword_links = await _collect_start_links_from_keyword_reply(
+        client, disc_msg, keyword, forward, send_keyword=False
+    )
+    if not keyword_links:
+        logging.info(
+            f"🤖 自动评论后未等到 start 链接 post={post_id} keyword={keyword!r}"
+        )
+        return []
+
+    collected = await _collect_from_start_links(client, keyword_links, forward)
+    if collected:
+        return _filter_bot_media_by_blacklist(collected)
+    return []
 
 
 # =====================================================================

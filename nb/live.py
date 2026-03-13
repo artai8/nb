@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import random
 from collections import defaultdict
 from typing import Union, List, Optional, Dict, Tuple
 
@@ -23,13 +22,14 @@ from nb.utils import (
     get_discussion_group_id,
     resolve_bot_media_from_message,
     _extract_comment_keyword,
-    _auto_comment_keyword,
+    trigger_comment_keyword_and_resolve_bot_media,
     _msg_has_media,
     extract_msg_id as _extract_msg_id,
     dedupe_messages as _dedupe_messages,
     chunk_list as _chunk_list,
     bot_media_allowed as _bot_media_allowed,
     collect_all_comment_media,
+    get_random_forward_delay,
 )
 
 
@@ -69,7 +69,7 @@ async def _queue_worker() -> None:
             logging.error(f"❌ live 队列处理失败: {e}")
         finally:
             LIVE_QUEUE.task_done()
-        delay_seconds = random.randint(300, 600)
+        delay_seconds = get_random_forward_delay()
         logging.info(f"⏸️ live 队列休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
@@ -439,6 +439,7 @@ async def _send_grouped_messages(grouped_id: int) -> None:
             forward is None
             or getattr(forward, 'auto_comment_trigger_enabled', None) is not False
         )
+        bot_media = []
         if bot_media_allowed and auto_comment_allowed:
             for msg in messages:
                 keyword = _extract_comment_keyword(
@@ -450,25 +451,25 @@ async def _send_grouped_messages(grouped_id: int) -> None:
                         or getattr(msg, 'client', None)
                     )
                     if msg_client:
-                        await _auto_comment_keyword(
-                            msg_client, chat_id, msg.id, keyword
+                        bot_media = await trigger_comment_keyword_and_resolve_bot_media(
+                            msg_client, chat_id, msg.id, keyword, forward
                         )
                     break
 
         # Bot 媒体拉取
-        bot_media = []
         if bot_media_allowed:
-            for msg in messages:
-                msg_client = (
-                    getattr(msg, '_client', None)
-                    or getattr(msg, 'client', None)
-                )
-                if msg_client:
-                    bot_media = await resolve_bot_media_from_message(
-                        msg_client, msg, forward
+            if not bot_media:
+                for msg in messages:
+                    msg_client = (
+                        getattr(msg, '_client', None)
+                        or getattr(msg, 'client', None)
                     )
-                    if bot_media:
-                        break
+                    if msg_client:
+                        bot_media = await resolve_bot_media_from_message(
+                            msg_client, msg, forward
+                        )
+                        if bot_media:
+                            break
 
         if bot_media:
             combined_messages = _dedupe_messages(messages + bot_media)
@@ -597,13 +598,14 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
         forward is None
         or getattr(forward, 'auto_comment_trigger_enabled', None) is not False
     )
+    bot_media = []
     if bot_media_allowed and auto_comment_allowed:
         keyword = _extract_comment_keyword(
             message.raw_text or message.text or "", forward
         )
         if keyword:
-            await _auto_comment_keyword(
-                event.client, chat_id, message.id, keyword
+            bot_media = await trigger_comment_keyword_and_resolve_bot_media(
+                event.client, chat_id, message.id, keyword, forward
             )
 
     event_uid = st.EventUid(event)
@@ -637,11 +639,11 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
         return
 
     # Bot 媒体拉取
-    bot_media = []
     if bot_media_allowed:
-        bot_media = await resolve_bot_media_from_message(
-            event.client, message, forward
-        )
+        if not bot_media:
+            bot_media = await resolve_bot_media_from_message(
+                event.client, message, forward
+            )
 
     if bot_media:
         bot_media = _dedupe_messages(bot_media)

@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import os
-import sys
 from enum import Enum
 from typing import Optional
 
@@ -11,22 +9,14 @@ import typer
 from dotenv import load_dotenv
 from rich import console, traceback
 from rich.logging import RichHandler
-from verlat import latest_release
 
 from nb import __version__
 
 load_dotenv(".env")
 
-FAKE = bool(os.getenv("FAKE"))
 app = typer.Typer(add_completion=False)
 
 con = console.Console()
-
-
-def topper():
-    print("nb")
-    version_check()
-    print("\n")
 
 
 class Mode(str, Enum):
@@ -55,7 +45,7 @@ def verbosity_callback(value: bool):
         ],
         force=True,
     )
-    topper()
+    con.print(f"Running nb version {__version__}", style="bold green")
     logging.info("Verbosity turned on! This is suitable for debugging")
 
 
@@ -65,20 +55,6 @@ def version_callback(value: bool):
     if value:
         con.print(__version__)
         raise typer.Exit()
-
-
-def version_check():
-    try:
-        latver = latest_release("nb").version
-        if __version__ != latver:
-            con.print(
-                f"nb has a newer release {latver} available!",
-                style="bold yellow",
-            )
-        else:
-            con.print(f"Running latest nb version {__version__}", style="bold green")
-    except Exception:
-        con.print(f"Running nb version {__version__}", style="bold green")
 
 
 @app.command()
@@ -104,14 +80,8 @@ def main(
 ):
     """The ultimate tool to automate custom telegram message forwarding.
 
-    For updates join telegram channel @aahniks_code
-
     To run web interface run `nb-web` command.
     """
-    if FAKE:
-        logging.critical(f"You are running fake with {mode} mode")
-        sys.exit(1)
-
     if mode == Mode.PAST:
         from nb.past import forward_job
 

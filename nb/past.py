@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import random
 from collections import defaultdict
 from typing import List, Dict, Optional, Union
 
@@ -22,19 +21,20 @@ from nb.utils import (
     _get_reply_to_top_id,
     get_discussion_message,
     get_discussion_group_id,
-    _auto_comment_keyword,
     _extract_comment_keyword,
     _collect_start_links_from_keyword_reply,
     _collect_from_start_links,
     _filter_bot_media_by_blacklist,
     _trim_keyword,
     resolve_bot_media_from_message,
+    trigger_comment_keyword_and_resolve_bot_media,
     _msg_has_media,
     extract_msg_id as _extract_msg_id,
     dedupe_messages as _dedupe_messages,
     chunk_list as _chunk_list,
     bot_media_allowed as _bot_media_allowed,
     collect_all_comment_media,
+    get_random_forward_delay,
 )
 
 
@@ -330,15 +330,18 @@ async def _send_past_grouped(
                 msg.raw_text or msg.text or "", forward
             )
             if keyword:
-                await _auto_comment_keyword(client, src, msg.id, keyword)
+                bot_media = await trigger_comment_keyword_and_resolve_bot_media(
+                    client, src, msg.id, keyword, forward
+                )
                 break
 
     if bot_media_allowed:
-        for msg in messages:
-            # 修复 Bug7：使用传入的 client 而非 msg.client
-            bot_media = await resolve_bot_media_from_message(client, msg, forward)
-            if bot_media:
-                break
+        if not bot_media:
+            for msg in messages:
+                # 修复 Bug7：使用传入的 client 而非 msg.client
+                bot_media = await resolve_bot_media_from_message(client, msg, forward)
+                if bot_media:
+                    break
 
     if bot_media:
         combined_messages = _dedupe_messages(messages + bot_media)
@@ -428,7 +431,7 @@ async def _flush_grouped_buffer(
                 f"❌ 媒体组 {gid} ({len(msgs)} 条) 发送失败, offset 未更新"
             )
 
-        delay_seconds = random.randint(300, 600)
+        delay_seconds = get_random_forward_delay()
         logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
@@ -537,7 +540,7 @@ async def _forward_comments_for_post(
                 )
                 comment_count += len(grouped_buffer[old_gid])
                 del grouped_buffer[old_gid]
-                delay = random.randint(300, 600)
+                delay = get_random_forward_delay()
                 await asyncio.sleep(delay)
 
             grouped_buffer[comment.grouped_id].append(comment)
@@ -550,14 +553,14 @@ async def _forward_comments_for_post(
             )
             comment_count += len(grouped_buffer[old_gid])
             del grouped_buffer[old_gid]
-            delay = random.randint(300, 600)
+            delay = get_random_forward_delay()
             await asyncio.sleep(delay)
 
         # 单条评论处理
         tm = await apply_plugins(comment)
         if not tm:
             comment_count += 1
-            delay = random.randint(300, 600)
+            delay = get_random_forward_delay()
             await asyncio.sleep(delay)
             continue
 
@@ -587,7 +590,7 @@ async def _forward_comments_for_post(
             await _send_single_comment(client, comment, dest_targets, tm=tm)
         comment_count += 1
 
-        delay = random.randint(300, 600)
+        delay = get_random_forward_delay()
         await asyncio.sleep(delay)
 
     # 刷新剩余 grouped 缓冲
@@ -831,6 +834,7 @@ async def forward_with_limit(
                 auto_comment_allowed = getattr(
                     forward, 'auto_comment_trigger_enabled', None
                 ) is not False
+                bot_media = []
 
                 # 自动评论关键字触发
                 if bot_media_allowed and auto_comment_allowed:
@@ -838,8 +842,8 @@ async def forward_with_limit(
                         message.raw_text or message.text or "", forward
                     )
                     if keyword:
-                        await _auto_comment_keyword(
-                            client, src, message.id, keyword
+                        bot_media = await trigger_comment_keyword_and_resolve_bot_media(
+                            client, src, message.id, keyword, forward
                         )
 
                 # 评论区媒体合并模式
@@ -912,11 +916,11 @@ async def forward_with_limit(
                         message_sent = True
                     else:
                         # 从消息本身拉取 bot 媒体
-                        bot_media = []
                         if bot_media_allowed:
-                            bot_media = await resolve_bot_media_from_message(
-                                client, message, forward
-                            )
+                            if not bot_media:
+                                bot_media = await resolve_bot_media_from_message(
+                                    client, message, forward
+                                )
 
                         if bot_media:
                             bot_media = _dedupe_messages(bot_media)
@@ -1068,7 +1072,7 @@ async def forward_with_limit(
                     limit_reached = True
                     break
 
-                delay_seconds = random.randint(300, 600)
+                delay_seconds = get_random_forward_delay()
                 logging.info(
                     f"⏸️ 休息 {delay_seconds} 秒 (消息 {message.id})"
                 )
