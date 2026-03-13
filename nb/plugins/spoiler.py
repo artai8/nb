@@ -16,6 +16,10 @@ class NbSpoiler(NbPlugin):
             return tm
         media = msg.media
         try:
+            setattr(msg, "_nb_spoiler", True)
+        except Exception:
+            pass
+        try:
             setattr(media, "spoiler", True)
         except Exception:
             pass

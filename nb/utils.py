@@ -796,6 +796,45 @@ def _any_has_spoiler(messages: List[Message]) -> bool:
     return any(_has_spoiler(m) for m in messages)
 
 
+def _join_message_texts(messages: List[Message]) -> str:
+    return "\n\n".join(
+        [
+            text.strip()
+            for msg in messages or []
+            for text in [msg.raw_text or msg.text or ""]
+            if text and text.strip()
+        ]
+    )
+
+
+def _join_tm_texts(tms: Optional[List["NbMessage"]]) -> Optional[str]:
+    if tms is None:
+        return None
+    return "\n\n".join(
+        [tm.text.strip() for tm in tms if tm and tm.text and tm.text.strip()]
+    )
+
+
+def _can_forward_grouped_messages_directly(
+    grouped_messages: List[Message],
+    grouped_caption: Optional[str] = None,
+    grouped_tms: Optional[List["NbMessage"]] = None,
+) -> bool:
+    if not grouped_messages:
+        return False
+    if _any_has_spoiler(grouped_messages):
+        return False
+    grouped_ids = {msg.grouped_id for msg in grouped_messages if getattr(msg, "grouped_id", None)}
+    if len(grouped_messages) > 1 and len(grouped_ids) != 1:
+        return False
+    desired_caption = grouped_caption
+    if desired_caption is None:
+        desired_caption = _join_tm_texts(grouped_tms)
+    if desired_caption is not None:
+        return desired_caption == _join_message_texts(grouped_messages)
+    return True
+
+
 # =====================================================================
 #  文本 entities 解析
 # =====================================================================
@@ -1549,12 +1588,17 @@ async def send_message(
     client: TelegramClient = tm.client
     effective_reply_to = comment_to_post if comment_to_post else tm.reply_to
     should_preserve_spoiler = _has_spoiler(tm.message)
+    can_forward_grouped_directly = bool(
+        grouped_messages and _can_forward_grouped_messages_directly(
+            grouped_messages, grouped_caption=grouped_caption, grouped_tms=grouped_tms,
+        )
+    )
 
     # ================================================================
     # 1. 转发消息 (Show Forwarded From)
     # ================================================================
     if CONFIG.show_forwarded_from:
-        if grouped_messages:
+        if grouped_messages and can_forward_grouped_directly:
             attempt = 0
             while attempt < MAX_RETRIES:
                 try:
@@ -1595,7 +1639,7 @@ async def send_message(
                     attempt += 1
                     await asyncio.sleep(5)
             return None
-        else:
+        elif not grouped_messages and not should_preserve_spoiler:
             attempt = 0
             while attempt < MAX_RETRIES:
                 try:
@@ -1669,7 +1713,7 @@ async def send_message(
                     tm_chunk[0],
                     grouped_messages=message_chunk,
                     grouped_tms=tm_chunk,
-                    grouped_caption=source_caption if index == 0 else None,
+                    grouped_caption=source_caption or None,
                     comment_to_post=comment_to_post if index == 0 else None,
                 )
                 if isinstance(chunk_result, list):
