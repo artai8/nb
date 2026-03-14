@@ -1,9 +1,13 @@
-from typing import Dict, List, Optional
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 import asyncio
 import logging
 
 from pymongo.collection import Collection
 from telethon.tl.custom.message import Message
+
+from nb.const import FAILED_FORWARD_LOG_FILE_NAME
 
 
 class EventUid:
@@ -118,6 +122,33 @@ GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 GROUPED_TIMEOUT = 1.5
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
+
+
+def append_failed_forward_record(
+    *,
+    mode: str,
+    source_chat_id: int,
+    source_message_id: Optional[int] = None,
+    dest_chat_ids: Optional[List[int]] = None,
+    grouped_message_ids: Optional[List[int]] = None,
+    reason: str = "",
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "source_chat_id": source_chat_id,
+        "source_message_id": source_message_id,
+        "dest_chat_ids": dest_chat_ids or [],
+        "grouped_message_ids": grouped_message_ids or [],
+        "reason": reason,
+        "details": details or {},
+    }
+    try:
+        with open(FAILED_FORWARD_LOG_FILE_NAME, "a", encoding="utf8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logging.error(f"❌ 失败记录写入失败: {e}")
 
 
 async def _flush_group(grouped_id: int) -> None:

@@ -12,6 +12,7 @@ from telethon.tl.patched import MessageService
 
 from nb import config
 from nb import storage as st
+from nb.const import FAILED_FORWARD_LOG_FILE_NAME
 from nb.config import CONFIG, get_SESSION, write_config
 from nb.plugins import apply_plugins, apply_plugins_to_group, load_async_plugins
 from nb.utils import (
@@ -42,7 +43,7 @@ from nb.utils import (
 #  断连检测 & 自动重连
 # =====================================================================
 
-_MAX_RECONNECT_ATTEMPTS = 5
+_MAX_RECONNECT_ATTEMPTS = 2
 
 async def _ensure_connected(client: TelegramClient) -> None:
     """检测客户端是否断连，如已断连则尝试重连。"""
@@ -419,17 +420,26 @@ async def _flush_grouped_buffer(
         success = await _send_past_grouped(client, src, dest, msgs, forward)
 
         group_last_id = max(m.id for m in msgs)
+        last_id = max(last_id, group_last_id)
+        forward.offset = group_last_id
+        write_config(CONFIG, persist=False)
 
         if success:
-            last_id = max(last_id, group_last_id)
-            forward.offset = group_last_id
-            write_config(CONFIG, persist=False)
             logging.info(
                 f"✅ 媒体组 {gid} ({len(msgs)} 条) 发送完成, offset → {group_last_id}"
             )
         else:
+            st.append_failed_forward_record(
+                mode="past-grouped",
+                source_chat_id=src,
+                source_message_id=group_last_id,
+                dest_chat_ids=list(dest),
+                grouped_message_ids=[m.id for m in msgs],
+                reason="group send failed but offset advanced",
+                details={"grouped_id": gid, "message_count": len(msgs)},
+            )
             logging.error(
-                f"❌ 媒体组 {gid} ({len(msgs)} 条) 发送失败, offset 未更新"
+                f"❌ 媒体组 {gid} ({len(msgs)} 条) 发送失败, 仍推进 offset → {group_last_id}"
             )
 
         delay_seconds = get_random_forward_delay()
@@ -830,6 +840,7 @@ async def forward_with_limit(
 
                 # ============ 单条消息处理 ============
                 message_sent = False
+                failed_destinations = []
 
                 bot_media_allowed = _bot_media_allowed(forward)
                 auto_comment_allowed = getattr(
@@ -1029,23 +1040,41 @@ async def forward_with_limit(
                                                 src, message.id, d, fwded_id
                                             )
                                     else:
+                                        failed_destinations.append({
+                                            "dest": d,
+                                            "reason": "send_message returned None",
+                                        })
                                         logging.warning(
                                             f"⚠️ 发送返回 None, "
                                             f"dest={d}, msg={message.id}"
                                         )
                                 except Exception as e:
+                                    failed_destinations.append({
+                                        "dest": d,
+                                        "reason": str(e),
+                                    })
                                     logging.error(f"❌ 单条发送失败: {e}")
 
                             tm.clear()
                             message_sent = any_send_ok
 
-                # 统一更新 offset（修复 Bug3）—— 仅在发送成功时推进
-                if message_sent:
-                    last_id = message.id
-                    _update_offset(forward, offset_key, message.id, sources)
-                else:
+                # 统一更新 offset，避免失败消息卡在当前 offset。
+                last_id = message.id
+                _update_offset(forward, offset_key, message.id, sources)
+                if not message_sent:
+                    st.append_failed_forward_record(
+                        mode="past-single",
+                        source_chat_id=src,
+                        source_message_id=message.id,
+                        dest_chat_ids=list(dest),
+                        reason="message send failed but offset advanced",
+                        details={
+                            "failed_destinations": failed_destinations,
+                            "failed_log_file": FAILED_FORWARD_LOG_FILE_NAME,
+                        },
+                    )
                     logging.warning(
-                        f"⚠️ 消息 {message.id} 发送失败, offset 未更新"
+                        f"⚠️ 消息 {message.id} 发送失败, 仍推进 offset"
                     )
 
                 if message_sent:

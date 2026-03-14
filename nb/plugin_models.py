@@ -92,13 +92,6 @@ class SpoilerConfig(BaseModel):
     check: bool = False
 
 
-class Sender(BaseModel):
-    check: bool = False
-    user_type: int = 0  # 0:bot, 1:user
-    BOT_TOKEN: str = ""
-    SESSION_STRING: str = ""
-
-
 # ===================== Inline Button 配置 =====================
 
 
@@ -127,9 +120,8 @@ class PluginConfig(BaseModel):
     replace: Replace = Field(default_factory=Replace)
     caption: Caption = Field(default_factory=Caption)
     spoiler: SpoilerConfig = Field(default_factory=SpoilerConfig)
-    sender: Sender = Field(default_factory=Sender)
     inline: InlineButtonConfig = Field(default_factory=InlineButtonConfig)
 
 
 # List of plugins that need to load asynchronously
-ASYNC_PLUGIN_IDS = ['sender']
+ASYNC_PLUGIN_IDS = []

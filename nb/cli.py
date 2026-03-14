@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import sys
 from enum import Enum
 from typing import Optional
 
@@ -17,7 +16,6 @@ from nb import __version__
 
 load_dotenv(".env")
 
-FAKE = bool(os.getenv("FAKE"))
 app = typer.Typer(add_completion=False)
 
 con = console.Console()
@@ -108,10 +106,6 @@ def main(
 
     To run web interface run `nb-web` command.
     """
-    if FAKE:
-        logging.critical(f"You are running fake with {mode} mode")
-        sys.exit(1)
-
     if mode == Mode.PAST:
         from nb.past import forward_job
 

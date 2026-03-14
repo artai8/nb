@@ -14,6 +14,9 @@ def admin_protect(org_func):
     async def wrapper_func(event):
         """Wrap the original function."""
         logging.info(f"Applying admin protection! Admins are {config.ADMINS}")
+        if not config.ADMINS:
+            await event.respond("⚠️ 管理员列表未配置，请先在 Web UI 中设置管理员。")
+            raise events.StopPropagation
         if event.sender_id not in config.ADMINS:
             await event.respond("You are not authorized.")
             raise events.StopPropagation

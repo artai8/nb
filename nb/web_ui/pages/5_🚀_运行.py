@@ -78,14 +78,12 @@ def get_running_pid() -> int:
 def _trim_log_file(path: str) -> None:
     try:
         if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
-            size = os.path.getsize(path)
             with open(path, "rb") as f:
-                if size > LOG_MAX_BYTES:
-                    f.seek(-LOG_MAX_BYTES, os.SEEK_END)
+                f.seek(-LOG_MAX_BYTES, os.SEEK_END)
                 data = f.read()
             with open(path, "wb") as f:
                 f.write(data)
-    except:
+    except Exception:
         pass
 
 def _read_log_tail(path: str, max_lines: int = 100) -> str:
@@ -156,22 +154,26 @@ def kill_process(pid: int, force: bool = False) -> bool:
 def start_nb_process(mode: str) -> int:
     if os.path.exists(LOG_FILE):
         try: os.rename(LOG_FILE, OLD_LOG_FILE)
-        except: pass
+        except Exception: pass
     cwd = os.getcwd()
     python = sys.executable
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONPATH"] = cwd
     cmd = [python, "-u", "-m", "nb.cli", mode, "--loud"]
+    fd = None
     try:
         fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         proc = subprocess.Popen(cmd, stdout=fd, stderr=fd, stdin=subprocess.DEVNULL, cwd=cwd, env=env, start_new_session=True)
-        os.close(fd)
         time.sleep(2)
         if proc.poll() is not None: return 0
         _write_pid_file(proc.pid)
         return proc.pid
-    except: return 0
+    except Exception: return 0
+    finally:
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: pass
 
 def termination():
     _remove_pid_file()
@@ -242,14 +244,12 @@ if check_password(st):
     pid = get_running_pid()
 
     with st.container():
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            CONFIG.show_forwarded_from = st.checkbox('显示 "转发自"', value=CONFIG.show_forwarded_from)
-        with c2:
             mode_options = ["实时的", "过去的", "定时的"]
             mode_index = CONFIG.mode if CONFIG.mode < len(mode_options) else 0
             mode = st.radio("模式", mode_options, index=mode_index, horizontal=True, label_visibility="collapsed")
-        with c3:
+        with c2:
             if mode == "过去的":
                 CONFIG.mode = 1
                 st.write("")
@@ -265,7 +265,7 @@ if check_password(st):
             else:
                 CONFIG.live.delete_sync = st.checkbox("同步删除", value=CONFIG.live.delete_sync)
                 CONFIG.mode = 0
-        with c4:
+        with c3:
             if pid > 0:
                 st.button(f"🟢 运行中 ({pid})", disabled=True, use_container_width=True, key="status_btn")
             else:

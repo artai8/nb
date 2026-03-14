@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from nb.plugins import NbMessage
 
 
-MAX_RETRIES = 5
+MAX_RETRIES = 2
 RETRY_BASE_DELAY = 5
 FORWARD_DELAY_MIN_SECONDS = 180
 FORWARD_DELAY_MAX_SECONDS = 300
@@ -784,12 +784,18 @@ def _is_file_reference_error(err: Exception) -> bool:
 #  Spoiler 检测
 # =====================================================================
 
-_SPOILER_MARKS: set = set()
+_SPOILER_MARKS: dict = {}  # id(message) -> weakref-like tracking
+_SPOILER_MAX_SIZE = 10000
 
 
 def mark_spoiler(message: Message) -> None:
-    """标记消息为 spoiler（使用 Python 对象 id，不依赖 TL 对象 setattr）。"""
-    _SPOILER_MARKS.add(id(message))
+    """标记消息为 spoiler。"""
+    # 淘汰旧条目防止无限增长
+    if len(_SPOILER_MARKS) > _SPOILER_MAX_SIZE:
+        to_remove = list(_SPOILER_MARKS.keys())[:_SPOILER_MAX_SIZE // 2]
+        for k in to_remove:
+            _SPOILER_MARKS.pop(k, None)
+    _SPOILER_MARKS[id(message)] = True
 
 
 def _has_spoiler(message: Message) -> bool:
@@ -2014,8 +2020,16 @@ async def collect_all_comment_media(
             # 跳过管理员评论
             if getattr(comments_cfg, 'skip_admin_comments', False):
                 try:
-                    sender = await comment.get_sender()
-                    if sender and getattr(sender, 'admin', False):
+                    from telethon.tl.functions.channels import GetParticipantRequest
+                    from telethon.tl.types import (
+                        ChannelParticipantAdmin,
+                        ChannelParticipantCreator,
+                    )
+                    participant_result = await client(
+                        GetParticipantRequest(channel_id, comment.sender_id)
+                    )
+                    p = participant_result.participant
+                    if isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator)):
                         continue
                 except Exception:
                     pass

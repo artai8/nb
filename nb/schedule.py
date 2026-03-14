@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import signal
 from datetime import datetime, timedelta
 
 from telethon import TelegramClient
@@ -96,7 +97,20 @@ async def schedule_job() -> None:
     async with TelegramClient(
         SESSION, CONFIG.login.API_ID, CONFIG.login.API_HASH
     ) as client:
-        while True:
+        stop_event = asyncio.Event()
+
+        def _signal_handler():
+            logging.info("🛑 收到停止信号，定时调度将在当前循环结束后退出")
+            stop_event.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _signal_handler)
+            except NotImplementedError:
+                pass  # Windows 不支持 add_signal_handler
+
+        while not stop_event.is_set():
             # 每轮重新读取 run_time 以支持动态修改
             cfg = config.read_config()
             run_time = cfg.schedule.run_time
@@ -109,10 +123,16 @@ async def schedule_job() -> None:
                 f"⏰ 下次执行: {target.strftime('%Y-%m-%d %H:%M:%S')} "
                 f"(等待 {wait_seconds:.0f} 秒)"
             )
-            await asyncio.sleep(wait_seconds)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=wait_seconds)
+                break  # stop_event 被设置，退出
+            except asyncio.TimeoutError:
+                pass  # 超时 = 到达执行时间
 
             logging.info(f"🚀 定时任务开始执行 ({datetime.now().strftime('%H:%M:%S')})")
             try:
                 await _run_daily_tasks(client)
             except Exception as e:
                 logging.exception(f"🚨 定时任务执行异常: {e}")
+
+    logging.info("🛑 定时调度模式已退出")

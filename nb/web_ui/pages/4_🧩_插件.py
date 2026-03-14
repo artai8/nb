@@ -1,4 +1,5 @@
 import os
+import functools
 
 import streamlit as st
 import yaml
@@ -8,6 +9,16 @@ from nb.plugins import reload_plugins
 from nb.plugin_models import FileType, Replace, Style, InlineButtonMode
 from nb.web_ui.password import check_password
 from nb.web_ui.utils import get_list, get_string, hide_st, switch_theme
+
+@functools.lru_cache(maxsize=1)
+def _check_ffmpeg() -> bool:
+    return os.system("ffmpeg -version >> /dev/null 2>&1") == 0
+
+
+@functools.lru_cache(maxsize=1)
+def _check_tesseract() -> bool:
+    return os.system("tesseract --version >> /dev/null 2>&1") == 0
+
 
 CONFIG = read_config()
 
@@ -85,7 +96,7 @@ if check_password(st):
         )
 
     with st.expander("水印"):
-        if os.system("ffmpeg -version >> /dev/null 2>&1") != 0:
+        if not _check_ffmpeg():
             st.warning(
                 "无法找到 `ffmpeg`。请确保服务器已安装 `ffmpeg` 以使用此插件。"
             )
@@ -107,7 +118,7 @@ if check_password(st):
 
     with st.expander("OCR 文字识别"):
         st.write("光学字符识别。")
-        if os.system("tesseract --version >> /dev/null 2>&1") != 0:
+        if not _check_tesseract():
             st.warning(
                 "无法找到 `tesseract`。请确保服务器已安装 `tesseract` 以使用此插件。"
             )
@@ -155,11 +166,9 @@ if check_password(st):
             )
             if not replace_dict:
                 replace_dict = {}
-            temp = Replace(text=replace_dict)
-            del temp
+            Replace(text=replace_dict)
         except Exception as err:
-            st.error(err)
-            CONFIG.plugins.replace.text = {}
+            st.error(f"解析失败，保留旧配置：{err}")
         else:
             CONFIG.plugins.replace.text = replace_dict
 
@@ -193,45 +202,7 @@ if check_password(st):
             "您可以在页眉和页脚中包含空行，以便在原始消息和标题/页脚之间留出空间。"
         )
 
-    with st.expander("发送者"):
-        st.write("修改转发消息的发送者（除当前用户/机器人外）")
-        st.warning("'显示转发来源' 选项必须禁用，否则消息将无法发送", icon="⚠️")
-        CONFIG.plugins.sender.check = st.checkbox(
-            "设置发送者为：", value=CONFIG.plugins.sender.check
-        )
-        leftpad, content, rightpad = st.columns([0.05, 0.9, 0.05])
-        with content:
-            user_type = st.radio("账户类型", ["机器人 (Bot)", "用户 (User)"], index=CONFIG.plugins.sender.user_type, horizontal=True)
-            if user_type == "机器人 (Bot)":
-                CONFIG.plugins.sender.user_type = 0
-                CONFIG.plugins.sender.BOT_TOKEN = st.text_input(
-                    "机器人 Token", value=CONFIG.plugins.sender.BOT_TOKEN, type="password"
-                )
-            else:
-                CONFIG.plugins.sender.user_type = 1
-                CONFIG.plugins.sender.SESSION_STRING = st.text_input(
-                    "Session String", CONFIG.plugins.sender.SESSION_STRING, type="password"
-                )
-                st.markdown(
-                    """
-                <div class="glass-card">
-                    <h6 style="margin-top:0">如何获取 Session String？</h6>
-                    <p>您可以通过 <code>pip install tg-login</code> 安装并运行 tg-login 来生成 Session String。</p>
-                    <p style="margin-bottom:1em"><i>输入 API ID、API Hash 和手机号以生成 Session String。</i></p>
-                    
-                    <div style="background:rgba(0,0,0,0.05); padding:10px; border-radius:8px; font-size:0.9em">
-                        <strong>开发者提示：</strong><br>
-                        由于某些问题，此 Web 界面不支持直接使用手机号登录用户账户。<br>
-                        您可以通过 <code>pip install tg-login</code> 安装并运行 tg-login 来生成 Session String。tg-login 是开源的。<br>
-                        <br>
-                        什么是 Session String？Session String 是 Telethon 会话的字符串表示形式，可以用来免密码登录。
-                    </div>
-                </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-
-    # ==================== 新增: Inline Buttons ====================
+    # ==================== Inline Buttons ====================
     with st.expander("内联按钮"):
         st.write("控制转发消息时如何处理内联按钮。")
 

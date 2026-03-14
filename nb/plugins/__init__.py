@@ -21,7 +21,7 @@ from nb.plugin_models import ASYNC_PLUGIN_IDS, InlineButtonMode
 from nb.utils import cleanup, stamp
 
 PLUGIN_ORDER = [
-    "filter", "ocr", "replace", "caption", "fmt", "mark", "spoiler", "sender"
+    "filter", "ocr", "replace", "caption", "fmt", "mark", "spoiler"
 ]
 
 
@@ -308,8 +308,11 @@ async def apply_plugins_to_group(
 async def load_async_plugins() -> None:
     for pid in ASYNC_PLUGIN_IDS:
         if pid in _plugins:
-            await _plugins[pid].__ainit__()
-            logging.info(f"🔌 异步插件已加载: {pid}")
+            try:
+                await _plugins[pid].__ainit__()
+                logging.info(f"🔌 异步插件已加载: {pid}")
+            except Exception as e:
+                logging.error(f"❌ 异步插件初始化失败 [{pid}]: {e}")
 
 
 _plugins = load_plugins()

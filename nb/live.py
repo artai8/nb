@@ -69,9 +69,11 @@ async def _queue_worker() -> None:
             logging.error(f"❌ live 队列处理失败: {e}")
         finally:
             LIVE_QUEUE.task_done()
-        delay_seconds = get_random_forward_delay()
-        logging.info(f"⏸️ live 队列休息 {delay_seconds} 秒")
-        await asyncio.sleep(delay_seconds)
+        # 仅在队列无待处理任务时才休息，避免积压
+        if LIVE_QUEUE.empty():
+            delay_seconds = get_random_forward_delay()
+            logging.info(f"⏸️ live 队列空闲，休息 {delay_seconds} 秒")
+            await asyncio.sleep(delay_seconds)
 
 
 async def _enqueue_task(handler, payload) -> None:
@@ -203,14 +205,9 @@ def _start_merge_timer(key: Tuple[int, int], wait_seconds: int) -> None:
     _MERGE_TIMERS[key] = loop.call_later(
         wait_seconds,
         lambda k=key: asyncio.ensure_future(
-            _enqueue_task(_flush_merge_buffer_wrapper, k)
+            _flush_merge_buffer(k)
         ),
     )
-
-
-async def _flush_merge_buffer_wrapper(key: Tuple[int, int]) -> None:
-    """定时器回调包装：通过队列执行刷新。"""
-    await _flush_merge_buffer(key)
 
 
 def _evict_oldest_merge_buffer() -> None:
@@ -610,7 +607,8 @@ async def _handle_new_message(event: Union[Message, events.NewMessage]) -> None:
             )
 
     event_uid = st.EventUid(event)
-    if len(st.stored) > const.KEEP_LAST_MANY:
+    # 批量淘汰，避免高频场景下内存无限增长
+    while len(st.stored) > const.KEEP_LAST_MANY:
         del st.stored[next(iter(st.stored))]
 
     dest = config.from_to.get(chat_id)

@@ -2,14 +2,24 @@
 
 import logging
 import os
-import sys
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 try:
     from pydantic import BaseModel, Field, field_validator
-except Exception:
-    from pydantic import BaseModel, Field, validator as field_validator
+except ImportError:
+    from pydantic import BaseModel, Field, validator
+
+    def field_validator(*fields, **kwargs):
+        """Pydantic v1 兼容：将 v2 的 field_validator 包装为 v1 的 validator。"""
+        mode = kwargs.pop("mode", "before")
+        pre = mode == "before"
+        def decorator(func):
+            # v1 validator 不需要 @classmethod，剥离后重新包装
+            if isinstance(func, classmethod):
+                func = func.__func__
+            return validator(*fields, pre=pre, allow_reuse=True, **kwargs)(func)
+        return decorator
 from pymongo import MongoClient
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -184,11 +194,15 @@ def write_config_to_file(config: Config):
             file.write(config.json(indent=4))
 
 
+_mongo_client: Optional[MongoClient] = None
+
+
 def detect_config_type() -> int:
+    global _mongo_client
     if MONGO_CON_STR:
         logging.info("Using mongo db for storing config!")
-        client = MongoClient(MONGO_CON_STR)
-        stg.mycol = setup_mongo(client)
+        _mongo_client = MongoClient(MONGO_CON_STR)
+        stg.mycol = setup_mongo(_mongo_client)
         return 2
     if CONFIG_FILE_NAME in os.listdir():
         logging.info(f"{CONFIG_FILE_NAME} detected!")
@@ -349,13 +363,22 @@ def setup_mongo(client):
 
 
 def update_db(cfg):
+    if stg.mycol is None:
+        logging.error("MongoDB 连接不可用，无法写入配置")
+        return
     model_dump = getattr(cfg, "model_dump", None)
     data = model_dump() if callable(model_dump) else cfg.dict()
     stg.mycol.update_one({"_id": 0}, {"$set": {"config": data}})
 
 
 def read_db():
+    if stg.mycol is None:
+        logging.error("MongoDB 连接不可用，返回默认配置")
+        return Config()
     obj = stg.mycol.find_one({"_id": 0})
+    if obj is None:
+        logging.warning("MongoDB 中未找到配置，返回默认配置")
+        return Config()
     validate = getattr(Config, "model_validate", None)
     cfg = validate(obj["config"]) if callable(validate) else Config.parse_obj(obj["config"])
     return cfg
@@ -391,11 +414,9 @@ def get_SESSION(section: Any = None, default: str = "nb_bot"):
         section = CONFIG.login
     if section.SESSION_STRING and section.user_type == 1:
         logging.info("using session string")
-        SESSION = StringSession(section.SESSION_STRING)
+        return StringSession(section.SESSION_STRING)
     elif section.BOT_TOKEN and section.user_type == 0:
         logging.info("using bot account")
-        SESSION = default
+        return default
     else:
-        logging.warning("Login information not set!")
-        sys.exit()
-    return SESSION
+        raise ValueError("Login information not set! 请在 Web UI 中配置登录信息。")

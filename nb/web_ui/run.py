@@ -38,6 +38,13 @@ def main():
     # 1. 优先读取环境变量 PORT（HuggingFace 会自动注入 PORT=7860）
     # 2. 如果没有环境变量，则默认使用 8501（本地运行）
     port = os.getenv("PORT", "8501")
+    try:
+        port_int = int(port)
+        if not (1 <= port_int <= 65535):
+            raise ValueError
+    except ValueError:
+        print(f"⚠️ PORT 无效: {port!r}，使用默认 8501")
+        port = "8501"
     
     print(f"🔌 Detecting PORT environment variable: {port}")
     print(f"🚀 Starting Streamlit on port: {port}")
