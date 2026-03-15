@@ -1688,12 +1688,12 @@ async def send_message(
             grouped_messages, grouped_caption=grouped_caption, grouped_tms=grouped_tms,
         )
     )
-        logging.info(
-            f"📤 send_message 开始 recipient={recipient} effective_reply_to={effective_reply_to} "
-            f"grouped_count={len(grouped_messages) if grouped_messages else 0} "
-            f"show_forwarded_from={CONFIG.show_forwarded_from} can_forward_grouped_directly={can_forward_grouped_directly} "
-            f"source={describe_message(tm.message)} tm={describe_nb_message(tm)}"
-        )
+    logging.info(
+        f"📤 send_message 开始 recipient={recipient} effective_reply_to={effective_reply_to} "
+        f"grouped_count={len(grouped_messages) if grouped_messages else 0} "
+        f"show_forwarded_from={CONFIG.show_forwarded_from} can_forward_grouped_directly={can_forward_grouped_directly} "
+        f"source={describe_message(tm.message)} tm={describe_nb_message(tm)}"
+    )
 
     # ================================================================
     # 1. 转发消息 (Show Forwarded From)
