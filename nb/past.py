@@ -36,6 +36,8 @@ from nb.utils import (
     bot_media_allowed as _bot_media_allowed,
     collect_all_comment_media,
     get_random_forward_delay,
+    describe_message,
+    describe_nb_message,
 )
 
 
@@ -786,12 +788,18 @@ async def forward_with_limit(
         grouped_buffer: Dict[int, List[Message]] = defaultdict(list)
         start_offset = forward.offsets.get(offset_key, forward.offset)
         limit_reached = False
+        logging.info(
+            f"🚀 开始扫描来源 src={src} offset_key={offset_key} start_offset={start_offset} "
+            f"dest={dest} max_count={max_count} merge_comment_media={forward.comments.merge_comment_media}"
+        )
 
         async for message in client.iter_messages(
             src, reverse=True, offset_id=start_offset
         ):
             if isinstance(message, MessageService):
                 continue
+
+            logging.info(f"📨 取到源消息 {describe_message(message)}")
 
             if forward.end and message.id > forward.end:
                 logging.info(f"📍 到达 end={forward.end}, 停止")
@@ -836,6 +844,10 @@ async def forward_with_limit(
                 # grouped 消息加入缓冲
                 if current_grouped_id is not None:
                     grouped_buffer[current_grouped_id].append(message)
+                    logging.info(
+                        f"📦 消息加入媒体组缓冲 grouped_id={current_grouped_id} "
+                        f"buffer_size={len(grouped_buffer[current_grouped_id])} msg={message.id}"
+                    )
                     continue
 
                 # ============ 单条消息处理 ============
@@ -853,15 +865,26 @@ async def forward_with_limit(
                     keyword = _extract_comment_keyword(
                         message.raw_text or message.text or "", forward
                     )
+                    logging.info(
+                        f"🤖 自动评论关键字检测 msg={message.id} bot_media_allowed={bot_media_allowed} "
+                        f"auto_comment_allowed={auto_comment_allowed} keyword={keyword!r}"
+                    )
                     if keyword:
                         bot_media = await trigger_comment_keyword_and_resolve_bot_media(
                             client, src, message.id, keyword, forward
                         )
+                        logging.info(
+                            f"🤖 自动评论关键字结果 msg={message.id} bot_media_count={len(bot_media)}"
+                        )
 
                 # 评论区媒体合并模式
                 if forward.comments.merge_comment_media:
+                    logging.info(f"🧭 进入评论媒体合并分支 msg={message.id}")
                     comment_media = await collect_all_comment_media(
                         client, src, message.id, forward.comments
+                    )
+                    logging.info(
+                        f"🧭 评论媒体合并结果 msg={message.id} comment_media_count={len(comment_media)}"
                     )
                     if comment_media:
                         combined_messages = _dedupe_messages(
@@ -887,6 +910,7 @@ async def forward_with_limit(
                         # 主消息无媒体且评论区也没有媒体，普通发送
                         tm = await apply_plugins(message)
                         if tm:
+                            logging.info(f"🧩 单条普通发送模板 msg={message.id} tm={describe_nb_message(tm)}")
                             event_uid = st.EventUid(
                                 st.DummyEvent(message.chat_id, message.id)
                             )
@@ -912,8 +936,12 @@ async def forward_with_limit(
 
                 # 原有逻辑：bot 媒体收集和普通转发
                 else:
+                    logging.info(f"🧭 进入 bot_media/普通转发分支 msg={message.id}")
                     comment_bot_media = await _collect_bot_media_from_comments(
                         client, src, message.id, forward
+                    )
+                    logging.info(
+                        f"🤖 评论区 bot_media 收集结果 msg={message.id} count={len(comment_bot_media)}"
                     )
 
                     if comment_bot_media:
@@ -933,6 +961,9 @@ async def forward_with_limit(
                                 bot_media = await resolve_bot_media_from_message(
                                     client, message, forward
                                 )
+                                logging.info(
+                                    f"🤖 主消息 bot_media 解析结果 msg={message.id} count={len(bot_media)}"
+                                )
 
                         if bot_media:
                             bot_media = _dedupe_messages(bot_media)
@@ -948,6 +979,9 @@ async def forward_with_limit(
                                 )
                                 tms = await apply_plugins_to_group(
                                     combined_messages
+                                )
+                                logging.info(
+                                    f"🧩 bot 媒体组合并模板 msg={message.id} tm_count={len(tms)}"
                                 )
                                 if tms:
                                     for d in dest:
@@ -1011,11 +1045,14 @@ async def forward_with_limit(
                             tm = await apply_plugins(message)
                             if not tm:
                                 # 修复 Bug3：即使被过滤也要更新 offset
+                                logging.info(f"🧩 普通单条消息被插件过滤 msg={message.id}，直接推进 offset")
                                 _update_offset(
                                     forward, offset_key,
                                     message.id, sources,
                                 )
                                 continue
+
+                            logging.info(f"🧩 普通单条发送模板 msg={message.id} tm={describe_nb_message(tm)}")
 
                             await _ensure_connected(client)
 
@@ -1061,6 +1098,10 @@ async def forward_with_limit(
                 # 统一更新 offset，避免失败消息卡在当前 offset。
                 last_id = message.id
                 _update_offset(forward, offset_key, message.id, sources)
+                logging.info(
+                    f"💾 offset 已更新 src={src} offset_key={offset_key} new_offset={message.id} "
+                    f"message_sent={message_sent} total_forwarded={total_forwarded}"
+                )
                 if not message_sent:
                     st.append_failed_forward_record(
                         mode="past-single",
@@ -1079,6 +1120,7 @@ async def forward_with_limit(
 
                 if message_sent:
                     total_forwarded += 1
+                    logging.info(f"✅ 消息处理完成 msg={message.id} total_forwarded={total_forwarded}")
 
                 # 评论转发（与合并模式互斥）
                 if (
@@ -1131,6 +1173,10 @@ async def forward_with_limit(
         if limit_reached:
             all_exhausted = False
             break
+
+        logging.info(
+            f"🏁 来源扫描完成 src={src} total_forwarded={total_forwarded} all_exhausted={all_exhausted}"
+        )
 
     return (total_forwarded, all_exhausted)
 

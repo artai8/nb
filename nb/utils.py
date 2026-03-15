@@ -102,6 +102,41 @@ def _make_reply_to(msg_id: Optional[int]):
         return msg_id
 
 
+def _preview_text(text: Optional[str], limit: int = 80) -> str:
+    if not text:
+        return ""
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit - 3]}..."
+
+
+def describe_message(message: Optional[Message]) -> str:
+    if message is None:
+        return "msg=None"
+    return (
+        f"chat={getattr(message, 'chat_id', None)} "
+        f"id={getattr(message, 'id', None)} "
+        f"grouped={getattr(message, 'grouped_id', None)} "
+        f"media={getattr(message, 'media', None) is not None} "
+        f"spoiler={_has_spoiler(message)} "
+        f"reply={getattr(message, 'is_reply', False)} "
+        f"text={_preview_text(getattr(message, 'raw_text', None) or getattr(message, 'text', None), 60)!r}"
+    )
+
+
+def describe_nb_message(tm: Optional["NbMessage"]) -> str:
+    if tm is None:
+        return "tm=None"
+    return (
+        f"file_type={getattr(tm, 'file_type', None)} "
+        f"new_file={bool(getattr(tm, 'new_file', None))} "
+        f"cleanup={bool(getattr(tm, 'cleanup', False))} "
+        f"reply_to={getattr(tm, 'reply_to', None)} "
+        f"text={_preview_text(getattr(tm, 'text', None), 60)!r}"
+    )
+
+
 # =====================================================================
 #  讨论区辅助
 # =====================================================================
@@ -304,9 +339,17 @@ async def _collect_start_links_from_keyword_reply(
 ) -> List[tuple]:
     latest = await client.get_messages(disc_msg.chat_id, limit=1)
     last_id = latest[0].id if latest else 0
+    logging.info(
+        f"🔎 评论关键词链路开始 discussion={describe_message(disc_msg)} "
+        f"keyword={keyword!r} send_keyword={send_keyword} snapshot_last_id={last_id}"
+    )
     if send_keyword:
         try:
             await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+            logging.info(
+                f"💬 评论关键词已发送 discussion_chat={disc_msg.chat_id} "
+                f"reply_to={disc_msg.id} keyword={keyword!r}"
+            )
         except Exception as e:
             logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
             return []
@@ -314,22 +357,41 @@ async def _collect_start_links_from_keyword_reply(
     wait_timeout = getattr(CONFIG.bot_media, "wait_timeout", 5)
     total_timeout = max(wait_timeout * 2, 8)
     start = asyncio.get_running_loop().time()
+    poll_round = 0
     while True:
+        poll_round += 1
         responses = await _collect_new_messages(
             client, disc_msg.chat_id, last_id, wait_timeout
         )
+        logging.info(
+            f"🔎 评论关键词轮询 round={poll_round} discussion_chat={disc_msg.chat_id} "
+            f"last_id={last_id} responses={len(responses)}"
+        )
         if responses:
             last_id = max(m.id for m in responses)
+            for msg in responses:
+                logging.info(f"↩️ 评论关键词收到回复 {describe_message(msg)}")
         for msg in responses:
             button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
             if button_links:
+                logging.info(
+                    f"🔗 从评论按钮提取到 start 链接 count={len(button_links)} "
+                    f"reply_msg={msg.id}"
+                )
                 return button_links
         for msg in responses:
             links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
             links.extend(_parse_start_links_from_entities(msg, forward))
         if links:
+            logging.info(
+                f"🔗 从评论文本提取到 start 链接 count={len(links)} discussion_chat={disc_msg.chat_id}"
+            )
             return links
         if asyncio.get_running_loop().time() - start >= total_timeout:
+            logging.info(
+                f"⌛ 评论关键词等待超时 discussion_chat={disc_msg.chat_id} "
+                f"keyword={keyword!r} total_timeout={total_timeout}s"
+            )
             break
     return links
 
@@ -338,14 +400,21 @@ async def _collect_from_start_links(
     client: TelegramClient, links: List[tuple], forward=None,
 ) -> List[Message]:
     if not links:
+        logging.info("🤖 start 链接为空，跳过 bot 拉取")
         return []
+    logging.info(f"🤖 准备从 start 链接拉取资源 count={len(links)} links={links}")
     for bot_username, start_param in links:
         try:
+            logging.info(f"🤖 开始尝试 bot 拉取 @{bot_username} start={start_param}")
             items = await _start_bot_and_collect_album(
                 client, bot_username, start_param, forward=forward
             )
             if items:
+                logging.info(
+                    f"🤖 bot 拉取成功 @{bot_username} items={len(items)} first={describe_message(items[0])}"
+                )
                 return items
+            logging.info(f"🤖 bot 拉取无资源 @{bot_username} start={start_param}")
         except Exception as e:
             logging.warning(f"⚠️ bot 媒体拉取失败 ({bot_username}): {e}")
     return []
@@ -475,7 +544,15 @@ async def trigger_comment_keyword_and_resolve_bot_media(
 ) -> List[Message]:
     keyword = _trim_keyword(keyword or "")
     if not keyword or CONFIG.login.user_type == 0:
+        logging.info(
+            f"🤖 评论关键词触发跳过 channel={channel_id} post={post_id} "
+            f"keyword={keyword!r} user_type={CONFIG.login.user_type}"
+        )
         return []
+
+    logging.info(
+        f"🤖 评论关键词触发开始 channel={channel_id} post={post_id} keyword={keyword!r}"
+    )
 
     # 必须先获取讨论消息，再发送关键词
     # 保证 _collect_start_links_from_keyword_reply 能在发送前快照 last_id
@@ -496,9 +573,15 @@ async def trigger_comment_keyword_and_resolve_bot_media(
         )
         return []
 
+    logging.info(
+        f"🤖 评论关键词已拿到 start 链接 post={post_id} count={len(keyword_links)}"
+    )
+
     collected = await _collect_from_start_links(client, keyword_links, forward)
     if collected:
+        logging.info(f"🤖 评论关键词拉取到资源 post={post_id} count={len(collected)}")
         return _filter_bot_media_by_blacklist(collected)
+    logging.info(f"🤖 评论关键词未拉取到任何资源 post={post_id}")
     return []
 
 
@@ -513,7 +596,10 @@ async def _collect_new_messages(
     seen = set()
     collected: List[Message] = []
     current_min_id = min_id
+    round_no = 0
+    logging.info(f"📥 开始轮询新消息 peer={peer} min_id={min_id} timeout={timeout}s")
     while True:
+        round_no += 1
         new_found = False
         async for msg in client.iter_messages(peer, min_id=current_min_id, reverse=True):
             if msg.id in seen:
@@ -523,9 +609,18 @@ async def _collect_new_messages(
             new_found = True
             if msg.id > current_min_id:
                 current_min_id = msg.id
+        if collected:
+            logging.info(
+                f"📥 新消息轮询 round={round_no} peer={peer} accumulated={len(collected)} "
+                f"current_min_id={current_min_id}"
+            )
         if collected and not new_found:
             break
         if asyncio.get_running_loop().time() - start >= timeout:
+            logging.info(
+                f"⌛ 新消息轮询超时 peer={peer} elapsed={asyncio.get_running_loop().time() - start:.1f}s "
+                f"collected={len(collected)}"
+            )
             break
         await asyncio.sleep(CONFIG.bot_media.poll_interval)
     return collected
@@ -562,6 +657,9 @@ async def _start_bot_and_collect_album(
     bot = await client.get_entity(bot_username)
     latest = await client.get_messages(bot, limit=1)
     last_id = latest[0].id if latest else 0
+    logging.info(
+        f"🤖 bot 拉取初始化 @{bot_username} last_id={last_id} max_pages={max_pages} wait_timeout={wait_timeout}"
+    )
     await client.send_message(bot, f"/start {start_param}")
     collected: List[Message] = []
     seen_grouped = set()
@@ -569,9 +667,13 @@ async def _start_bot_and_collect_album(
     pages = 0
     while pages <= max_pages:
         new_msgs = await _collect_new_messages(client, bot, last_id, wait_timeout)
+        logging.info(
+            f"🤖 bot 拉取分页 @{bot_username} page={pages} new_msgs={len(new_msgs)} last_id_before={last_id}"
+        )
         if not new_msgs:
             break
         last_id = max(m.id for m in new_msgs)
+        logging.info(f"🤖 bot 拉取更新 last_id @{bot_username} -> {last_id}")
         for msg in new_msgs:
             if msg.grouped_id:
                 if msg.grouped_id in seen_grouped:
@@ -580,6 +682,9 @@ async def _start_bot_and_collect_album(
                         seen_ids.add(msg.id)
                     continue
                 grouped = await _get_grouped_messages_from_bot(client, bot, msg.grouped_id)
+                logging.info(
+                    f"🤖 bot 拉取发现媒体组 @{bot_username} grouped_id={msg.grouped_id} size={len(grouped)}"
+                )
                 for gmsg in grouped:
                     if _msg_has_media(gmsg) and gmsg.id not in seen_ids:
                         collected.append(gmsg)
@@ -598,12 +703,16 @@ async def _start_bot_and_collect_album(
                 break
         if next_btn and next_msg:
             try:
+                logging.info(
+                    f"🤖 bot 拉取点击分页 @{bot_username} msg_id={next_msg.id} text={getattr(next_btn, 'text', '')!r}"
+                )
                 await client(GetBotCallbackAnswerRequest(
                     peer=bot, msg_id=next_msg.id, data=next_btn.data
                 ))
                 pages += 1
                 continue
             except Exception:
+                logging.info(f"🤖 bot 拉取分页点击失败 @{bot_username}，停止继续翻页")
                 break
         break
     collected.sort(key=lambda m: m.id)
@@ -1579,6 +1688,12 @@ async def send_message(
             grouped_messages, grouped_caption=grouped_caption, grouped_tms=grouped_tms,
         )
     )
+        logging.info(
+            f"📤 send_message 开始 recipient={recipient} effective_reply_to={effective_reply_to} "
+            f"grouped_count={len(grouped_messages) if grouped_messages else 0} "
+            f"show_forwarded_from={CONFIG.show_forwarded_from} can_forward_grouped_directly={can_forward_grouped_directly} "
+            f"source={describe_message(tm.message)} tm={describe_nb_message(tm)}"
+        )
 
     # ================================================================
     # 1. 转发消息 (Show Forwarded From)

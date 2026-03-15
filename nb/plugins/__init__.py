@@ -18,7 +18,7 @@ from telethon.tl.types import (
 
 import nb.config as config_module
 from nb.plugin_models import ASYNC_PLUGIN_IDS, InlineButtonMode
-from nb.utils import cleanup, stamp
+from nb.utils import cleanup, stamp, describe_message, describe_nb_message
 
 PLUGIN_ORDER = [
     "filter", "ocr", "replace", "caption", "fmt", "mark", "spoiler"
@@ -243,21 +243,27 @@ def reload_plugins(reload_async: bool = True) -> Dict[str, NbPlugin]:
 
 async def apply_plugins(message: Message) -> Optional[NbMessage]:
     tm = NbMessage(message)
+    logging.info(f"🧩 插件链开始 source={describe_message(message)} initial={describe_nb_message(tm)}")
     for pid in PLUGIN_ORDER:
         if pid not in _plugins:
             continue
         plugin = _plugins[pid]
         try:
+            before = describe_nb_message(tm)
+            logging.info(f"🧩 插件执行 [{pid}] before={before}")
             if inspect.iscoroutinefunction(plugin.modify):
                 ntm = await plugin.modify(tm)
             else:
                 ntm = plugin.modify(tm)
             if not ntm:
+                logging.info(f"🧩 插件过滤 [{pid}] source={describe_message(message)}")
                 tm.clear()
                 return None
             tm = ntm
+            logging.info(f"🧩 插件执行 [{pid}] after={describe_nb_message(tm)}")
         except Exception as e:
             logging.error(f"❌ 插件执行失败 [{pid}]: {e}")
+    logging.info(f"🧩 插件链完成 source={describe_message(message)} final={describe_nb_message(tm)}")
     return tm
 
 
@@ -268,17 +274,22 @@ async def apply_plugins_to_group(
     base_text: Optional[str] = None,
 ) -> List[NbMessage]:
     tms = [NbMessage(msg) for msg in messages]
+    logging.info(
+        f"🧩 组插件链开始 count={len(messages)} messages={[describe_message(msg) for msg in messages]}"
+    )
     if base_text and tms:
         tms[0].text = base_text
         tms[0].raw_text = base_text
     skip = set(skip_plugins or [])
     for pid in PLUGIN_ORDER:
         if pid in skip:
+            logging.info(f"🧩 组插件跳过 [{pid}] reason=skip_plugins")
             continue
         if pid not in _plugins:
             continue
         plugin = _plugins[pid]
         try:
+            logging.info(f"🧩 组插件执行 [{pid}] before_count={len(tms)}")
             if hasattr(plugin, 'modify_group'):
                 if inspect.iscoroutinefunction(plugin.modify_group):
                     tms = await plugin.modify_group(tms)
@@ -294,6 +305,9 @@ async def apply_plugins_to_group(
                     if result:
                         new_tms.append(result)
                 tms = new_tms
+            logging.info(
+                f"🧩 组插件执行 [{pid}] after_count={len(tms)} summaries={[describe_nb_message(tm) for tm in tms]}"
+            )
         except Exception as e:
             logging.error(f"❌ 组插件失败 [{pid}]: {e}")
         tms = [tm for tm in tms if tm]
@@ -302,6 +316,8 @@ async def apply_plugins_to_group(
         if base_text and tms:
             tms[0].text = base_text
             tms[0].raw_text = base_text
+        logging.info("🧩 组插件 fail_open 生效，恢复原始消息模板")
+    logging.info(f"🧩 组插件链完成 count={len(tms)} summaries={[describe_nb_message(tm) for tm in tms]}")
     return tms
 
 
