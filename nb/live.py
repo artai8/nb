@@ -386,17 +386,37 @@ async def _resolve_comment_dest(
 #  Grouped 消息处理（修复 Bug4/Bug6：增加 reply_to 和 post_mapping）
 # =====================================================================
 
-async def _send_grouped_messages(grouped_id: int) -> None:
+async def _send_grouped_messages(payload: Union[int, Tuple[int, bool]]) -> None:
+    flush_all = True
+    grouped_id = payload
+    if isinstance(payload, tuple):
+        grouped_id, flush_all = payload
+
     if grouped_id not in st.GROUPED_CACHE:
         return
 
     chat_messages_map = st.GROUPED_CACHE[grouped_id]
-    for chat_id, messages in chat_messages_map.items():
+    for chat_id, source_messages in list(chat_messages_map.items()):
         if chat_id not in config.from_to:
             continue
 
+        send_messages = source_messages
+        remaining_messages: List[Message] = []
+        if not flush_all:
+            send_count = (len(source_messages) // st.GROUPED_CHUNK_SIZE) * st.GROUPED_CHUNK_SIZE
+            if send_count == 0:
+                continue
+            send_messages = source_messages[:send_count]
+            remaining_messages = source_messages[send_count:]
+
+        messages = send_messages
+
         dest = config.from_to.get(chat_id)
         forward = config.forward_map.get(chat_id)
+
+        # 分段发送仅用于普通媒体组，复杂模式仍等待最终 flush。
+        if not flush_all and forward is not None and forward.comments.merge_comment_media:
+            continue
 
         # 评论区媒体合并模式：将相册缓冲到 MergeContext
         if (
@@ -431,6 +451,10 @@ async def _send_grouped_messages(grouped_id: int) -> None:
                 continue
 
         bot_media_allowed = _bot_media_allowed(forward)
+
+        # bot_media 模式依赖整组上下文，分段 flush 时跳过。
+        if not flush_all and bot_media_allowed:
+            continue
 
         # 自动评论关键字触发（修复 Bug8：在相册完整后才触发）
         auto_comment_allowed = (
@@ -562,13 +586,32 @@ async def _send_grouped_messages(grouped_id: int) -> None:
         for tm in tms:
             tm.clear()
 
-    st.GROUPED_CACHE.pop(grouped_id, None)
-    st.GROUPED_TIMERS.pop(grouped_id, None)
-    st.GROUPED_MAPPING.pop(grouped_id, None)
+        if flush_all:
+            continue
+
+        if remaining_messages:
+            st.GROUPED_CACHE[grouped_id][chat_id] = remaining_messages
+            st.GROUPED_MAPPING[grouped_id][chat_id] = [m.id for m in remaining_messages]
+        else:
+            st.GROUPED_CACHE[grouped_id].pop(chat_id, None)
+            st.GROUPED_MAPPING[grouped_id].pop(chat_id, None)
+
+    if flush_all:
+        st.GROUPED_CACHE.pop(grouped_id, None)
+        st.GROUPED_TIMERS.pop(grouped_id, None)
+        st.GROUPED_MAPPING.pop(grouped_id, None)
+        return
+
+    if grouped_id in st.GROUPED_CACHE and not st.GROUPED_CACHE[grouped_id]:
+        st.GROUPED_CACHE.pop(grouped_id, None)
+        timer = st.GROUPED_TIMERS.pop(grouped_id, None)
+        if timer:
+            timer.cancel()
+        st.GROUPED_MAPPING.pop(grouped_id, None)
 
 
-async def _enqueue_grouped_messages(grouped_id: int) -> None:
-    await _enqueue_task(_send_grouped_messages, grouped_id)
+async def _enqueue_grouped_messages(grouped_id: int, *, flush_all: bool = True) -> None:
+    await _enqueue_task(_send_grouped_messages, (grouped_id, flush_all))
 
 
 # =====================================================================

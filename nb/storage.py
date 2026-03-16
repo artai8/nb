@@ -122,6 +122,7 @@ GROUPED_CACHE: Dict[int, Dict[int, List[Message]]] = {}
 GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 GROUPED_TIMEOUT = 1.5
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
+GROUPED_CHUNK_SIZE = 10
 
 
 def append_failed_forward_record(
@@ -151,13 +152,13 @@ def append_failed_forward_record(
         logging.error(f"❌ 失败记录写入失败: {e}")
 
 
-async def _flush_group(grouped_id: int) -> None:
-    """超时或组完整时发送缓存中的媒体组"""
+async def _flush_group(grouped_id: int, *, flush_all: bool = True) -> None:
+    """发送缓存中的媒体组。flush_all=False 时仅发送完整 chunk。"""
     if grouped_id not in GROUPED_CACHE:
         return
     try:
         from nb.live import _enqueue_grouped_messages
-        await _enqueue_grouped_messages(grouped_id)
+        await _enqueue_grouped_messages(grouped_id, flush_all=flush_all)
     except Exception as e:
         logging.exception(
             f"Failed to send grouped messages for grouped_id={grouped_id}: {e}"
@@ -174,6 +175,11 @@ def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
         GROUPED_MAPPING[grouped_id][chat_id] = []
     GROUPED_CACHE[grouped_id][chat_id].append(message)
     GROUPED_MAPPING[grouped_id][chat_id].append(message.id)
+
+    # 一边收集一边转发：每满 10 条立即触发一次“分段发送”（只发送完整 chunk）。
+    current_count = len(GROUPED_CACHE[grouped_id][chat_id])
+    if current_count >= GROUPED_CHUNK_SIZE and current_count % GROUPED_CHUNK_SIZE == 0:
+        asyncio.ensure_future(_flush_group(grouped_id, flush_all=False))
 
     if grouped_id in GROUPED_TIMERS:
         GROUPED_TIMERS[grouped_id].cancel()

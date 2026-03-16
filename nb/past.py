@@ -461,6 +461,64 @@ async def _flush_grouped_buffer(
     return last_id
 
 
+async def _flush_grouped_chunks_if_needed(
+    client: TelegramClient,
+    src: int,
+    dest: List[int],
+    grouped_buffer: Dict[int, List[Message]],
+    grouped_id: int,
+    forward,
+) -> int:
+    """post 模式分段发送：当同一 grouped_id 满 10 条时先发送完整 chunk。"""
+    if forward.comments.merge_comment_media or _bot_media_allowed(forward):
+        return 0
+
+    msgs = grouped_buffer.get(grouped_id, [])
+    chunk_count = len(msgs) // st.GROUPED_CHUNK_SIZE
+    if chunk_count <= 0:
+        return 0
+
+    send_count = chunk_count * st.GROUPED_CHUNK_SIZE
+    send_msgs = msgs[:send_count]
+    remaining_msgs = msgs[send_count:]
+
+    await _ensure_connected(client)
+    success = await _send_past_grouped(client, src, dest, send_msgs, forward)
+
+    group_last_id = max(m.id for m in send_msgs)
+    forward.offset = group_last_id
+    write_config(CONFIG, persist=False)
+
+    if success:
+        logging.info(
+            f"✅ post 分段发送 grouped_id={grouped_id} flushed={send_count} 条, offset → {group_last_id}"
+        )
+    else:
+        st.append_failed_forward_record(
+            mode="past-grouped-partial",
+            source_chat_id=src,
+            source_message_id=group_last_id,
+            dest_chat_ids=list(dest),
+            grouped_message_ids=[m.id for m in send_msgs],
+            reason="partial grouped chunk send failed but offset advanced",
+            details={"grouped_id": grouped_id, "message_count": len(send_msgs)},
+        )
+        logging.error(
+            f"❌ post 分段发送失败 grouped_id={grouped_id} flushed={send_count} 条, 仍推进 offset → {group_last_id}"
+        )
+
+    delay_seconds = get_random_forward_delay()
+    logging.info(f"⏸️ post 分段发送后休息 {delay_seconds} 秒")
+    await asyncio.sleep(delay_seconds)
+
+    if remaining_msgs:
+        grouped_buffer[grouped_id] = remaining_msgs
+    else:
+        grouped_buffer.pop(grouped_id, None)
+
+    return group_last_id
+
+
 # =====================================================================
 #  评论区 past 模式
 # =====================================================================
@@ -857,6 +915,13 @@ async def forward_with_limit(
                         f"📦 消息加入媒体组缓冲 grouped_id={current_grouped_id} "
                         f"buffer_size={len(grouped_buffer[current_grouped_id])} msg={message.id}"
                     )
+
+                    # 与 live 模式一致：普通媒体组每满 10 条先发送一组。
+                    flushed_last = await _flush_grouped_chunks_if_needed(
+                        client, src, dest, grouped_buffer, current_grouped_id, forward
+                    )
+                    if flushed_last:
+                        last_id = max(last_id, flushed_last)
                     continue
 
                 # ============ 单条消息处理 ============
