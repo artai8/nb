@@ -123,6 +123,7 @@ GROUPED_TIMERS: Dict[int, asyncio.TimerHandle] = {}
 GROUPED_TIMEOUT = 1.5
 GROUPED_MAPPING: Dict[int, Dict[int, List[int]]] = {}
 GROUPED_CHUNK_SIZE = 10
+MAX_GROUPED_CACHE = 1000
 
 
 def append_failed_forward_record(
@@ -168,6 +169,14 @@ async def _flush_group(grouped_id: int, *, flush_all: bool = True) -> None:
 def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
     """将消息加入媒体组缓存，并启动/重置超时定时器"""
     if grouped_id not in GROUPED_CACHE:
+        if len(GROUPED_CACHE) >= MAX_GROUPED_CACHE:
+            oldest_gid = next(iter(GROUPED_CACHE))
+            GROUPED_CACHE.pop(oldest_gid, None)
+            timer = GROUPED_TIMERS.pop(oldest_gid, None)
+            if timer:
+                timer.cancel()
+            GROUPED_MAPPING.pop(oldest_gid, None)
+            logging.warning(f"⚠️ grouped 缓冲已满，驱逐最旧 grouped_id={oldest_gid}")
         GROUPED_CACHE[grouped_id] = {}
         GROUPED_MAPPING[grouped_id] = {}
     if chat_id not in GROUPED_CACHE[grouped_id]:
@@ -175,11 +184,6 @@ def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
         GROUPED_MAPPING[grouped_id][chat_id] = []
     GROUPED_CACHE[grouped_id][chat_id].append(message)
     GROUPED_MAPPING[grouped_id][chat_id].append(message.id)
-
-    # 一边收集一边转发：每满 10 条立即触发一次“分段发送”（只发送完整 chunk）。
-    current_count = len(GROUPED_CACHE[grouped_id][chat_id])
-    if current_count >= GROUPED_CHUNK_SIZE and current_count % GROUPED_CHUNK_SIZE == 0:
-        asyncio.ensure_future(_flush_group(grouped_id, flush_all=False))
 
     if grouped_id in GROUPED_TIMERS:
         GROUPED_TIMERS[grouped_id].cancel()
@@ -189,6 +193,11 @@ def add_to_group_cache(chat_id: int, grouped_id: int, message: Message) -> None:
         GROUPED_TIMEOUT,
         lambda gid=grouped_id: asyncio.ensure_future(_flush_group(gid)),
     )
+
+    # 一边收集一边转发：每满 10 条立即触发一次“分段发送”（只发送完整 chunk）。
+    current_count = len(GROUPED_CACHE[grouped_id][chat_id])
+    if current_count >= GROUPED_CHUNK_SIZE and current_count % GROUPED_CHUNK_SIZE == 0:
+        asyncio.ensure_future(_flush_group(grouped_id, flush_all=False))
 
 
 def get_grouped_messages(chat_id: int, msg_id: int) -> Optional[List[int]]:

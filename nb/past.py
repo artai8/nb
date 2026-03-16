@@ -394,10 +394,14 @@ async def _send_past_grouped(
 
             any_success = True
             first_msg_id = messages[0].id
-            event_uid = st.EventUid(st.DummyEvent(src, first_msg_id))
-            if event_uid not in st.stored:
-                st.stored[event_uid] = {}
-            st.stored[event_uid][d] = fwded_msgs
+            for i, original_msg in enumerate(messages):
+                event_uid = st.EventUid(st.DummyEvent(src, original_msg.id))
+                if event_uid not in st.stored:
+                    st.stored[event_uid] = {}
+                if isinstance(fwded_msgs, list) and i < len(fwded_msgs):
+                    st.stored[event_uid][d] = fwded_msgs[i]
+                elif not isinstance(fwded_msgs, list):
+                    st.stored[event_uid][d] = fwded_msgs
 
             fwded_id = _extract_msg_id(fwded_msgs)
             if fwded_id is not None:
@@ -421,8 +425,9 @@ async def _flush_grouped_buffer(
     dest: List[int],
     grouped_buffer: Dict[int, List[Message]],
     forward,
-) -> int:
+) -> tuple:
     last_id = 0
+    sent_groups = 0
     for gid, msgs in list(grouped_buffer.items()):
         if not msgs:
             continue
@@ -457,8 +462,10 @@ async def _flush_grouped_buffer(
         logging.info(f"⏸️ 媒体组发送后休息 {delay_seconds} 秒")
         await asyncio.sleep(delay_seconds)
 
+        sent_groups += 1
+
     grouped_buffer.clear()
-    return last_id
+    return (last_id, sent_groups)
 
 
 async def _flush_grouped_chunks_if_needed(
@@ -468,15 +475,15 @@ async def _flush_grouped_chunks_if_needed(
     grouped_buffer: Dict[int, List[Message]],
     grouped_id: int,
     forward,
-) -> int:
+) -> tuple:
     """post 模式分段发送：当同一 grouped_id 满 10 条时先发送完整 chunk。"""
     if forward.comments.merge_comment_media or _bot_media_allowed(forward):
-        return 0
+        return (0, 0)
 
     msgs = grouped_buffer.get(grouped_id, [])
     chunk_count = len(msgs) // st.GROUPED_CHUNK_SIZE
     if chunk_count <= 0:
-        return 0
+        return (0, 0)
 
     send_count = chunk_count * st.GROUPED_CHUNK_SIZE
     send_msgs = msgs[:send_count]
@@ -516,7 +523,7 @@ async def _flush_grouped_chunks_if_needed(
     else:
         grouped_buffer.pop(grouped_id, None)
 
-    return group_last_id
+    return (group_last_id, chunk_count)
 
 
 # =====================================================================
@@ -885,7 +892,7 @@ async def forward_with_limit(
                 ):
                     group_count = len(grouped_buffer)
                     try:
-                        flushed_last = await _flush_grouped_buffer(
+                        flushed_last, flushed_groups = await _flush_grouped_buffer(
                             client, src, dest, grouped_buffer, forward
                         )
                         if flushed_last:
@@ -895,12 +902,12 @@ async def forward_with_limit(
                             f"⛔ FloodWait (组刷新): {fwe.seconds} 秒"
                         )
                         await asyncio.sleep(fwe.seconds)
-                        flushed_last = await _flush_grouped_buffer(
+                        flushed_last, flushed_groups = await _flush_grouped_buffer(
                             client, src, dest, grouped_buffer, forward
                         )
                         if flushed_last:
                             last_id = max(last_id, flushed_last)
-                    total_forwarded += group_count
+                    total_forwarded += flushed_groups
                     if max_count > 0 and total_forwarded >= max_count:
                         logging.info(
                             f"📊 达到转发限额 {max_count}, 停止当前连接"
@@ -917,11 +924,19 @@ async def forward_with_limit(
                     )
 
                     # 与 live 模式一致：普通媒体组每满 10 条先发送一组。
-                    flushed_last = await _flush_grouped_chunks_if_needed(
+                    flushed_last, flushed_chunks = await _flush_grouped_chunks_if_needed(
                         client, src, dest, grouped_buffer, current_grouped_id, forward
                     )
                     if flushed_last:
                         last_id = max(last_id, flushed_last)
+                    if flushed_chunks:
+                        total_forwarded += flushed_chunks
+                        if max_count > 0 and total_forwarded >= max_count:
+                            logging.info(
+                                f"📊 达到转发限额 {max_count}, 停止当前连接"
+                            )
+                            limit_reached = True
+                            break
                     continue
 
                 # ============ 单条消息处理 ============
@@ -1299,12 +1314,12 @@ async def forward_with_limit(
                 f"📦 刷新剩余 {group_count} 个媒体组"
             )
             try:
-                await _flush_grouped_buffer(
+                _, flushed_groups = await _flush_grouped_buffer(
                     client, src, dest, grouped_buffer, forward
                 )
+                total_forwarded += flushed_groups
             except Exception as e:
                 logging.exception(f"🚨 刷新剩余组失败: {e}")
-            total_forwarded += group_count
 
         if limit_reached:
             all_exhausted = False
