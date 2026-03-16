@@ -339,6 +339,15 @@ async def _send_past_grouped(
                 )
                 break
 
+    if bot_media:
+        combined_messages = _dedupe_messages(messages + bot_media)
+        reply_to_map = {}
+        for d in dest:
+            reply_to_map[d] = _resolve_reply_to_id(messages[0], d)
+        return await _send_combined_album(
+            src, dest, messages[0].id, combined_messages, reply_to_map=reply_to_map
+        )
+
     if bot_media_allowed:
         if not bot_media:
             for msg in messages:
@@ -955,16 +964,6 @@ async def forward_with_limit(
                         )
                         message_sent = True
                     else:
-                        # 从消息本身拉取 bot 媒体
-                        if bot_media_allowed:
-                            if not bot_media:
-                                bot_media = await resolve_bot_media_from_message(
-                                    client, message, forward
-                                )
-                                logging.info(
-                                    f"🤖 主消息 bot_media 解析结果 msg={message.id} count={len(bot_media)}"
-                                )
-
                         if bot_media:
                             bot_media = _dedupe_messages(bot_media)
                             has_media = _msg_has_media(message)
@@ -988,13 +987,84 @@ async def forward_with_limit(
                                         reply_to_id = _resolve_reply_to_id(
                                             message, d
                                         )
-                                        try:
-                                            tms[0].reply_to = reply_to_id
+                                        for tm in tms:
+                                            tm.reply_to = reply_to_id
+                                        fwded_msg = await send_message(
+                                            d,
+                                            tms[0],
+                                            grouped_messages=[tm.message for tm in tms],
+                                            grouped_tms=tms,
+                                        )
+                                        if fwded_msg is not None:
+                                            st.stored[event_uid][d] = fwded_msg
+                                            fwded_id = _extract_msg_id(fwded_msg)
+                                            if fwded_id is not None:
+                                                st.add_post_mapping(
+                                                    src, message.id, d, fwded_id
+                                                )
+                                    for tm in tms:
+                                        tm.clear()
+                                    message_sent = True
+                            else:
+                                for d in dest:
+                                    reply_to_id = _resolve_reply_to_id(message, d)
+                                    try:
+                                        fwded_msg = await _send_bot_media_album(
+                                            d, bot_media,
+                                            base_text=message.raw_text or message.text or "",
+                                            reply_to=reply_to_id,
+                                        )
+                                        if fwded_msg is not None:
+                                            st.stored[event_uid][d] = fwded_msg
+                                            fwded_id = _extract_msg_id(fwded_msg)
+                                            if fwded_id is not None:
+                                                st.add_post_mapping(
+                                                    src, message.id, d, fwded_id
+                                                )
+                                            message_sent = True
+                                    except Exception as e:
+                                        logging.error(f"❌ bot 媒体发送失败: {e}")
+
+                        if not message_sent:
+                            # 从消息本身拉取 bot 媒体
+                            if bot_media_allowed:
+                                if not bot_media:
+                                    bot_media = await resolve_bot_media_from_message(
+                                        client, message, forward
+                                    )
+                                    logging.info(
+                                        f"🤖 主消息 bot_media 解析结果 msg={message.id} count={len(bot_media)}"
+                                    )
+
+                            if bot_media:
+                                bot_media = _dedupe_messages(bot_media)
+                                has_media = _msg_has_media(message)
+                                event_uid = st.EventUid(
+                                    st.DummyEvent(message.chat_id, message.id)
+                                )
+                                st.stored[event_uid] = {}
+
+                                if has_media:
+                                    combined_messages = _dedupe_messages(
+                                        [message] + bot_media
+                                    )
+                                    tms = await apply_plugins_to_group(
+                                        combined_messages
+                                    )
+                                    logging.info(
+                                        f"🧩 bot 媒体组合并模板 msg={message.id} tm_count={len(tms)}"
+                                    )
+                                    if tms:
+                                        for d in dest:
+                                            reply_to_id = _resolve_reply_to_id(
+                                                message, d
+                                            )
+                                            for tm in tms:
+                                                tm.reply_to = reply_to_id
                                             fwded_msg = await send_message(
-                                                d, tms[0],
-                                                grouped_messages=[
-                                                    tm.message for tm in tms
-                                                ],
+                                                d,
+                                                tms[0],
+                                                grouped_messages=[tm.message for tm in tms],
                                                 grouped_tms=tms,
                                             )
                                             if fwded_msg is not None:
@@ -1004,27 +1074,28 @@ async def forward_with_limit(
                                                     st.add_post_mapping(
                                                         src, message.id, d, fwded_id
                                                     )
-                                        except Exception as e:
-                                            logging.error(
-                                                f"❌ bot 媒体发送失败: {e}"
-                                            )
-                                    for tm in tms:
-                                        tm.clear()
-                                    message_sent = True
+                                        for tm in tms:
+                                            tm.clear()
+                                        message_sent = True
                                 else:
-                                    logging.warning(
-                                        "⚠️ 合并媒体组全部被插件过滤，跳过"
-                                    )
-                            else:
-                                for d in dest:
-                                    reply_to_id = _resolve_reply_to_id(message, d)
-                                    try:
-                                        fwded_msg = await _send_bot_media_album(
-                                            d, bot_media,
-                                            base_text=(
-                                                message.raw_text
-                                                or message.text
-                                                or ""
+                                    for d in dest:
+                                        reply_to_id = _resolve_reply_to_id(message, d)
+                                        try:
+                                            fwded_msg = await _send_bot_media_album(
+                                                d, bot_media,
+                                                base_text=message.raw_text or message.text or "",
+                                                reply_to=reply_to_id,
+                                            )
+                                            if fwded_msg is not None:
+                                                st.stored[event_uid][d] = fwded_msg
+                                                fwded_id = _extract_msg_id(fwded_msg)
+                                                if fwded_id is not None:
+                                                    st.add_post_mapping(
+                                                        src, message.id, d, fwded_id
+                                                    )
+                                                message_sent = True
+                                        except Exception as e:
+                                            logging.error(f"❌ bot 媒体发送失败: {e}")
                                             ),
                                             reply_to=reply_to_id,
                                         )

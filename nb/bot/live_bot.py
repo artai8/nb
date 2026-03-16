@@ -59,7 +59,8 @@ async def forward_command_handler(event):
         try:
             for s in forward.sources:
                 remove_source(s, config.CONFIG.forwards)
-        except:
+        except ValueError:
+            # Source 不存在时允许继续添加新转发配置。
             pass
         CONFIG.forwards.append(forward)
         config.from_to = await config.load_from_to(event.client, config.CONFIG.forwards)

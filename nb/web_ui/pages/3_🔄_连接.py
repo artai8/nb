@@ -152,7 +152,8 @@ if check_password(st):
                                 if isinstance(mapping, dict):
                                     comments.manual_post_mapping = {str(k): str(v) for k, v in mapping.items()}
                                 else: comments.manual_post_mapping = {}
-                            except: comments.manual_post_mapping = {}
+                            except yaml.YAMLError:
+                                comments.manual_post_mapping = {}
 
                         st.markdown("---")
                         st.markdown("**📦 评论区资源提取（合并模式）**")

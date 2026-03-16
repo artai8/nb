@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import html
+import logging
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -37,7 +38,8 @@ def _read_pid_file() -> int:
             with open(PID_FILE, "r") as f:
                 s = f.read().strip()
                 if s: return int(s)
-    except: pass
+    except (OSError, ValueError):
+        return 0
     return 0
 
 def _write_pid_file(pid: int):
@@ -45,8 +47,10 @@ def _write_pid_file(pid: int):
 
 def _remove_pid_file():
     if os.path.exists(PID_FILE):
-        try: os.remove(PID_FILE)
-        except: pass
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
 
 def is_process_alive(pid: int) -> bool:
     if pid <= 0: return False
@@ -92,7 +96,7 @@ def _read_log_tail(path: str, max_lines: int = 100) -> str:
             with open(path, "r") as f:
                 lines = f.readlines()
                 return "".join(lines[-max_lines:]) if lines else ""
-    except:
+    except OSError:
         pass
     return ""
 
@@ -185,7 +189,7 @@ def _read_log_file(path: str) -> str:
         if os.path.exists(path):
             with open(path, "r") as f:
                 return f.read()
-    except:
+    except OSError:
         pass
     return ""
 
@@ -330,8 +334,8 @@ if check_password(st):
                     raw_content = _read_log_tail(OLD_LOG_FILE, 100)
                 raw_content = raw_content or "等待输出..."
                 log_content = html.escape(raw_content)
-        except:
-            pass
+        except OSError as err:
+            logging.warning(f"读取日志失败: {err}")
 
     # --- 修复3: 智能滚动，用户翻看时不强制拉到底部 ---
     st.components.v1.html(

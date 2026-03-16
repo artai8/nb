@@ -10,7 +10,7 @@ import platform
 import tempfile
 import random
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Union, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple
 import inspect
 
 from telethon import utils as telethon_utils
@@ -58,6 +58,9 @@ FORWARD_DELAY_MAX_SECONDS = 300
 
 _DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "nb_downloads")
 os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
+
+_START_LINK_CACHE_TTL_SECONDS = 120
+_START_LINK_RESULT_CACHE: Dict[Tuple[str, str], Tuple[float, List[Message]]] = {}
 
 
 # =====================================================================
@@ -343,12 +346,14 @@ async def _collect_start_links_from_keyword_reply(
         f"🔎 评论关键词链路开始 discussion={describe_message(disc_msg)} "
         f"keyword={keyword!r} send_keyword={send_keyword} snapshot_last_id={last_id}"
     )
+    request_msg_id = None
     if send_keyword:
         try:
-            await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+            sent = await client.send_message(disc_msg.chat_id, keyword, reply_to=disc_msg.id)
+            request_msg_id = getattr(sent, 'id', None)
             logging.info(
                 f"💬 评论关键词已发送 discussion_chat={disc_msg.chat_id} "
-                f"reply_to={disc_msg.id} keyword={keyword!r}"
+                f"reply_to={disc_msg.id} keyword={keyword!r} request_msg_id={request_msg_id}"
             )
         except Exception as e:
             logging.warning(f"⚠️ 评论区关键词发送失败: {e}")
@@ -371,7 +376,25 @@ async def _collect_start_links_from_keyword_reply(
             last_id = max(m.id for m in responses)
             for msg in responses:
                 logging.info(f"↩️ 评论关键词收到回复 {describe_message(msg)}")
+
+        matched_responses = []
         for msg in responses:
+            if request_msg_id is None:
+                matched_responses.append(msg)
+                continue
+
+            reply_to_msg_id = _get_reply_to_msg_id(msg)
+            text = (msg.raw_text or msg.text or "").lower()
+            normalized_keyword = keyword.lower()
+            if reply_to_msg_id == request_msg_id or normalized_keyword in text:
+                matched_responses.append(msg)
+            else:
+                logging.info(
+                    f"↪️ 忽略无关评论回复 msg={msg.id} reply_to={reply_to_msg_id} "
+                    f"keyword={keyword!r} text={_preview_text(msg.raw_text or msg.text or '', 60)!r}"
+                )
+
+        for msg in matched_responses:
             button_links = _extract_start_links_from_markup(msg.reply_markup, forward)
             if button_links:
                 logging.info(
@@ -379,7 +402,8 @@ async def _collect_start_links_from_keyword_reply(
                     f"reply_msg={msg.id}"
                 )
                 return button_links
-        for msg in responses:
+
+        for msg in matched_responses:
             links.extend(_parse_start_links_from_text(msg.raw_text or msg.text or "", forward))
             links.extend(_parse_start_links_from_entities(msg, forward))
         if links:
@@ -402,14 +426,41 @@ async def _collect_from_start_links(
     if not links:
         logging.info("🤖 start 链接为空，跳过 bot 拉取")
         return []
-    logging.info(f"🤖 准备从 start 链接拉取资源 count={len(links)} links={links}")
+    deduped_links = []
+    seen_links = set()
     for bot_username, start_param in links:
+        cache_key = ((bot_username or "").lower(), start_param or "")
+        if cache_key in seen_links:
+            continue
+        seen_links.add(cache_key)
+        deduped_links.append((bot_username, start_param))
+
+    logging.info(
+        f"🤖 准备从 start 链接拉取资源 count={len(deduped_links)} links={deduped_links}"
+    )
+    now = asyncio.get_running_loop().time()
+    for bot_username, start_param in deduped_links:
+        cache_key = ((bot_username or "").lower(), start_param or "")
+        cached = _START_LINK_RESULT_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_items = cached
+            if now - cached_at <= _START_LINK_CACHE_TTL_SECONDS and cached_items:
+                logging.info(
+                    f"🤖 复用缓存的 bot 资源 @{bot_username} start={start_param} items={len(cached_items)}"
+                )
+                return list(cached_items)
+            _START_LINK_RESULT_CACHE.pop(cache_key, None)
+
         try:
             logging.info(f"🤖 开始尝试 bot 拉取 @{bot_username} start={start_param}")
             items = await _start_bot_and_collect_album(
                 client, bot_username, start_param, forward=forward
             )
             if items:
+                _START_LINK_RESULT_CACHE[cache_key] = (
+                    asyncio.get_running_loop().time(),
+                    list(items),
+                )
                 logging.info(
                     f"🤖 bot 拉取成功 @{bot_username} items={len(items)} first={describe_message(items[0])}"
                 )
@@ -905,6 +956,15 @@ def mark_spoiler(message: Message) -> None:
         for k in to_remove:
             _SPOILER_MARKS.pop(k, None)
     _SPOILER_MARKS[id(message)] = True
+    try:
+        setattr(message, "_nb_spoiler", True)
+    except Exception:
+        pass
+    try:
+        if getattr(message, "media", None) is not None:
+            setattr(message.media, "spoiler", True)
+    except Exception:
+        pass
 
 
 def _has_spoiler(message: Message) -> bool:
@@ -1132,14 +1192,14 @@ async def _send_uploaded_album_media(
     peer = await client.get_input_entity(recipient)
     multi_media = []
 
-    for index, (message, file_path) in enumerate(file_items):
+    for message, file_path in file_items:
         is_spoiler = preserve_spoiler and _has_spoiler(message)
         input_media = await _build_uploaded_input_media(
             client, file_path, message, spoiler=is_spoiler,
         )
         if input_media is None:
             continue
-        if index == 0 and caption:
+        if len(multi_media) == 0 and caption:
             msg_text, msg_entities = _parse_caption_entities(caption)
         else:
             msg_text = ""
@@ -1197,20 +1257,6 @@ async def _send_single_by_upload(
     video_note = bool(getattr(message, 'video_note', None))
 
     try:
-        if is_spoiler:
-            result = await _send_uploaded_single_media(
-                client,
-                recipient,
-                file,
-                message,
-                caption,
-                reply_to,
-                spoiler=True,
-            )
-            if result is not None:
-                logging.info(f"✅ 下载重传成功 (spoiler={is_spoiler})")
-                return result
-
         kwargs = {
             'entity': recipient,
             'file': file,
@@ -1260,16 +1306,14 @@ async def _send_album_by_upload(
     下载所有媒体后重新上传为相册。
     关键：使用文件路径列表而非 Message 对象，确保 caption 和视频都生效。
     """
-    file_items: List[Tuple[Message, str]] = []
+    files: List[str] = []
     for msg in grouped_messages:
         if _msg_has_media(msg):
             file = await _safe_download_media(msg, client)
             if file:
-                file_items.append((msg, file))
+                files.append(file)
             else:
                 logging.warning(f"⚠️ 相册成员 {msg.id} 下载失败，跳过")
-
-    files = [file for _, file in file_items]
 
     if not files:
         if caption:
@@ -1278,44 +1322,43 @@ async def _send_album_by_upload(
             )
         return None
 
-    any_spoiler = _any_has_spoiler(grouped_messages)
-
     try:
-        # 统一使用 SendMultiMediaRequest 以保证相册整体发送 + spoiler
-        result = await _send_uploaded_album_media(
-            client,
-            recipient,
-            file_items,
-            caption,
-            reply_to,
-            preserve_spoiler=any_spoiler,
-        )
-        logging.info(
-            f"✅ 相册下载重传成功 ({len(file_items)} 个文件, spoiler={any_spoiler})"
-        )
+        kwargs = {
+            'entity': recipient,
+            'file': files,
+            'caption': caption or "",
+            'reply_to': reply_to,
+            'supports_streaming': True,
+            'force_document': False,
+            'allow_cache': False,
+            'parse_mode': "md",
+        }
+        if preserve_spoiler and _SUPPORTS_SPOILER:
+            kwargs['has_spoiler'] = True
+        result = await client.send_file(**kwargs)
+        logging.info(f"✅ 相册下载重传成功 ({len(files)} 个文件)")
         return result
     except Exception as e:
-        logging.error(f"❌ 相册下载重传失败(SendMultiMedia): {e}")
-        # 兜底：尝试 client.send_file 批量上传（仍然保持相册形式）
-        try:
-            kwargs = {
-                'entity': recipient,
-                'file': files,
-                'caption': caption or "",
-                'reply_to': reply_to,
-                'supports_streaming': True,
-                'force_document': False,
-                'allow_cache': False,
-                'parse_mode': "md",
-            }
-            if any_spoiler and _SUPPORTS_SPOILER:
-                kwargs['has_spoiler'] = True
-            result = await client.send_file(**kwargs)
-            logging.info(f"✅ 相册批量上传成功 ({len(files)} 个文件)")
-            return result
-        except Exception as e2:
-            logging.error(f"❌ 相册批量上传也失败: {e2}")
-            return None
+        logging.error(f"❌ 相册下载重传失败: {e}")
+        # 兜底：逐条发送
+        results = []
+        for i, file in enumerate(files):
+            try:
+                send_kwargs = {
+                    'entity': recipient,
+                    'file': file,
+                    'caption': (caption or "") if i == 0 else "",
+                    'reply_to': reply_to if i == 0 else None,
+                    'supports_streaming': True,
+                    'parse_mode': "md",
+                }
+                if preserve_spoiler and _SUPPORTS_SPOILER:
+                    send_kwargs['has_spoiler'] = True
+                r = await client.send_file(**send_kwargs)
+                results.append(r)
+            except Exception as e2:
+                logging.error(f"❌ 逐条发送失败 ({i}): {e2}")
+        return results if results else None
     finally:
         cleanup(*files)
 
