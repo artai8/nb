@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+  <title>转发控制台</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/miniapp/static/style.css">
+</head>
+<body>
+  <div id="app" class="liquid-slab">
+    <header class="slab-topbar">
+      <div class="slab-brand">
+        <div class="slab-brand-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M5 5.5C5 4.67 5.67 4 6.5 4H14.5C16.99 4 19 6.01 19 8.5C19 10.99 16.99 13 14.5 13H9V19.5C9 20.33 8.33 21 7.5 21C6.67 21 6 20.33 6 19.5V5.5Z" fill="#7357F6"/>
+            <circle cx="16.5" cy="16.5" r="3.5" fill="#52C5CF"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="slab-title">转发控制台</h1>
+          <p class="slab-subtitle">账号绑定、转发任务与插件配置</p>
+        </div>
+      </div>
+
+      <div class="window-controls">
+        <div id="accountBadge" class="glass-status-pill" style="padding: 8px 16px;">
+          <span class="check-badge-violet">✓</span>
+          <span id="accountLabel" style="font-size: 0.86rem; font-weight: 700;">未绑定账号</span>
+        </div>
+        <button id="refreshBtn" class="glass-circle-icon" title="刷新数据" type="button">↻</button>
+        <button id="lockScreenBtn" class="glass-circle-icon" title="账号登录 / 注册" type="button">🔒</button>
+      </div>
+    </header>
+
+    <!-- 精简后的 3 栏主导航 -->
+    <nav class="segmented-track" aria-label="主导航">
+      <button type="button" class="segment-btn active" data-tab="tasksView">转发任务 (<span id="taskCount">0</span>)</button>
+      <button type="button" class="segment-btn" data-tab="authView">账号登录</button>
+      <button type="button" class="segment-btn" data-tab="streamView">实时转发流水</button>
+    </nav>
+
+    <!-- 视图 1：转发任务管理（列表 + 集成式任务与插件编辑器） -->
+    <section id="tasksView" class="tab-panel">
+      <div class="aqua-search-card" style="margin-bottom: 20px; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
+        <div class="pill-search-bar" style="flex:1; min-width:240px;">
+          <input id="searchTaskInput" type="text" placeholder="搜索任务名称、源频道或目标群组...">
+        </div>
+        <button id="newTaskBtn" type="button" class="btn-liquid-primary">＋ 新建任务</button>
+      </div>
+
+      <!-- 任务卡片列表 -->
+      <div id="taskList" class="bento-grid"></div>
+
+      <!-- 统一任务与插件编辑器（消除重复设置入口，分 3 个清晰页签） -->
+      <div id="editor" class="iridescent-feature-card hidden" style="margin-top: 22px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+          <h3 id="editorTitle" style="margin:0; font-size:1.18rem; font-weight:800;">新建 / 编辑任务</h3>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <div class="segmented-track" style="margin:0; padding:4px;">
+              <button type="button" class="segment-btn active" data-editor-tab="edBasic" style="padding:6px 14px; font-size:0.82rem;">1. 通道与运行模式</button>
+              <button type="button" class="segment-btn" data-editor-tab="edSync" style="padding:6px 14px; font-size:0.82rem;">2. 评论与资源抓取</button>
+              <button type="button" class="segment-btn" data-editor-tab="edPlugins" style="padding:6px 14px; font-size:0.82rem;">3. 插件规则 (8项)</button>
+            </div>
+            <button type="button" id="closeEditorBtn" class="glass-circle-icon">✕</button>
+          </div>
+        </div>
+
+        <form id="taskForm">
+          <input type="hidden" id="taskId" name="id">
+          <input type="hidden" id="taskRevision" name="revision" value="1">
+
+          <!-- 子面板 1：基础通道与运行模式 -->
+          <div id="edBasic" class="editor-subpanel bento-grid">
+            <div class="col-6">
+              <label style="display:block; font-size:0.83rem; font-weight:700; margin-bottom:6px;">任务名称</label>
+              <input type="text" id="taskName" class="pill-input" required placeholder="输入任务名称">
+            </div>
+
+            <div class="col-6">
+              <label style="display:block; font-size:0.83rem; font-weight:700; margin-bottom:6px;">运行模式</label>
+              <select id="taskMode" class="pill-select">
+                <option value="live">实时转发 (Live)</option>
+                <option value="past">历史搬运 (Past)</option>
+                <option value="schedule">定时推送 (Schedule)</option>
+              </select>
+            </div>
+
+            <div class="col-12 aqua-search-card" style="padding:14px 18px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px;">
+                <strong style="font-size:0.86rem;">已加入频道与群组快速选择器（免手填 ID）</strong>
+                <button type="button" id="loadDialogsBtn" class="btn-liquid-secondary" style="padding:6px 14px; font-size:0.78rem;">↻ 拉取已加入的频道/群组列表</button>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <div style="display:flex; gap:6px;">
+                  <select id="dialogSourcePicker" class="pill-select"><option value="">-- 选择后点击加入源列表 --</option></select>
+                  <button type="button" id="appendSourceDialogBtn" class="btn-liquid-ghost" style="padding:6px 12px; font-size:0.78rem; white-space:nowrap;">＋ 设为源</button>
+                </div>
+                <div style="display:flex; gap:6px;">
+                  <select id="dialogTargetPicker" class="pill-select"><option value="">-- 选择后点击加入目标列表 --</option></select>
+                  <button type="button" id="appendTargetDialogBtn" class="btn-liquid-ghost" style="padding:6px 12px; font-size:0.78rem; white-space:nowrap;">＋ 设为目标</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-6">
+              <label style="display:block; font-size:0.83rem; font-weight:700; margin-bottom:6px;">源频道 / 群组 (每行一个 ID 或 @username)</label>
+              <textarea id="sourceChat" class="pill-textarea" rows="3" required placeholder="-1001234567890&#10;@source_channel"></textarea>
+            </div>
+
+            <div class="col-6">
+              <label style="display:block; font-size:0.83rem; font-weight:700; margin-bottom:6px;">目标频道 / 群组 (每行一个 ID 或 @username)</label>
+              <textarea id="targetChat" class="pill-textarea" rows="3" required placeholder="-1009876543210&#10;@target_channel"></textarea>
+            </div>
+
+            <div class="col-4 glass-panel">
+              <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">实时模式选项</strong>
+              <label style="font-size:0.78rem; font-weight:700;">编辑触发删除词</label>
+              <input type="text" id="liveDeleteOnEdit" class="pill-input" value=".deleteMe">
+              <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px; font-size:0.82rem; font-weight:600;">
+                <label><input type="checkbox" id="showForwardedFrom"> 保留转发来源标签</label>
+                <label><input type="checkbox" id="liveSequential"> 顺序更新消息</label>
+                <label><input type="checkbox" id="liveDeleteSync"> 同步撤回删除</label>
+              </div>
+            </div>
+
+            <div class="col-4 glass-panel">
+              <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">历史模式选项</strong>
+              <label style="font-size:0.78rem; font-weight:700;">发送间隔 (秒)</label>
+              <input type="number" id="pastDelay" class="pill-input" value="2" min="0" max="100">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">起始消息 ID</label>
+                  <input type="number" id="pastOffset" class="pill-input" value="0" min="0">
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">结束消息 ID</label>
+                  <input type="number" id="pastEnd" class="pill-input" placeholder="不限">
+                </div>
+              </div>
+            </div>
+
+            <div class="col-4 glass-panel">
+              <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">定时模式选项</strong>
+              <label style="font-size:0.78rem; font-weight:700;">每日执行时间 (HH:MM)</label>
+              <input type="text" id="scheduleRunTime" class="pill-input" value="08:00">
+              <label style="display:block; font-size:0.78rem; font-weight:700; margin-top:8px;">每日条数上限 (0=不限)</label>
+              <input type="number" id="scheduleDailyLimit" class="pill-input" value="0" min="0">
+            </div>
+          </div>
+
+          <!-- 子面板 2：评论区与资源抓取 -->
+          <div id="edSync" class="editor-subpanel bento-grid hidden">
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">评论区同步</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="commentsEnabled"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">源模式</label>
+                    <select id="commentsSourceMode" class="pill-select">
+                      <option value="comments">帖子评论区</option>
+                      <option value="discussion">讨论群组</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">目标模式</label>
+                    <select id="commentsDestMode" class="pill-select">
+                      <option value="comments">帖子评论区</option>
+                      <option value="discussion">讨论群组</option>
+                    </select>
+                  </div>
+                </div>
+                <input type="text" id="commentsSourceGroup" class="pill-input" placeholder="源讨论群 ID 或 @username">
+                <input type="text" id="commentsDestGroups" class="pill-input" placeholder="目标讨论群列表 (逗号分隔)">
+                <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:0.8rem; font-weight:600; margin-top:4px;">
+                  <label><input type="checkbox" id="commentsOnlyMedia"> 仅含媒体评论</label>
+                  <label><input type="checkbox" id="commentsIncludeText" checked> 包含纯文本</label>
+                  <label><input type="checkbox" id="commentsSkipBot"> 跳过机器人评论</label>
+                  <label><input type="checkbox" id="commentsMergeMedia"> 合并评论相册</label>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">分页媒体与资源抓取</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="botMediaEnabled" checked> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">轮询间隔(秒)</label>
+                    <input type="number" id="botMediaPollInterval" class="pill-input" value="1.2" step="0.1">
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">等待超时(秒)</label>
+                    <input type="number" id="botMediaWaitTimeout" class="pill-input" value="12">
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">最大翻页数</label>
+                    <input type="number" id="botMediaMaxPages" class="pill-input" value="5">
+                  </div>
+                </div>
+                <input type="text" id="botMediaKeywords" class="pill-input" placeholder="翻页按钮关键词 (逗号分隔，如：下一页, Next)">
+                <input type="text" id="botMediaBlacklist" class="pill-input" placeholder="屏蔽的链接关键词 (逗号分隔)">
+                <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:0.8rem; font-weight:600; margin-top:4px;">
+                  <label><input type="checkbox" id="botMediaAutoTrigger" checked> 自动触发评论关键词</label>
+                  <label><input type="checkbox" id="botMediaPagination" checked> 自动点击翻页按钮</label>
+                  <label><input type="checkbox" id="botMediaForceEmpty" checked> 无资源时仍转发原帖</label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 子面板 3：8大插件完整参数 -->
+          <div id="edPlugins" class="editor-subpanel bento-grid hidden">
+            <!-- 1. 过滤插件 -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">1. 过滤规则</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_filter_check"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">关键词白名单 (每行一个)</label>
+                    <textarea id="plg_filter_text_white" class="pill-textarea" rows="2"></textarea>
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">关键词黑名单 (每行一个)</label>
+                    <textarea id="plg_filter_text_black" class="pill-textarea" rows="2"></textarea>
+                  </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">发送者白名单 (逗号分隔)</label>
+                    <input type="text" id="plg_filter_users_white" class="pill-input">
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">发送者黑名单 (逗号分隔)</label>
+                    <input type="text" id="plg_filter_users_black" class="pill-input">
+                  </div>
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700; display:block; margin-bottom:4px;">禁止转发的媒体类型 (黑名单)</label>
+                  <div id="plg_filter_files_black" style="display:flex; flex-wrap:wrap; gap:8px; font-size:0.78rem; font-weight:600;">
+                    <label><input type="checkbox" value="audio"> 音频</label>
+                    <label><input type="checkbox" value="gif"> 动图</label>
+                    <label><input type="checkbox" value="video"> 视频</label>
+                    <label><input type="checkbox" value="video_note"> 圆视频</label>
+                    <label><input type="checkbox" value="sticker"> 贴纸</label>
+                    <label><input type="checkbox" value="contact"> 名片</label>
+                    <label><input type="checkbox" value="photo"> 图片</label>
+                    <label><input type="checkbox" value="document"> 文件</label>
+                    <label><input type="checkbox" value="nofile"> 纯文本</label>
+                  </div>
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700; display:block; margin-bottom:4px;">仅允许转发的媒体类型 (白名单，不选为不限)</label>
+                  <div id="plg_filter_files_white" style="display:flex; flex-wrap:wrap; gap:8px; font-size:0.78rem; font-weight:600;">
+                    <label><input type="checkbox" value="audio"> 音频</label>
+                    <label><input type="checkbox" value="gif"> 动图</label>
+                    <label><input type="checkbox" value="video"> 视频</label>
+                    <label><input type="checkbox" value="video_note"> 圆视频</label>
+                    <label><input type="checkbox" value="sticker"> 贴纸</label>
+                    <label><input type="checkbox" value="contact"> 名片</label>
+                    <label><input type="checkbox" value="photo"> 图片</label>
+                    <label><input type="checkbox" value="document"> 文件</label>
+                    <label><input type="checkbox" value="nofile"> 纯文本</label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. 文本替换插件 -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">2. 文本替换</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_replace_check"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <label style="font-size:0.82rem; font-weight:700;">
+                  <input type="checkbox" id="plg_replace_regex"> 使用正则表达式匹配
+                </label>
+                <label style="font-size:0.76rem; font-weight:700;">替换规则 (每行一条 `原内容: 新内容`，冒号右侧留空即删除)</label>
+                <textarea id="plg_replace_text_raw" class="pill-textarea" rows="6" placeholder="原内容: 新内容"></textarea>
+              </div>
+            </div>
+
+            <!-- 3. 页眉页脚插件 -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">3. 页眉与页脚</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_caption_check"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">顶部页眉</label>
+                  <textarea id="plg_caption_header" class="pill-textarea" rows="2"></textarea>
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">底部页脚</label>
+                  <textarea id="plg_caption_footer" class="pill-textarea" rows="2"></textarea>
+                </div>
+              </div>
+            </div>
+
+            <!-- 4. 内联按钮插件 -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">4. 消息内联按钮</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_inline_check"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <select id="plg_inline_mode" class="pill-select">
+                  <option value="remove">移除所有按钮</option>
+                  <option value="replace_url">仅替换按钮链接</option>
+                  <option value="replace_all">替换按钮文字与链接</option>
+                </select>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">链接替换 (`旧URL: 新URL`)</label>
+                    <textarea id="plg_inline_url_raw" class="pill-textarea" rows="2"></textarea>
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">文字替换 (`旧文字: 新文字`)</label>
+                    <textarea id="plg_inline_text_raw" class="pill-textarea" rows="2"></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 5. 水印插件 -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">5. 图片与视频水印</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_mark_check"> 启用</label>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">水印位置</label>
+                    <select id="plg_mark_position" class="pill-select">
+                      <option value="centre">居中</option>
+                      <option value="bottom_right" selected>右下角</option>
+                      <option value="bottom_left">左下角</option>
+                      <option value="top_right">右上角</option>
+                      <option value="top_left">左上角</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size:0.76rem; font-weight:700;">视频帧率 (FPS)</label>
+                    <input type="number" id="plg_mark_fps" class="pill-input" value="15" min="1" max="60">
+                  </div>
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">水印路径或上传 PNG 图片</label>
+                  <div style="display:flex; gap:8px; align-items:center;">
+                    <input type="text" id="plg_mark_image" class="pill-input" value="image.png">
+                    <input type="file" id="plg_mark_file" accept="image/png" style="font-size:0.76rem; max-width:170px;">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 6~8. 文本样式 + OCR + 防剧透 -->
+            <div class="col-6 glass-panel" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+              <div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                  <strong style="font-size:0.9rem;">6. 文本排版样式</strong>
+                  <label style="font-size:0.82rem; font-weight:700;"><input type="checkbox" id="plg_fmt_check"> 启用</label>
+                </div>
+                <select id="plg_fmt_style" class="pill-select">
+                  <option value="preserve">保留原格式</option>
+                  <option value="bold">粗体</option>
+                  <option value="italic">斜体</option>
+                  <option value="code">等宽代码</option>
+                  <option value="strikethrough">删除线</option>
+                  <option value="spoiler">防剧透隐藏文字</option>
+                </select>
+              </div>
+
+              <div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                  <strong style="font-size:0.9rem;">7. 图片 OCR 文字识别过滤</strong>
+                  <label style="font-size:0.82rem; font-weight:700;"><input type="checkbox" id="plg_ocr_check"> 启用</label>
+                </div>
+                <input type="text" id="plg_ocr_lang" class="pill-input" value="chi_sim+eng" placeholder="语言代码，如 chi_sim+eng">
+              </div>
+
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <strong style="font-size:0.9rem;">8. 媒体防剧透遮罩</strong>
+                <label style="font-size:0.82rem; font-weight:700;"><input type="checkbox" id="plg_spoiler_check"> 启用</label>
+              </div>
+            </div>
+            <!-- 插件规则实时沙盒测试器 -->
+            <div class="col-12 aqua-search-card">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px;">
+                <strong style="font-size:0.92rem;">插件规则实时沙盒测试器（无需等待频道发消息，即时验证过滤与替换效果）</strong>
+                <button type="button" id="runPluginSandboxBtn" class="btn-liquid-primary" style="padding:7px 16px; font-size:0.8rem;">▶ 立即测试插件效果</button>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">输入测试原消息文本</label>
+                  <textarea id="sandboxInputText" class="pill-textarea" rows="3" placeholder="输入一段带广告或待替换词的消息进行测试...">今日重磅快讯！详情点击 @source_channel 商务合作请联系微信123</textarea>
+                </div>
+                <div>
+                  <label style="font-size:0.76rem; font-weight:700;">插件处理后最终输出预览</label>
+                  <textarea id="sandboxOutputText" class="pill-textarea" rows="3" readonly placeholder="点击上方测试按钮查看转换结果..."></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:16px;">
+            <button type="submit" class="btn-liquid-primary">保存任务</button>
+            <button type="button" id="cancelBtn" class="btn-liquid-ghost">取消</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 视图 2：账号登录与绑定 (4种方式) -->
+    <section id="authView" class="tab-panel hidden">
+      <div class="bento-grid">
+        <!-- 1. 手机号验证码登录 -->
+        <div class="col-6 glass-panel">
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">1. 手机号验证码登录</h3>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            <input id="webPhoneInput" type="text" class="pill-input" placeholder="手机号 (带国家码，如 +8613800000000)">
+            <button id="sendPhoneCodeBtn" type="button" class="btn-liquid-primary">获取验证码</button>
+            <input id="webCodeInput" type="text" class="pill-input" placeholder="输入 5 位验证码">
+            <input id="web2faInput" type="password" class="pill-input" placeholder="两步验证密码 (未开启可留空)">
+            <button id="verifyPhoneCodeBtn" type="button" class="btn-liquid-secondary">验证并绑定</button>
+          </div>
+        </div>
+
+        <!-- 2. StringSession 字符串导入 -->
+        <div class="col-6 iridescent-feature-card">
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">2. StringSession 字符串导入</h3>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            <textarea id="sessionStringInput" class="pill-textarea" rows="4" placeholder="粘贴 Telethon StringSession 字符串"></textarea>
+            <button id="importSessionBtn" type="button" class="btn-liquid-primary">导入 Session</button>
+          </div>
+        </div>
+
+        <!-- 3. .session 会话文件上传 -->
+        <div class="col-6 aqua-search-card">
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">3. 上传 .session 文件登录</h3>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            <input id="sessionFileInput" type="file" accept=".session" class="pill-input">
+            <button id="uploadSessionFileBtn" type="button" class="btn-liquid-primary">上传并绑定 .session 文件</button>
+          </div>
+        </div>
+
+        <!-- 4. 本机客户端一键跳转授权 / 动态二维码 -->
+        <div class="col-6 glass-panel">
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">4. 客户端一键唤起授权 / 扫码</h3>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <button id="generateDeepLinkBtn" type="button" class="btn-liquid-primary">生成授权链接与二维码</button>
+              <a id="tgDeepLinkAnchor" href="#authView" class="btn-liquid-secondary hidden">一键打开 Telegram 确认授权</a>
+            </div>
+            <div id="qrPreviewBox" class="hidden" style="display:flex; align-items:center; gap:12px; margin-top:4px;">
+              <img id="qrPreviewImg" src="" alt="QR" style="width:116px; height:116px; border-radius:14px; border:2px solid #fff;">
+              <span id="qrStatusText" style="font-size:0.84rem; font-weight:700;">等待在 Telegram 客户端点击确认...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- 登录与新用户注册弹窗 (Login & Registration Gate) -->
+  <div id="adminLockModal" class="hidden" style="position:fixed; inset:0; z-index:9000; background:rgba(229,226,236,0.68); backdrop-filter:blur(26px); -webkit-backdrop-filter:blur(26px); display:flex; align-items:center; justify-content:center; padding:18px;">
+    <div class="liquid-slab" style="max-width:460px; width:100%; padding:30px 28px; text-align:center;">
+      <div class="slab-brand-icon" style="width:54px; height:54px; margin:0 auto 12px; border-radius:18px;">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3L4 7V13C4 18.5 7.4 23.6 12 25C16.6 23.6 20 18.5 20 13V7L12 3Z" fill="#7357F6"/>
+          <path d="M9.5 13L11.5 15L15.5 11" stroke="#52C5CF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <div class="segmented-track" style="margin:0 auto 18px;">
+        <button type="button" class="segment-btn active" data-auth-mode="login" style="padding:7px 20px; font-size:0.84rem;">账号登录</button>
+        <button type="button" class="segment-btn" data-auth-mode="register" style="padding:7px 20px; font-size:0.84rem;">新用户注册</button>
+      </div>
+
+      <!-- 登录表单 -->
+      <form id="adminGateForm" style="display:flex; flex-direction:column; gap:12px; text-align:left;">
+        <div>
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">用户名 / 租户 ID</label>
+          <input id="gateUsernameInput" type="text" class="pill-input" required placeholder="输入您的用户名或租户 ID">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">登录密码</label>
+          <input id="gatePasswordInput" type="password" class="pill-input" required placeholder="输入密码">
+        </div>
+        <button type="submit" class="btn-liquid-primary" style="width:100%; margin-top:4px;">登录进入控制台</button>
+      </form>
+
+      <!-- 新用户注册表单 -->
+      <form id="userRegisterForm" class="hidden" style="display:flex; flex-direction:column; gap:10px; text-align:left;">
+        <div>
+          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">设置用户名</label>
+          <input id="regUsernameInput" type="text" class="pill-input" required placeholder="设置登录用户名">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">显示昵称 / 备注</label>
+          <input id="regDisplayInput" type="text" class="pill-input" placeholder="选填，如：运营一组">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">绑定 Telegram User ID (选填)</label>
+          <input id="regTenantIdInput" type="number" class="pill-input" placeholder="选填，留空自动分配租户号">
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <div>
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">设置密码</label>
+            <input id="regPasswordInput" type="password" class="pill-input" required placeholder="至少 4 位">
+          </div>
+          <div>
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">确认密码</label>
+            <input id="regConfirmInput" type="password" class="pill-input" required placeholder="再次输入密码">
+          </div>
+        </div>
+        <button type="submit" class="btn-liquid-secondary" style="width:100%; margin-top:4px;">立即注册并进入</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="liquid-toast hidden"></div>
+  <script src="/miniapp/static/app.js"></script>
+</body>
+</html>

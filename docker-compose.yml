@@ -1,0 +1,139 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env
+
+services:
+  gateway:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_APP_USERNAME: nb
+      MONGO_APP_PASSWORD_FILE: /run/secrets/mongo_app_password
+      MONGO_APP_DATABASE: ${MONGO_DB_NAME:-nb}
+    secrets:
+      - mongo_root_password
+      - mongo_app_password
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    <<: *app
+    command: ["python", "-m", "nb.cli", "api", "--loud"]
+    environment:
+      MONGO_CON_STR_FILE: /run/secrets/mongo_uri
+      MONGO_DB_NAME: $MONGO_DB_NAME
+      BOT_TOKEN_FILE: /run/secrets/bot_token
+      API_ID: $API_ID
+      API_HASH_FILE: /run/secrets/api_hash
+      SESSION_ENCRYPTION_KEY_FILE: /run/secrets/session_encryption_key
+      PUBLIC_BASE_URL: $PUBLIC_BASE_URL
+    secrets:
+      - mongo_uri
+      - bot_token
+      - api_hash
+      - session_encryption_key
+    depends_on:
+      mongo:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  bot:
+    <<: *app
+    command: ["python", "-m", "nb.cli", "bot", "--loud"]
+    environment:
+      MONGO_CON_STR_FILE: /run/secrets/mongo_uri
+      MONGO_DB_NAME: $MONGO_DB_NAME
+      BOT_TOKEN_FILE: /run/secrets/bot_token
+      API_ID: $API_ID
+      API_HASH_FILE: /run/secrets/api_hash
+      SESSION_ENCRYPTION_KEY_FILE: /run/secrets/session_encryption_key
+      PUBLIC_BASE_URL: $PUBLIC_BASE_URL
+    secrets:
+      - mongo_uri
+      - bot_token
+      - api_hash
+      - session_encryption_key
+    depends_on:
+      mongo:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "nb.cli", "worker", "--loud"]
+    environment:
+      MONGO_CON_STR_FILE: /run/secrets/mongo_uri
+      MONGO_DB_NAME: $MONGO_DB_NAME
+      API_ID: $API_ID
+      API_HASH_FILE: /run/secrets/api_hash
+      SESSION_ENCRYPTION_KEY_FILE: /run/secrets/session_encryption_key
+      WORKER_CLIENT_CAPACITY: $WORKER_CLIENT_CAPACITY
+      WORKER_LEASE_SECONDS: $WORKER_LEASE_SECONDS
+      WORKER_POLL_SECONDS: $WORKER_POLL_SECONDS
+    secrets:
+      - mongo_uri
+      - api_hash
+      - session_encryption_key
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+secrets:
+  mongo_root_password:
+    file: ./secrets/mongo_root_password
+  mongo_uri:
+    file: ./secrets/mongo_uri
+  mongo_app_password:
+    file: ./secrets/mongo_app_password
+  bot_token:
+    file: ./secrets/bot_token
+  api_hash:
+    file: ./secrets/api_hash
+  session_encryption_key:
+    file: ./secrets/session_encryption_key
+
+volumes:
+  mongo-data:
+  caddy-data:
+  caddy-config:

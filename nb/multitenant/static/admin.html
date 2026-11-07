@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+  <title>管理员后台 (/admin)</title>
+  <link rel="stylesheet" href="/miniapp/static/style.css">
+</head>
+<body>
+  <!-- 管理员专属独立登录页 (/admin 未授权时显示) -->
+  <div id="adminAuthGate" style="max-width:460px; margin:48px auto; padding:0 14px;">
+    <div class="liquid-slab" style="padding:32px 28px; text-align:center;">
+      <div class="slab-brand-icon" style="width:56px; height:56px; margin:0 auto 14px; border-radius:18px;">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3L4 7V13C4 18.5 7.4 23.6 12 25C16.6 23.6 20 18.5 20 13V7L12 3Z" fill="#7357F6"/>
+          <path d="M9.5 13L11.5 15L15.5 11" stroke="#52C5CF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <h2 style="margin:0 0 6px; font-size:1.38rem; font-weight:800;">管理员登录</h2>
+      <p style="margin:0 0 20px; font-size:0.85rem; color:var(--text-muted);">独立管理入口 · 普通租户不可见</p>
+      <form id="adminLoginForm" style="display:flex; flex-direction:column; gap:12px; text-align:left;">
+        <div>
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">管理员账号</label>
+          <input id="adminUserInp" type="text" class="pill-input" required placeholder="输入管理员账号">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">管理员密码</label>
+          <input id="adminPwdInp" type="password" class="pill-input" required placeholder="输入管理员密码">
+        </div>
+        <button type="submit" class="btn-liquid-primary" style="width:100%; margin-top:4px;">登录管理后台</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 管理员总控主工作台 -->
+  <div id="adminMainPortal" class="liquid-slab hidden">
+    <header class="slab-topbar">
+      <div class="slab-brand">
+        <div class="slab-brand-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M12 3L4 7V13C4 18.5 7.4 23.6 12 25C16.6 23.6 20 18.5 20 13V7L12 3Z" fill="#7357F6"/>
+            <circle cx="16.5" cy="16.5" r="3.5" fill="#52C5CF"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="slab-title">管理员总控后台</h1>
+          <p class="slab-subtitle">自由管理所有租户账号、转发任务、8大插件配置与管理入口参数</p>
+        </div>
+      </div>
+
+      <div class="window-controls">
+        <div class="glass-status-pill" style="padding: 8px 16px;">
+          <span class="check-badge-violet">✓</span>
+          <span id="adminIdentityLabel" style="font-size: 0.86rem; font-weight: 700;">管理员已登录</span>
+        </div>
+        <button id="adminRefreshBtn" class="glass-circle-icon" title="刷新全量租户数据" type="button">↻</button>
+        <button id="adminLogoutBtn" class="glass-circle-icon" title="退出管理后台" type="button">🔒</button>
+      </div>
+    </header>
+
+    <nav class="segmented-track" aria-label="管理员导航">
+      <button type="button" class="segment-btn active" data-adm-tab="admTenantsView">1. 全部租户与任务总览 (<span id="admTenantCount">0</span>)</button>
+      <button type="button" class="segment-btn" data-adm-tab="admTaskEditorView">2. 跨租户任务与插件配置</button>
+      <button type="button" class="segment-btn" data-adm-tab="admSettingsView">3. 管理员账号与入口路径设置</button>
+    </nav>
+
+    <!-- 页签 1：全部租户管理与下属任务总览 -->
+    <section id="admTenantsView" class="adm-panel">
+      <div class="aqua-search-card" style="margin-bottom: 18px; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
+        <div class="pill-search-bar" style="flex:1; min-width:240px;">
+          <input id="admSearchInput" type="text" placeholder="搜索租户 ID、用户名、备注或任务名称...">
+        </div>
+        <button id="admNewTenantBtn" type="button" class="btn-liquid-primary">＋ 新增租户账号</button>
+      </div>
+
+      <!-- 新增 / 编辑租户表单面板 -->
+      <div id="admTenantDrawer" class="iridescent-feature-card hidden" style="margin-bottom: 18px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <h4 id="admTenantDrawerTitle" style="margin:0; font-size:1.05rem; font-weight:800;">新增 / 编辑租户</h4>
+          <button type="button" id="admCloseTenantDrawerBtn" class="glass-circle-icon">✕</button>
+        </div>
+        <form id="admTenantForm" class="bento-grid">
+          <input type="hidden" id="admTenantEditMode" value="create">
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">租户 ID (可选，支持填 TG ID)</label>
+            <input type="number" id="admFormTid" class="pill-input" placeholder="留空自动分配">
+          </div>
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">登录用户名</label>
+            <input type="text" id="admFormUser" class="pill-input" required placeholder="输入租户登录用户名">
+          </div>
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">显示名称 / 备注</label>
+            <input type="text" id="admFormDisplay" class="pill-input" placeholder="租户备注">
+          </div>
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">登录密码 (编辑时留空不改)</label>
+            <input type="password" id="admFormPwd" class="pill-input" placeholder="设置租户登录密码">
+          </div>
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">状态</label>
+            <select id="admFormStatus" class="pill-select">
+              <option value="active">正常启用 (active)</option>
+              <option value="disabled">停用并暂停所有任务 (disabled)</option>
+            </select>
+          </div>
+          <div class="col-4">
+            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">任务数量配额上限 (max_tasks, 0=不限)</label>
+            <input type="number" id="admFormMaxTasks" class="pill-input" value="10" min="0">
+          </div>
+          <div class="col-8" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; padding-top:18px;">
+            <label style="font-size:0.82rem; font-weight:700;"><input type="checkbox" id="admFormHeavyPlugins" checked> 允许使用高算力水印与OCR插件</label>
+            <label style="font-size:0.82rem; font-weight:700;"><input type="checkbox" id="admFormIsAdmin"> 授予管理员权限</label>
+            <button type="submit" class="btn-liquid-primary" style="padding:9px 22px;">保存租户与配额</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="admTenantList" class="bento-grid"></div>
+    </section>
+
+    <!-- 页签 2：跨租户任务与8大插件全量编辑器 -->
+    <section id="admTaskEditorView" class="adm-panel hidden">
+      <div class="aqua-search-card" style="margin-bottom: 18px; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <strong style="font-size:0.96rem;">当前操作租户：</strong>
+          <select id="admTargetTenantSelect" class="pill-select" style="width:auto; min-width:220px;"></select>
+        </div>
+        <span id="admEditingTaskHint" style="font-size:0.85rem; font-weight:700; color:var(--violet-accent);">新建或编辑所选租户的转发任务与插件配置</span>
+      </div>
+
+      <form id="admTaskForm" class="iridescent-feature-card bento-grid">
+        <input type="hidden" id="admTaskId" value="">
+        <input type="hidden" id="admTaskRev" value="1">
+
+        <div class="col-6">
+          <label style="display:block; font-size:0.82rem; font-weight:700; margin-bottom:5px;">任务名称</label>
+          <input type="text" id="admTaskName" class="pill-input" required placeholder="输入任务名称">
+        </div>
+        <div class="col-6">
+          <label style="display:block; font-size:0.82rem; font-weight:700; margin-bottom:5px;">运行模式</label>
+          <select id="admTaskMode" class="pill-select">
+            <option value="live">实时转发 (Live)</option>
+            <option value="past">历史搬运 (Past)</option>
+            <option value="schedule">定时推送 (Schedule)</option>
+          </select>
+        </div>
+        <div class="col-6">
+          <label style="display:block; font-size:0.82rem; font-weight:700; margin-bottom:5px;">源频道 / 群组 (每行一个)</label>
+          <textarea id="admTaskSources" class="pill-textarea" rows="3" required placeholder="-100188291001"></textarea>
+        </div>
+        <div class="col-6">
+          <label style="display:block; font-size:0.82rem; font-weight:700; margin-bottom:5px;">目标频道 / 群组 (每行一个)</label>
+          <textarea id="admTaskDests" class="pill-textarea" rows="3" required placeholder="-100199384756"></textarea>
+        </div>
+
+        <!-- 8大插件与评论区/资源抓取直接配置 -->
+        <div class="col-6 glass-panel">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <strong style="font-size:0.9rem;">1. 过滤规则 (关键词与媒体黑白名单)</strong>
+            <label style="font-size:0.8rem; font-weight:700;"><input type="checkbox" id="adm_filter_check"> 启用</label>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <textarea id="adm_filter_white" class="pill-textarea" rows="2" placeholder="关键词白名单"></textarea>
+            <textarea id="adm_filter_black" class="pill-textarea" rows="2" placeholder="关键词黑名单"></textarea>
+          </div>
+        </div>
+
+        <div class="col-6 glass-panel">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <strong style="font-size:0.9rem;">2. 文本与正则替换</strong>
+            <label style="font-size:0.8rem; font-weight:700;"><input type="checkbox" id="adm_replace_check"> 启用</label>
+          </div>
+          <label style="font-size:0.78rem; font-weight:600; display:block; margin-bottom:4px;"><input type="checkbox" id="adm_replace_regex"> 使用正则表达式</label>
+          <textarea id="adm_replace_raw" class="pill-textarea" rows="2" placeholder="原内容: 新内容"></textarea>
+        </div>
+
+        <div class="col-6 glass-panel">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <strong style="font-size:0.9rem;">3. 页眉与页脚</strong>
+            <label style="font-size:0.8rem; font-weight:700;"><input type="checkbox" id="adm_caption_check"> 启用</label>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <input type="text" id="adm_caption_header" class="pill-input" placeholder="顶部页眉">
+            <input type="text" id="adm_caption_footer" class="pill-input" placeholder="底部页脚">
+          </div>
+        </div>
+
+        <div class="col-6 glass-panel">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <strong style="font-size:0.9rem;">4. 内联按钮 & 水印 & OCR & 防剧透</strong>
+            <label style="font-size:0.8rem; font-weight:700;"><input type="checkbox" id="adm_inline_check"> 按钮处理</label>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:0.8rem; font-weight:600;">
+            <label><input type="checkbox" id="adm_mark_check"> 启用水印</label>
+            <label><input type="checkbox" id="adm_fmt_check"> 启用排版</label>
+            <label><input type="checkbox" id="adm_ocr_check"> 启用OCR</label>
+            <label><input type="checkbox" id="adm_spoiler_check"> 防剧透遮罩</label>
+            <label><input type="checkbox" id="adm_comments_check"> 评论区同步</label>
+          </div>
+        </div>
+
+        <div class="col-12" style="display:flex; gap:12px;">
+          <button type="submit" class="btn-liquid-primary">保存该租户的任务与插件配置</button>
+          <button type="button" id="admBackToListBtn" class="btn-liquid-ghost">返回租户列表</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 页签 3：管理员账号、密码与自定义入口路径设置 -->
+    <section id="admSettingsView" class="adm-panel hidden">
+      <div class="glass-panel" style="max-width:620px;">
+        <h3 style="margin:0 0 8px; font-size:1.12rem; font-weight:800;">管理员账号与管理后台入口自定义</h3>
+        <p style="margin:0 0 16px; font-size:0.84rem; color:var(--text-muted);">
+          可自由修改管理员登录用户名（默认 <code>admin</code>）、管理员密码以及后台专属访问路径（默认 <code>/admin</code>）
+        </p>
+        <form id="admSelfConfigForm" style="display:flex; flex-direction:column; gap:12px;">
+          <div>
+            <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">管理员登录用户名 (自由更改，不再固定为 admin)</label>
+            <input type="text" id="cfgAdminUsername" class="pill-input" value="admin" required>
+          </div>
+          <div>
+            <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">管理后台专属访问路径 (如 /admin 或 /super-panel)</label>
+            <input type="text" id="cfgAdminPath" class="pill-input" value="/admin" required>
+          </div>
+          <div>
+            <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">新管理员密码 (留空则保持原密码)</label>
+            <input type="password" id="cfgAdminPassword" class="pill-input" placeholder="输入新管理员密码">
+          </div>
+          <button type="submit" class="btn-liquid-primary" style="width:fit-content;">保存管理员配置</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="liquid-toast hidden"></div>
+  <script src="/miniapp/static/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{$DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    redir /dashboard /miniapp 302
+    redir /dashboard/* /miniapp 302
+
+    reverse_proxy api:8000
+}
