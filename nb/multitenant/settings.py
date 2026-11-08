@@ -73,7 +73,20 @@ class Settings(BaseSettings):
             raise ValueError(f"Missing required API settings: {', '.join(missing)}")
 
     def validate_for_worker(self) -> None:
-        self.validate_for_bot()
+        # Worker forwards with Telethon user sessions; it never uses the
+        # control-bot token, so do not require NB_BOT_TOKEN here. (Reusing
+        # validate_for_bot() made upstream deploys fail: the worker service
+        # in docker-compose.yml mounts no bot_token secret, yet startup
+        # aborted with "Missing required bot settings: NB_BOT_TOKEN".)
+        missing = []
+        if not self.api_id:
+            missing.append("NB_API_ID")
+        if not self.api_hash:
+            missing.append("NB_API_HASH")
+        if not self.session_encryption_key:
+            missing.append("NB_SESSION_ENCRYPTION_KEY")
+        if missing:
+            raise ValueError(f"Missing required worker settings: {', '.join(missing)}")
 
     @classmethod
     def for_bot(cls) -> "Settings":
