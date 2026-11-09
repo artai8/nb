@@ -428,10 +428,17 @@ class ControlBot:
         await self._sync_menu(tenant_id, bound=True)
         await client.disconnect()
         self.attempts.pop(tenant_id, None)
+        # 绑定成功：两个控制台入口（Web 在前，Mini App 在后；两个都是内联按钮，可以同框）。
+        # 此时自定义键盘已在发码那一步用 Button.clear() 清掉，这里直接挂内联按钮即可。
+        url = f"{self.settings.public_base_url}/miniapp" if self.settings.public_base_url else ""
+        buttons = []
+        if url:
+            buttons.append([Button.url("🌐 打开 Web 控制台", url)])
+            buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
         await self.bot.send_message(
             chat_id,
-            "🎉 **账号绑定成功！**\n现在可以使用 `/app` 或 `/web` 打开 Liquid Glass 控制台配置转发任务。",
-            buttons=Button.clear(),
+            "🎉 **账号绑定成功！**\n现在可以打开 NB 控制台配置转发任务了。",
+            buttons=buttons,
         )
 
     async def _discard_attempt(
