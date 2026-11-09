@@ -860,9 +860,13 @@ class TenantWorker:
         return False
 
     async def _execute_schedule_job(self, job) -> bool:
-        """执行定时推送：把各源自上次运行以来的新消息按时间正序推完（每日条数上限封顶）。
-        首次运行没有进度时，只推最近的 N 条（上限>0 用上限，否则 20 条兜底），避免把整个频道历史搬空。
-        任务保持 ACTIVE。返回 True 表示 job 已由本方法关掉。"""
+        """执行定时推送：把各源自上次运行以来的新消息按时间正序推完。
+
+        每日条数上限（daily_limit）是全任务跨源共享的预算，0 = 不限；
+        首次运行没有进度时从最旧的消息开始搬（按上限封顶），而不是只取最
+        新的几条——否则更早的历史会被永久跳过。每组间隔 150~300 秒随机
+        （防封，和实时/历史一致）。任务保持 ACTIVE。返回 True 表示 job
+        已由本方法关掉。"""
         assert self.client is not None
         task = await self.db(self.repo.get_task, self.tenant_id, job["task_id"])
         if task is None or task.status != TaskStatus.ACTIVE:
@@ -884,7 +888,7 @@ class TenantWorker:
             )
             return True
         offsets = dict(task.offsets or {})
-        limit = int(task.schedule.daily_limit or 0)
+        remaining = int(task.schedule.daily_limit or 0)  # 0 = unlimited, shared across sources
         for source in task.resolved_sources:
             fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
             if fresh is None or fresh.status != TaskStatus.ACTIVE:
@@ -896,27 +900,29 @@ class TenantWorker:
                 )
                 return True
             saved = int(offsets.get(str(source.peer_id), 0) or 0)
-            if saved:
-                messages: list = []
-                async for message in self.client.iter_messages(
-                    source.peer_id, min_id=saved, reverse=True,
-                    limit=limit if limit > 0 else 500,
-                ):
-                    if message is None:
-                        continue
-                    mid = int(getattr(message, "id", 0) or 0)
-                    if mid <= saved:
-                        continue
-                    messages.append(message)
-            else:
-                take = limit if limit > 0 else 20
-                newest = await self.client.get_messages(source.peer_id, limit=take)
-                messages = [m for m in reversed(newest or []) if m is not None]
+            messages: list = []
+            async for message in self.client.iter_messages(
+                source.peer_id,
+                min_id=saved if saved else 0,
+                reverse=True,
+                limit=remaining if remaining > 0 else None,
+            ):
+                if message is None:
+                    continue
+                mid = int(getattr(message, "id", 0) or 0)
+                if mid <= saved:
+                    continue
+                messages.append(message)
             for group in self._group_messages(messages):
                 if not await self._forward_and_save(
-                    job, task, runtime, source.peer_id, group, offsets, delay=1
+                    job, task, runtime, source.peer_id, group, offsets,
+                    delay=_random_send_interval(),
                 ):
                     return True
+                if remaining > 0:
+                    remaining -= len(group)
+                    if remaining <= 0:
+                        return False
         return False
 
 

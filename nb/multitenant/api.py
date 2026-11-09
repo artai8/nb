@@ -710,7 +710,12 @@ def create_app(
         tenant_id: int = Depends(current_tenant),
     ) -> ForwardTask:
         try:
-            return repo.update_task(tenant_id, task_id, payload.revision, payload.task)
+            return repo.update_task(
+                tenant_id,
+                task_id,
+                payload.revision,
+                payload.task.model_dump(mode="json", exclude_unset=True),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Task not found") from exc
         except RevisionConflict as exc:
@@ -936,7 +941,12 @@ def create_app(
         _: int = Depends(require_admin),
     ) -> ForwardTask:
         try:
-            return repo.update_task(target_tenant_id, task_id, payload.revision, payload.task)
+            return repo.update_task(
+                target_tenant_id,
+                task_id,
+                payload.revision,
+                payload.task.model_dump(mode="json", exclude_unset=True),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Task not found") from exc
         except RevisionConflict as exc:

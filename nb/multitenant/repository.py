@@ -442,21 +442,38 @@ class MongoRepository:
         tenant_id: int,
         task_id: str,
         expected_revision: int,
-        value: ForwardTaskInput,
+        value: dict,
     ) -> ForwardTask:
+        """Apply a partial task update (only keys the client actually sent).
+
+        ``value`` must already be filtered to explicitly-set fields
+        (``model_dump(exclude_unset=True)`` at the API layer). Nested setting
+        objects are flattened to dotted paths so an omitted sub-object is left
+        alone instead of being reset to defaults. ``offsets`` is never touched
+        here -- progress is owned by ``update_task_offsets`` only.
+        """
         current = self.tasks.find_one(
             {"_id": task_id, "tenant_id": tenant_id, "revision": expected_revision},
-            {"status": 1},
+            {"status": 1, "mode": 1},
         )
         if current is None:
             if self.tasks.count_documents({"_id": task_id, "tenant_id": tenant_id}) == 0:
                 raise KeyError(task_id)
             raise RevisionConflict(task_id)
-        resume = current.get("status") == TaskStatus.ACTIVE.value and value.mode in {
-            TaskMode.LIVE,
-            TaskMode.SCHEDULE,
+        value = dict(value or {})
+        value.pop("offsets", None)
+        update: dict = {}
+        for key, val in value.items():
+            if isinstance(val, dict):
+                for sub, subval in val.items():
+                    update[f"{key}.{sub}"] = subval
+            else:
+                update[key] = val
+        mode = value.get("mode", current.get("mode"))
+        resume = current.get("status") == TaskStatus.ACTIVE.value and mode in {
+            TaskMode.LIVE.value,
+            TaskMode.SCHEDULE.value,
         }
-        update = value.model_dump(mode="json")
         update.update(
             {
                 "status": TaskStatus.VALIDATING.value if resume else TaskStatus.DRAFT.value,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from typing import Any, List, Optional
 
 from nb.plugin_models import InlineButtonMode, PluginConfig, STYLE_CODES, Style
 from nb.utils import cleanup
+
+log = logging.getLogger(__name__)
 
 
 class NbMessage:
@@ -134,9 +137,15 @@ class PluginPipeline:
         for plugin in self.plugins:
             if plugin.id_ in skip:
                 continue
-            res = plugin.modify(tm)
-            if inspect.isawaitable(res):
-                res = await res
+            try:
+                res = plugin.modify(tm)
+                if inspect.isawaitable(res):
+                    res = await res
+            except Exception:
+                # One bad plugin (bad regex, broken media, ...) must not kill
+                # the whole task: log it, skip that plugin, keep sending.
+                log.exception("Plugin %s failed on message, skipping plugin", plugin.id_)
+                continue
             if res is None:
                 tm.clear()
                 return None
