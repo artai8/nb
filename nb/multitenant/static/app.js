@@ -403,6 +403,11 @@ function applyBoundState(me) {
     authTabBtn?.classList.remove('hidden');
     lockBtn?.classList.remove('hidden');
     banner?.classList.add('hidden');
+    // 未绑定时首次打开默认显示账号绑定页
+    if (!window.__authTabAutoShown) {
+      window.__authTabAutoShown = true;
+      switchTab('authView');
+    }
   }
 }
 
@@ -427,6 +432,8 @@ async function syncBackendState() {
     }
   } catch (_) {
     accountLabel.textContent = '已就绪';
+    // 未登录（无有效会话）时打开控制台就直接弹出账号密码登录框
+    document.querySelector('#adminLockModal')?.classList.remove('hidden');
   }
 }
 

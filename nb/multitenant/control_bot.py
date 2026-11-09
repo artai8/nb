@@ -109,11 +109,12 @@ class ControlBot:
         bound = bool(account) and str(account.get("status", "active")) in ("active", "reauth_required")
         await self._sync_menu(int(sender.id), bound, peer=await event.get_input_sender())
         if bound:
-            # 已绑定：不再展示登录步骤，只留 Web 后台入口；
-            # Mini App 控制台按钮已按要求去掉（打开 Mini App 本身并不会创建网页账号，
-            # 网页账号是在绑定 Telegram 账号时才自动配的）。
+            # 已绑定：不再展示登录步骤，给两个控制台入口。
+            # 打开 Mini App 就直接进控制台：Telegram 内自动登录，浏览器里用用户名+密码登录；
+            # 未绑定默认显示账号绑定页，已绑定直接进任务页。
             buttons = []
             if url:
+                buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
                 buttons.append([Button.url("🌐 打开 Web 后台", url)])
             await event.respond(
                 "✅ **您的账号已经绑定，可以直接使用控制台配置转发任务。**\n\n"
