@@ -640,7 +640,250 @@ class TenantWorker:
             )
 
     async def _run_next_job(self) -> None:
-        return None
+        """认领并执行一个排队的 past/schedule 任务（每次同步循环最多一个）。"""
+        if self.client is None:
+            return
+        job = await self.db(
+            self.repo.claim_job, self.tenant_id, self.settings.worker_id, self.epoch
+        )
+        if not job:
+            return
+        kind = str(job.get("kind") or "")
+        closed = False
+        try:
+            if kind == "past":
+                closed = await self._execute_past_job(job)
+            elif kind == "schedule":
+                closed = await self._execute_schedule_job(job)
+            else:
+                await self.db(
+                    self.repo.finish_job,
+                    job["_id"],
+                    worker_id=self.settings.worker_id,
+                    lease_epoch=self.epoch,
+                    error=f"unknown job kind: {kind}",
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.exception(
+                "Job failed tenant=%s job=%s kind=%s", self.tenant_id, job.get("_id"), kind
+            )
+            await self.db(
+                self.repo.finish_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        if not closed:
+            await self.db(
+                self.repo.finish_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+            )
+
+    @staticmethod
+    def _group_messages(messages: list) -> list[list]:
+        """把按时间正序的消息按 grouped_id 分组（相册一组，没分组的一条一组）。"""
+        groups: list[list] = []
+        current: list = []
+        current_key = None
+        for message in messages:
+            key = getattr(message, "grouped_id", None)
+            if key is not None and current and current_key == key:
+                current.append(message)
+            else:
+                if current:
+                    groups.append(current)
+                current = [message]
+                current_key = key
+        if current:
+            groups.append(current)
+        return groups
+
+    async def _forward_with_flood_retry(
+        self, runtime, source_id: int, messages: list, *, live: bool = False
+    ) -> int:
+        """发一组消息；撞上 FloodWait 就等一会儿重试（最多 2 次，单次等待超过 300 秒直接放弃）。"""
+        for attempt in range(3):
+            try:
+                return await self._forward_messages(runtime, source_id, messages, live=live)
+            except FloodWaitError as exc:
+                wait = int(exc.seconds or 0)
+                if attempt >= 2 or wait > 300:
+                    raise
+                logging.warning(
+                    "FloodWait tenant=%s seconds=%s retry=%s", self.tenant_id, wait, attempt + 1
+                )
+                await asyncio.sleep(min(wait, 300))
+        return 0
+
+    async def _forward_and_save(
+        self, job, task, runtime, source_id: int, group: list, offsets: dict, *, delay: float
+    ) -> bool:
+        """发一组消息并把进度写回任务；返回 False 表示任务中途被改/被停/租约丢了，调用方应中止。"""
+        await self._forward_with_flood_retry(runtime, source_id, group, live=False)
+        max_id = max(int(getattr(m, "id", 0) or 0) for m in group)
+        offsets[str(source_id)] = max_id
+        ok = await self.db(
+            self.repo.update_task_offsets,
+            self.tenant_id,
+            task.id,
+            dict(offsets),
+            expected_revision=task.revision,
+            lease_epoch=self.epoch,
+        )
+        if not ok:
+            await self.db(
+                self.repo.cancel_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+            )
+            return False
+        if delay:
+            await asyncio.sleep(delay)
+        return True
+
+    async def _execute_past_job(self, job) -> bool:
+        """执行历史搬运：按 [offset, end] 的消息 ID 区间从旧到新逐组转发，跑完任务变 COMPLETED。
+        进度每组写回一次，中途断掉（机器 8 小时上限）下次重跑从断点继续。
+        返回 True 表示 job 已由本方法关掉（cancel/finish），调用方不用再 finish。"""
+        assert self.client is not None
+        task = await self.db(self.repo.get_task, self.tenant_id, job["task_id"])
+        if task is None or task.status != TaskStatus.RUNNING:
+            await self.db(
+                self.repo.cancel_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+            )
+            return True
+        runtime = self.tasks.get(task.id)
+        if runtime is None:
+            await self.db(
+                self.repo.finish_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+                error="task runtime unavailable",
+            )
+            return True
+        offsets = dict(task.offsets or {})
+        delay = max(0, int(task.past.delay or 0))
+        user_offset = int(task.past.offset or 0)
+        end = task.past.end
+        for source in task.resolved_sources:
+            fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
+            if fresh is None or fresh.status != TaskStatus.RUNNING:
+                await self.db(
+                    self.repo.cancel_job,
+                    job["_id"],
+                    worker_id=self.settings.worker_id,
+                    lease_epoch=self.epoch,
+                )
+                return True
+            saved = int(offsets.get(str(source.peer_id), 0) or 0)
+            start = max(user_offset, saved + 1) if saved else user_offset
+            fetch_min = start - 1 if start > 0 else 0
+            fetch_max = (int(end) + 1) if end is not None else 0
+            group: list = []
+            group_key = None
+            async for message in self.client.iter_messages(
+                source.peer_id, min_id=fetch_min, max_id=fetch_max, reverse=True
+            ):
+                if message is None:
+                    continue
+                mid = int(getattr(message, "id", 0) or 0)
+                if mid < start or (end is not None and mid > int(end)):
+                    continue
+                key = getattr(message, "grouped_id", None)
+                if key is not None and group and group_key == key:
+                    group.append(message)
+                else:
+                    if group and not await self._forward_and_save(
+                        job, task, runtime, source.peer_id, group, offsets, delay=delay
+                    ):
+                        return True
+                    group = [message]
+                    group_key = key
+            if group and not await self._forward_and_save(
+                job, task, runtime, source.peer_id, group, offsets, delay=delay
+            ):
+                return True
+        await self.db(
+            self.repo.set_task_status,
+            self.tenant_id,
+            task.id,
+            TaskStatus.COMPLETED,
+            expected_revision=task.revision,
+            lease_epoch=self.epoch,
+        )
+        return False
+
+    async def _execute_schedule_job(self, job) -> bool:
+        """执行定时推送：把各源自上次运行以来的新消息按时间正序推完（每日条数上限封顶）。
+        首次运行没有进度时，只推最近的 N 条（上限>0 用上限，否则 20 条兜底），避免把整个频道历史搬空。
+        任务保持 ACTIVE。返回 True 表示 job 已由本方法关掉。"""
+        assert self.client is not None
+        task = await self.db(self.repo.get_task, self.tenant_id, job["task_id"])
+        if task is None or task.status != TaskStatus.ACTIVE:
+            await self.db(
+                self.repo.cancel_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+            )
+            return True
+        runtime = self.tasks.get(task.id)
+        if runtime is None:
+            await self.db(
+                self.repo.finish_job,
+                job["_id"],
+                worker_id=self.settings.worker_id,
+                lease_epoch=self.epoch,
+                error="task runtime unavailable",
+            )
+            return True
+        offsets = dict(task.offsets or {})
+        limit = int(task.schedule.daily_limit or 0)
+        for source in task.resolved_sources:
+            fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
+            if fresh is None or fresh.status != TaskStatus.ACTIVE:
+                await self.db(
+                    self.repo.cancel_job,
+                    job["_id"],
+                    worker_id=self.settings.worker_id,
+                    lease_epoch=self.epoch,
+                )
+                return True
+            saved = int(offsets.get(str(source.peer_id), 0) or 0)
+            if saved:
+                messages: list = []
+                async for message in self.client.iter_messages(
+                    source.peer_id, min_id=saved, reverse=True,
+                    limit=limit if limit > 0 else 500,
+                ):
+                    if message is None:
+                        continue
+                    mid = int(getattr(message, "id", 0) or 0)
+                    if mid <= saved:
+                        continue
+                    messages.append(message)
+            else:
+                take = limit if limit > 0 else 20
+                newest = await self.client.get_messages(source.peer_id, limit=take)
+                messages = [m for m in reversed(newest or []) if m is not None]
+            for group in self._group_messages(messages):
+                if not await self._forward_and_save(
+                    job, task, runtime, source.peer_id, group, offsets, delay=1
+                ):
+                    return True
+        return False
 
 
 TenantRuntime = TenantWorker
