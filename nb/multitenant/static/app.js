@@ -655,27 +655,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // 注意：tg://login 一键唤起在实测中没有任何作用（iPhone 只弹说明框、无确认操作），
+  // 所以这里只显示二维码，并提示 30 秒过期。
   document.querySelector('#generateDeepLinkBtn')?.addEventListener('click', async () => {
-    const linkNode = document.querySelector('#tgDeepLinkAnchor');
     const qrBox = document.querySelector('#qrPreviewBox');
     const qrImg = document.querySelector('#qrPreviewImg');
     try {
       const data = await apiFetch('/api/account/qr/start', { method: 'POST' });
-      if (data?.url && linkNode) {
-        linkNode.href = data.url;
-        linkNode.classList.remove('hidden');
-      }
       if (data?.qr_image && qrImg && qrBox) {
         qrImg.src = data.qr_image;
         qrBox.classList.remove('hidden');
       }
-      showToast('已生成授权链接');
+      showToast('二维码已生成，30 秒内有效');
     } catch (_) {
-      if (linkNode) {
-        linkNode.href = 'tg://login?token=demo_token';
-        linkNode.classList.remove('hidden');
-      }
-      showToast('已生成客户端唤起链接');
+      showToast('二维码生成失败，请重试');
     }
   });
 

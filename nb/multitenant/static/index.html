@@ -468,17 +468,17 @@
           </div>
         </div>
 
-        <!-- 4. 本机客户端一键跳转授权 / 动态二维码 -->
+        <!-- 4. 扫码授权 -->
         <div class="col-6 glass-panel">
-          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">4. 客户端一键唤起授权 / 扫码</h3>
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">4. 扫码授权</h3>
           <div style="display:flex; flex-direction:column; gap:10px;">
             <div style="display:flex; gap:10px; flex-wrap:wrap;">
-              <button id="generateDeepLinkBtn" type="button" class="btn-liquid-primary">生成授权链接与二维码</button>
-              <a id="tgDeepLinkAnchor" href="#authView" class="btn-liquid-secondary hidden">一键打开 Telegram 确认授权</a>
+              <button id="generateDeepLinkBtn" type="button" class="btn-liquid-primary">生成二维码</button>
             </div>
+            <div style="font-size:0.82rem; color:#8a5a00;">二维码生成后 30 秒过期，请尽快扫码。</div>
             <div id="qrPreviewBox" class="hidden" style="display:flex; align-items:center; gap:12px; margin-top:4px;">
               <img id="qrPreviewImg" src="" alt="QR" style="width:116px; height:116px; border-radius:14px; border:2px solid #fff;">
-              <span id="qrStatusText" style="font-size:0.84rem; font-weight:700;">等待在 Telegram 客户端点击确认...</span>
+              <span id="qrStatusText" style="font-size:0.84rem; font-weight:700;">请在 30 秒内扫码确认，过期后请重新生成。</span>
             </div>
           </div>
         </div>
