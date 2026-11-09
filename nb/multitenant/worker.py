@@ -25,9 +25,26 @@ os.environ.setdefault("NB_MULTITENANT", "1")
 SEND_INTERVAL_MIN_SECONDS = 150.0
 SEND_INTERVAL_MAX_SECONDS = 300.0
 
+# Merge-mode buffer cap (same as the original): when full, the oldest
+# buffered post is flushed out instead of being dropped.
+_MAX_MERGE_BUFFERS = 100
+
 
 def _random_send_interval() -> float:
     return random.uniform(SEND_INTERVAL_MIN_SECONDS, SEND_INTERVAL_MAX_SECONDS)
+
+
+def _dedupe_messages(messages: list) -> list:
+    """Dedupe by (chat_id, id), keeping first-seen order."""
+    seen = set()
+    out = []
+    for message in messages:
+        key = (getattr(message, "chat_id", None), getattr(message, "id", None))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(message)
+    return out
 
 from telethon import TelegramClient, events, utils as telethon_utils
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, UserAlreadyParticipantError
@@ -45,7 +62,7 @@ from telethon.tl.types import (
 
 from nb.plugins import PluginPipeline
 
-from .bot_media import BotMediaResolver
+from .bot_media import BotMediaResolver, _msg_has_media
 from .models import AccountStatus, ForwardTask, ResolvedEndpoint, TaskMode, TaskStatus
 from .repository import MongoRepository
 from .security import SessionCipher, get_telegram_proxy
@@ -85,6 +102,25 @@ class TaskRuntime:
             shutil.rmtree(resolved, ignore_errors=True)
 
 
+@dataclass
+class MergeBuffer:
+    """One buffered channel post waiting for comment media to join it.
+
+    Port of the original's MergeContext: the main post waits
+    ``merge_wait_seconds`` (restarted by each merged comment); on flush the
+    main messages + collected comment media go out as one album. Buffers are
+    in-memory like the original -- a worker restart drops them.
+    """
+
+    task_id: str
+    source_peer_id: int
+    post_id: int
+    runtime: TaskRuntime
+    main_messages: list = field(default_factory=list)
+    comment_media: list = field(default_factory=list)
+    flush_task: Optional[asyncio.Task] = None
+
+
 class TenantWorker:
     def __init__(self, settings: Settings, repo: MongoRepository, tenant_id: int, epoch: int):
         self.tenant_id = int(tenant_id)
@@ -99,6 +135,7 @@ class TenantWorker:
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1000)
         self.operation_lock = asyncio.Lock()
         self._bot_media = BotMediaResolver()
+        self._merge_buffers: dict[tuple, MergeBuffer] = {}
         self._stopped = asyncio.Event()
         self._consumer_task: Optional[asyncio.Task] = None
 
@@ -341,6 +378,7 @@ class TenantWorker:
         for task_id in list(self.tasks):
             if task_id not in keep:
                 self.tasks.pop(task_id).close()
+                self._drop_merge_buffers(task_id)
 
         for task in values:
             if task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
@@ -558,16 +596,25 @@ class TenantWorker:
             lease_epoch=self.epoch,
         )
 
-    async def _forward_messages(self, runtime: TaskRuntime, source_id: int, messages: list, *, live: bool) -> int:
+    async def _forward_messages(self, runtime: TaskRuntime, source_id: int, messages: list, *, live: bool, from_merge: bool = False) -> int:
         assert self.client is not None
         task = runtime.task
         values = [message for message in messages if not isinstance(message, MessageService)]
         if not values:
             return 0
+        # Merge mode (live channel posts only): hold the post in a buffer so
+        # comment media can join it, instead of sending immediately. The
+        # flush re-enters here with from_merge=True and skips this gate.
+        if live and not from_merge and task.comments.merge_comment_media:
+            if getattr(values[0], "post", False):
+                if self._buffer_merge(runtime, source_id, values):
+                    return 0
         # Bot media: a source post may carry a resource bot's t.me start link;
         # talk to the bot and merge the album it returns into this group
         # before plugins run (same combined-group semantics as the original).
-        if task.bot_media.enabled:
+        # The merge flush skips this: the original's merge path never did
+        # bot-media resolution either.
+        if task.bot_media.enabled and not from_merge:
             try:
                 bot_messages = await self._bot_media.resolve_for_group(
                     self.client, values, task.bot_media
@@ -641,6 +688,110 @@ class TenantWorker:
         if live and sent_count > 0:
             runtime.next_send_at = time.monotonic() + _random_send_interval()
         return sent_count
+
+    # -- comment-media merge mode (original's MergeContext) -------------
+
+    def _buffer_merge(self, runtime: TaskRuntime, source_id: int, values: list) -> bool:
+        """Hold a live channel post for comment media. Returns True when buffered."""
+        task = runtime.task
+        key = (task.id, source_id, int(values[0].id))
+        buf = self._merge_buffers.get(key)
+        if buf is None:
+            if len(self._merge_buffers) >= _MAX_MERGE_BUFFERS:
+                oldest_key = next(iter(self._merge_buffers))
+                asyncio.create_task(self._flush_merge_buffer(oldest_key))
+            buf = MergeBuffer(
+                task_id=task.id,
+                source_peer_id=source_id,
+                post_id=int(values[0].id),
+                runtime=runtime,
+                main_messages=list(values),
+            )
+            self._merge_buffers[key] = buf
+        else:
+            known = {m.id for m in buf.main_messages}
+            buf.main_messages.extend(m for m in values if m.id not in known)
+        self._restart_merge_timer(key, task.comments.merge_wait_seconds)
+        logging.info(
+            "merge buffer: task=%s post=%s main=%d waiting %ss",
+            task.id, buf.post_id, len(buf.main_messages),
+            task.comments.merge_wait_seconds,
+        )
+        return True
+
+    def _restart_merge_timer(self, key: tuple, wait_seconds: int) -> None:
+        """Start (or restart) the flush timer for a buffered post."""
+        buf = self._merge_buffers.get(key)
+        if buf is None:
+            return
+        if buf.flush_task is not None:
+            buf.flush_task.cancel()
+        buf.flush_task = asyncio.create_task(self._merge_flush_later(key, wait_seconds))
+
+    async def _merge_flush_later(self, key: tuple, wait_seconds: int) -> None:
+        try:
+            await asyncio.sleep(wait_seconds)
+        except asyncio.CancelledError:
+            return
+        await self._flush_merge_buffer(key)
+
+    async def _flush_merge_buffer(self, key: tuple) -> None:
+        """Send a buffered post + its collected comment media as one album."""
+        buf = self._merge_buffers.pop(key, None)
+        if buf is None:
+            return
+        runtime = self.tasks.get(buf.task_id)
+        if runtime is None or runtime.task.status not in {
+            TaskStatus.ACTIVE, TaskStatus.RUNNING,
+        }:
+            logging.info(
+                "merge buffer dropped: task=%s post=%s no longer active",
+                buf.task_id, buf.post_id,
+            )
+            return
+        combined = _dedupe_messages(buf.main_messages + buf.comment_media)
+        if not combined:
+            return
+        logging.info(
+            "merge flush: task=%s post=%s main=%d comment_media=%d",
+            buf.task_id, buf.post_id,
+            len(buf.main_messages), len(buf.comment_media),
+        )
+        try:
+            async with self.operation_lock:
+                await self._forward_messages(
+                    runtime, buf.source_peer_id, combined,
+                    live=True, from_merge=True,
+                )
+        except FloodWaitError as exc:
+            logging.warning(
+                "merge flush hit FloodWait task=%s seconds=%s, retrying once",
+                buf.task_id, exc.seconds,
+            )
+            await asyncio.sleep(exc.seconds)
+            try:
+                async with self.operation_lock:
+                    await self._forward_messages(
+                        runtime, buf.source_peer_id, combined,
+                        live=True, from_merge=True,
+                    )
+            except Exception:
+                logging.exception(
+                    "merge flush retry failed task=%s post=%s",
+                    buf.task_id, buf.post_id,
+                )
+        except Exception:
+            logging.exception(
+                "merge flush failed task=%s post=%s",
+                buf.task_id, buf.post_id,
+            )
+
+    def _drop_merge_buffers(self, task_id: str) -> None:
+        """Cancel and drop every buffered post of a task (task removed/paused)."""
+        for key in [k for k in self._merge_buffers if k[0] == task_id]:
+            buf = self._merge_buffers.pop(key)
+            if buf.flush_task is not None:
+                buf.flush_task.cancel()
 
     async def _resolve_reply_to(
         self, runtime: TaskRuntime, source_id: int, messages: list, dest_peer_id: int
@@ -863,6 +1014,23 @@ class TenantWorker:
                     int(channel_post_id),
                 )
         if channel_post_id is None:
+            return
+        # Merge mode: media comments join the buffered album for this post;
+        # anything that cannot join is discarded, exactly like the original
+        # (the post is not forwarded yet while buffered, so there is no
+        # destination post to reply to here).
+        if cfg.merge_comment_media:
+            key = (task.id, source_peer_id, int(channel_post_id))
+            buf = self._merge_buffers.get(key)
+            if buf is not None:
+                media = [m for m in group if _msg_has_media(m)]
+                if media:
+                    buf.comment_media.extend(media)
+                    self._restart_merge_timer(key, cfg.merge_wait_seconds)
+                    logging.info(
+                        "merge buffer: task=%s post=%s comment media +%d (total %d)",
+                        task.id, channel_post_id, len(media), len(buf.comment_media),
+                    )
             return
         for destination in task.resolved_destinations:
             dest_post_id = await self.db(
