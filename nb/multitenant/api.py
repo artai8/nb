@@ -53,6 +53,7 @@ from .settings import Settings
 COOKIE_NAME = "nb_session"
 STATIC_DIR = Path(__file__).with_name("static")
 MAX_WATERMARK_BYTES = 5 * 1024 * 1024
+MAX_AD_BYTES = 500 * 1024 * 1024
 MAX_WATERMARK_DIMENSION = 4096
 MAX_WATERMARK_PIXELS = 16_000_000
 
@@ -769,6 +770,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="Task not found")
         return task
 
+def _looks_like_video(data: bytes) -> bool:
+    """mp4/mov (ftyp box), mkv/webm (EBML header)."""
+    if len(data) < 12:
+        return False
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return True
+    return data[4:8] == b"ftyp"
+
+
     @app.post("/api/tasks/{task_id}/watermark")
     async def upload_watermark(
         task_id: str,
@@ -817,6 +827,42 @@ def create_app(
                 {"_id": task_id, "tenant_id": tenant_id},
                 {"$set": {"watermark_asset_id": None}, "$inc": {"revision": 1}},
             )
+        return Response(status_code=204)
+
+    @app.post("/api/tasks/{task_id}/ad/{slot}")
+    async def upload_ad_asset(
+        task_id: str,
+        slot: str,
+        file: UploadFile = File(),
+        tenant_id: int = Depends(current_tenant),
+    ) -> dict[str, str]:
+        if slot not in ("intro", "midroll", "outro"):
+            raise HTTPException(status_code=422, detail="Unknown ad slot")
+        if repo.get_task(tenant_id, task_id) is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        data = await file.read(MAX_AD_BYTES + 1)
+        if len(data) > MAX_AD_BYTES or not _looks_like_video(data):
+            raise HTTPException(
+                status_code=422, detail="Ad must be a video (mp4/mov/mkv/webm) up to 500 MB"
+            )
+        try:
+            asset_id = repo.put_ad_asset(tenant_id, task_id, slot, data)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Task not found") from exc
+        return {"asset_id": asset_id}
+
+    @app.delete("/api/tasks/{task_id}/ad/{slot}", status_code=204)
+    def delete_ad_asset(
+        task_id: str,
+        slot: str,
+        tenant_id: int = Depends(current_tenant),
+    ) -> Response:
+        if slot not in ("intro", "midroll", "outro"):
+            raise HTTPException(status_code=422, detail="Unknown ad slot")
+        task = repo.get_task(tenant_id, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        repo.delete_ad_asset(tenant_id, task_id, slot)
         return Response(status_code=204)
 
     # ==================== 管理员跨租户全量配置与任务管理 API ====================

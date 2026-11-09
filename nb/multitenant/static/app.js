@@ -69,8 +69,7 @@ let tasks = [
     destinations: ['-100199384756'],
     show_forwarded_from: false,
     live: { sequential_updates: false, delete_sync: true, delete_on_edit: '.deleteMe' },
-    past: { delay: 2, offset: 0, end: null },
-    schedule: { run_time: '08:00', daily_limit: 0 },
+    past: { delay: 0, offset: 0, end: null },
     comments: { enabled: true, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: true },
     bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: ['下一页'], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
     plugins: defaultPluginConfig()
@@ -107,7 +106,8 @@ function showToast(msg) {
 }
 
 async function apiFetch(path, options = {}) {
-  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  const headers = Object.assign({}, options.headers || {});
+  if (!(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(path, Object.assign({}, options, { headers, credentials: 'include' }));
   if (!res.ok) {
@@ -165,8 +165,7 @@ function populateTaskForm(task) {
     destinations: [],
     show_forwarded_from: false,
     live: { sequential_updates: false, delete_sync: false, delete_on_edit: '.deleteMe' },
-    past: { delay: 2, offset: 0, end: null },
-    schedule: { run_time: '08:00', daily_limit: 0 },
+    past: { delay: 0, offset: 0, end: null },
     comments: { enabled: false, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: false },
     bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: [], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
     plugins: defaultPluginConfig()
@@ -175,21 +174,13 @@ function populateTaskForm(task) {
   document.querySelector('#taskId').value = t.id || '';
   document.querySelector('#taskRevision').value = String(t.revision || 1);
   document.querySelector('#taskName').value = t.name || '';
-  document.querySelector('#taskMode').value = t.mode || 'live';
+  document.querySelector('#taskMode').value = t.mode === 'schedule' ? 'live' : (t.mode || 'live');
   document.querySelector('#sourceChat').value = (t.sources || []).join('\n');
   document.querySelector('#targetChat').value = (t.destinations || []).join('\n');
 
-  document.querySelector('#showForwardedFrom').checked = Boolean(t.show_forwarded_from);
-  document.querySelector('#liveSequential').checked = Boolean(t.live?.sequential_updates);
-  document.querySelector('#liveDeleteSync').checked = Boolean(t.live?.delete_sync);
-  document.querySelector('#liveDeleteOnEdit').value = t.live?.delete_on_edit || '.deleteMe';
 
-  document.querySelector('#pastDelay').value = String(t.past?.delay ?? 2);
   document.querySelector('#pastOffset').value = String(t.past?.offset ?? 0);
   document.querySelector('#pastEnd').value = t.past?.end != null ? String(t.past.end) : '';
-
-  document.querySelector('#scheduleRunTime').value = t.schedule?.run_time || '08:00';
-  document.querySelector('#scheduleDailyLimit').value = String(t.schedule?.daily_limit ?? 0);
 
   document.querySelector('#commentsEnabled').checked = Boolean(t.comments?.enabled);
   document.querySelector('#commentsSourceMode').value = t.comments?.source_mode || 'comments';
@@ -235,8 +226,16 @@ function populateTaskForm(task) {
 
   document.querySelector('#plg_mark_check').checked = Boolean(p.mark?.check);
   document.querySelector('#plg_mark_position').value = p.mark?.position || 'bottom_right';
-  document.querySelector('#plg_mark_fps').value = String(p.mark?.frame_rate ?? 15);
   document.querySelector('#plg_mark_image').value = p.mark?.image || 'image.png';
+  document.querySelector('#plg_mark_recode').checked = p.mark?.recode !== false;
+  document.querySelector('#plg_mark_video_mark').checked = Boolean(p.mark?.video_mark);
+  document.querySelector('#plg_ad_intro').checked = Boolean(p.mark?.ad_intro);
+  document.querySelector('#plg_ad_midroll').checked = Boolean(p.mark?.ad_midroll);
+  document.querySelector('#plg_ad_outro').checked = Boolean(p.mark?.ad_outro);
+  document.querySelector('#plg_ad_midroll_at').value = String(p.mark?.ad_midroll_at ?? 0);
+  document.querySelector('#plg_ad_intro_status').textContent = t.ad_intro_asset_id ? '已上传' : '未上传';
+  document.querySelector('#plg_ad_midroll_status').textContent = t.ad_midroll_asset_id ? '已上传' : '未上传';
+  document.querySelector('#plg_ad_outro_status').textContent = t.ad_outro_asset_id ? '已上传' : '未上传';
 
   document.querySelector('#plg_fmt_check').checked = Boolean(p.fmt?.check);
   document.querySelector('#plg_fmt_style').value = p.fmt?.style || 'preserve';
@@ -245,8 +244,6 @@ function populateTaskForm(task) {
   document.querySelector('#plg_ocr_lang').value = p.ocr?.lang || 'chi_sim+eng';
 
   document.querySelector('#plg_spoiler_check').checked = Boolean(p.spoiler?.check);
-
-  document.querySelector('#plg_recode_check').checked = Boolean(p.recode?.check);
 }
 
 function collectPluginsFromForm() {
@@ -291,8 +288,13 @@ function collectPluginsFromForm() {
     mark: {
       check: document.querySelector('#plg_mark_check').checked,
       position: document.querySelector('#plg_mark_position').value,
-      frame_rate: Number(document.querySelector('#plg_mark_fps').value || 15),
-      image: document.querySelector('#plg_mark_image').value.trim() || 'image.png'
+      image: document.querySelector('#plg_mark_image').value.trim() || 'image.png',
+      recode: document.querySelector('#plg_mark_recode').checked,
+      video_mark: document.querySelector('#plg_mark_video_mark').checked,
+      ad_intro: document.querySelector('#plg_ad_intro').checked,
+      ad_midroll: document.querySelector('#plg_ad_midroll').checked,
+      ad_outro: document.querySelector('#plg_ad_outro').checked,
+      ad_midroll_at: Number(document.querySelector('#plg_ad_midroll_at').value || 0)
     },
     fmt: {
       check: document.querySelector('#plg_fmt_check').checked,
@@ -305,9 +307,6 @@ function collectPluginsFromForm() {
     spoiler: {
       check: document.querySelector('#plg_spoiler_check').checked
     },
-    recode: {
-      check: document.querySelector('#plg_recode_check').checked
-    }
   };
 }
 
@@ -319,8 +318,7 @@ const PLUGIN_LABELS = {
   mark: '水印',
   fmt: '排版',
   ocr: 'OCR',
-  spoiler: '防剧透',
-  recode: '重编码去重'
+  spoiler: '防剧透'
 };
 
 function renderTasks() {
@@ -339,8 +337,7 @@ function renderTasks() {
   if (filtered.length === 0) {
     taskListNode.innerHTML = `
       <div class="col-12 glass-panel" style="text-align:center; padding:32px;">
-        <p style="margin:0 0 12px; font-weight:700; color:var(--text-muted);">暂无转发任务</p>
-        <button type="button" class="btn-liquid-primary" data-action="open-new">＋ 新建任务</button>
+        <p style="margin:0; font-weight:700; color:var(--text-muted);">暂无转发任务，点上方“＋ 新建任务”创建一个</p>
       </div>
     `;
     return;
@@ -490,13 +487,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
-    if (action === 'open-new') {
-      populateTaskForm(null);
-      if (editorTitleNode) editorTitleNode.textContent = '新建任务';
-      switchEditorSubtab('edBasic');
-      editorNode.classList.remove('hidden');
-      return;
-    }
     const target = tasks.find(item => item.id === id);
     if (!target) return;
 
@@ -526,26 +516,21 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     const id = document.querySelector('#taskId').value;
     const endRaw = document.querySelector('#pastEnd').value.trim();
+    const editingTask = id ? tasks.find(t => t.id === id) : null;
+    const savedMode = (editingTask && editingTask.mode === 'schedule') ? 'schedule' : document.querySelector('#taskMode').value;
     const payload = {
       name: document.querySelector('#taskName').value.trim(),
-      mode: document.querySelector('#taskMode').value,
+      mode: savedMode,
       sources: lines(document.querySelector('#sourceChat').value),
       destinations: lines(document.querySelector('#targetChat').value),
-      show_forwarded_from: document.querySelector('#showForwardedFrom').checked,
-      live: {
-        sequential_updates: document.querySelector('#liveSequential').checked,
-        delete_sync: document.querySelector('#liveDeleteSync').checked,
-        delete_on_edit: document.querySelector('#liveDeleteOnEdit').value.trim() || '.deleteMe'
-      },
+      show_forwarded_from: (editingTask && editingTask.show_forwarded_from) || false,
+      live: (editingTask && editingTask.live) || { sequential_updates: false, delete_sync: false, delete_on_edit: '.deleteMe' },
       past: {
-        delay: Number(document.querySelector('#pastDelay').value || 0),
+        delay: 0,
         offset: Number(document.querySelector('#pastOffset').value || 0),
         end: endRaw ? Number(endRaw) : null
       },
-      schedule: {
-        run_time: document.querySelector('#scheduleRunTime').value.trim() || '08:00',
-        daily_limit: Number(document.querySelector('#scheduleDailyLimit').value || 0)
-      },
+      schedule: (editingTask && editingTask.schedule) || { run_time: '08:00', daily_limit: 0 },
       comments: {
         enabled: document.querySelector('#commentsEnabled').checked,
         source_mode: document.querySelector('#commentsSourceMode').value,
@@ -590,8 +575,41 @@ document.addEventListener('DOMContentLoaded', () => {
       tasks.unshift(created);
       showToast('已创建任务');
     }
+    const savedId = id || created.id;
+    if (savedId && !String(savedId).startsWith('task-')) {
+      for (const slot of ['intro', 'midroll', 'outro']) {
+        const input = document.querySelector(`#plg_ad_${slot}_file`);
+        const file = input?.files?.[0];
+        if (!file) continue;
+        try {
+          const form = new FormData();
+          form.append('file', file);
+          await apiFetch(`/api/tasks/${savedId}/ad/${slot}`, { method: 'POST', body: form });
+          document.querySelector(`#plg_ad_${slot}_status`).textContent = '已上传';
+        } catch (_) {
+          showToast(`片${slot === 'intro' ? '头' : slot === 'midroll' ? '中' : '尾'}广告上传失败`);
+        }
+        input.value = '';
+      }
+    }
     editorNode.classList.add('hidden');
     renderTasks();
+  });
+
+  document.querySelectorAll('[data-ad-remove]')?.forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const slot = btn.dataset.adRemove;
+      const taskId = document.querySelector('#taskId').value;
+      if (!taskId) return;
+      try {
+        await apiFetch(`/api/tasks/${taskId}/ad/${slot}`, { method: 'DELETE' });
+        document.querySelector(`#plg_ad_${slot}_status`).textContent = '未上传';
+        document.querySelector(`#plg_ad_${slot}`).checked = false;
+        const t = tasks.find(x => x.id === taskId);
+        if (t) t[`ad_${slot}_asset_id`] = null;
+        showToast('已删除广告');
+      } catch (_) {}
+    });
   });
 
   document.querySelector('#sendPhoneCodeBtn')?.addEventListener('click', async () => {

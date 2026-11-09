@@ -94,8 +94,8 @@
               <select id="taskMode" class="pill-select">
                 <option value="live">实时转发 (Live)</option>
                 <option value="past">历史搬运 (Past)</option>
-                <option value="schedule">定时推送 (Schedule)</option>
               </select>
+              <div style="margin-top:6px; font-size:0.8rem; color:var(--text-muted);">发送间隔：150~300 秒随机（防封）</div>
             </div>
 
             <div class="col-12 aqua-search-card" style="padding:14px 18px;">
@@ -125,21 +125,9 @@
               <textarea id="targetChat" class="pill-textarea" rows="3" required placeholder="-1009876543210&#10;@target_channel"></textarea>
             </div>
 
-            <div class="col-4 glass-panel">
-              <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">实时模式选项</strong>
-              <label style="font-size:0.78rem; font-weight:700;">编辑触发删除词</label>
-              <input type="text" id="liveDeleteOnEdit" class="pill-input" value=".deleteMe">
-              <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px; font-size:0.82rem; font-weight:600;">
-                <label><input type="checkbox" id="showForwardedFrom"> 保留转发来源标签</label>
-                <label><input type="checkbox" id="liveSequential"> 顺序更新消息</label>
-                <label><input type="checkbox" id="liveDeleteSync"> 同步撤回删除</label>
-              </div>
-            </div>
-
-            <div class="col-4 glass-panel">
+            <div class="col-6 glass-panel">
               <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">历史模式选项</strong>
-              <label style="font-size:0.78rem; font-weight:700;">发送间隔 (秒)</label>
-              <input type="number" id="pastDelay" class="pill-input" value="2" min="0" max="100">
+              <div style="font-size:0.8rem; color:var(--text-muted);">发送间隔：150~300 秒随机（防封）</div>
               <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
                 <div>
                   <label style="font-size:0.76rem; font-weight:700;">起始消息 ID</label>
@@ -152,14 +140,6 @@
               </div>
             </div>
 
-            <div class="col-4 glass-panel">
-              <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">定时模式选项</strong>
-              <label style="font-size:0.78rem; font-weight:700;">每日执行时间 (HH:MM)</label>
-              <input type="text" id="scheduleRunTime" class="pill-input" value="08:00">
-              <label style="display:block; font-size:0.78rem; font-weight:700; margin-top:8px;">每日条数上限 (0=不限)</label>
-              <input type="number" id="scheduleDailyLimit" class="pill-input" value="0" min="0">
-            </div>
-          </div>
 
           <!-- 子面板 2：评论区与资源抓取 -->
           <div id="edSync" class="editor-subpanel bento-grid hidden">
@@ -363,10 +343,6 @@
                       <option value="top_left">左上角</option>
                     </select>
                   </div>
-                  <div>
-                    <label style="font-size:0.76rem; font-weight:700;">视频帧率 (FPS)</label>
-                    <input type="number" id="plg_mark_fps" class="pill-input" value="15" min="1" max="60">
-                  </div>
                 </div>
                 <div>
                   <label style="font-size:0.76rem; font-weight:700;">水印路径或上传 PNG 图片</label>
@@ -375,21 +351,39 @@
                     <input type="file" id="plg_mark_file" accept="image/png" style="font-size:0.76rem; max-width:170px;">
                   </div>
                 </div>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_mark_recode" checked> 视频/音频重编码（去 file_unique_id）</label>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_mark_video_mark"> 视频也加水印（用上面这张图，盖在视频上）</label>
+                <div style="font-size:0.8rem; color:var(--text-muted); line-height:1.6;">
+                  图片打水印；视频重新编码、音频重新编码、ZIP 重新打包，转发的文件拿不到原来的 file_unique_id。语音会变成普通音频文件。
+                </div>
+                <div style="border-top:1px solid var(--glass-border); padding-top:10px; display:flex; flex-direction:column; gap:8px;">
+                  <strong style="font-size:0.84rem;">视频广告（片头 / 片中 / 片尾）</strong>
+                  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:0.82rem; font-weight:700; min-width:86px;"><input type="checkbox" id="plg_ad_intro"> 片头广告</label>
+                    <input type="file" id="plg_ad_intro_file" accept="video/*" style="font-size:0.76rem; max-width:170px;">
+                    <span id="plg_ad_intro_status" style="font-size:0.76rem; color:var(--text-muted);">未上传</span>
+                    <button type="button" class="btn-liquid-ghost" style="padding:4px 10px; font-size:0.76rem;" data-ad-remove="intro">删除</button>
+                  </div>
+                  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:0.82rem; font-weight:700; min-width:86px;"><input type="checkbox" id="plg_ad_midroll"> 片中广告</label>
+                    <input type="file" id="plg_ad_midroll_file" accept="video/*" style="font-size:0.76rem; max-width:170px;">
+                    <span id="plg_ad_midroll_status" style="font-size:0.76rem; color:var(--text-muted);">未上传</span>
+                    <button type="button" class="btn-liquid-ghost" style="padding:4px 10px; font-size:0.76rem;" data-ad-remove="midroll">删除</button>
+                    <label style="font-size:0.76rem; font-weight:700;">插入位置（秒，0=中间）</label>
+                    <input type="number" id="plg_ad_midroll_at" class="pill-input" value="0" min="0" step="1" style="max-width:90px;">
+                  </div>
+                  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:0.82rem; font-weight:700; min-width:86px;"><input type="checkbox" id="plg_ad_outro"> 片尾广告</label>
+                    <input type="file" id="plg_ad_outro_file" accept="video/*" style="font-size:0.76rem; max-width:170px;">
+                    <span id="plg_ad_outro_status" style="font-size:0.76rem; color:var(--text-muted);">未上传</span>
+                    <button type="button" class="btn-liquid-ghost" style="padding:4px 10px; font-size:0.76rem;" data-ad-remove="outro">删除</button>
+                  </div>
+                  <div style="font-size:0.76rem; color:var(--text-muted); line-height:1.6;">广告视频在保存任务时一起上传（单个不超过 500MB）。转发时广告会被转码成和正片一样的尺寸、帧率和编码再拼接进去；广告本身无效或转码失败就跳过那段，正片照常发。</div>
+                </div>
               </div>
             </div>
 
-            <!-- 6. 媒体重编码（去 file_unique_id） -->
-            <div class="col-6 glass-panel">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <strong style="font-size:0.95rem;">6. 媒体重编码（去 file_unique_id）</strong>
-                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_recode_check"> 启用</label>
-              </div>
-              <div style="font-size:0.8rem; color:var(--text-muted); line-height:1.6;">
-                视频重新编码、音频重新编码、ZIP 重新打包后再发送，转发的文件拿不到原来的 file_unique_id。图片用上面的水印插件；语音会变成普通音频文件；超过 500MB 的文件跳过不处理。
-              </div>
-            </div>
-
-            <!-- 7~9. 文本样式 + OCR + 防剧透 -->
+            <!-- 6~8. 文本样式 + OCR + 防剧透 -->
             <div class="col-6 glass-panel" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
               <div>
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">

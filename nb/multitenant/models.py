@@ -123,6 +123,9 @@ class ForwardTaskInput(BaseModel):
     plugins: PluginConfig = Field(default_factory=PluginConfig)
     offsets: Dict[str, int] = Field(default_factory=dict)
     watermark_asset_id: Optional[str] = None
+    ad_intro_asset_id: Optional[str] = None
+    ad_midroll_asset_id: Optional[str] = None
+    ad_outro_asset_id: Optional[str] = None
 
     @field_validator("sources", "destinations")
     @classmethod

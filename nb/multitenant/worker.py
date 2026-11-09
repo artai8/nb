@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import shutil
 import tempfile
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,6 +19,15 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 os.environ.setdefault("NB_MULTITENANT", "1")
+
+# Anti-ban send spacing (防封): every forwarded group waits a fresh random
+# 150-300 seconds before the next one, in both live and past modes.
+SEND_INTERVAL_MIN_SECONDS = 150.0
+SEND_INTERVAL_MAX_SECONDS = 300.0
+
+
+def _random_send_interval() -> float:
+    return random.uniform(SEND_INTERVAL_MIN_SECONDS, SEND_INTERVAL_MAX_SECONDS)
 
 from telethon import TelegramClient, events, utils as telethon_utils
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, UserAlreadyParticipantError
@@ -59,6 +70,8 @@ class TaskRuntime:
     message_mapping: dict[tuple[int, int, int], int] = field(default_factory=dict)
     comment_destinations: list[int] = field(default_factory=list)
     source_discussion_id: Optional[int] = None
+    # monotonic timestamp before which this task must not send again (live).
+    next_send_at: float = 0.0
 
     def close(self) -> None:
         resolved = self.temp_dir.resolve()
@@ -382,6 +395,20 @@ class TenantWorker:
                 watermark = temp_dir / "watermark.png"
                 watermark.write_bytes(data)
                 plugin_config.mark.image = str(watermark)
+        if plugin_config.mark.check:
+            for slot in ("intro", "midroll", "outro"):
+                asset_id = getattr(task, f"ad_{slot}_asset_id", None)
+                if not asset_id:
+                    continue
+                data = await self.db(
+                    self.repo.get_ad_asset,
+                    self.tenant_id,
+                    asset_id,
+                )
+                if data:
+                    ad_file = temp_dir / f"ad_{slot}.mp4"
+                    ad_file.write_bytes(data)
+                    setattr(plugin_config.mark, f"ad_{slot}_path", str(ad_file))
         pipeline = PluginPipeline(plugin_config, download_dir=str(temp_dir))
         await pipeline.initialize()
         comment_destinations = []
@@ -538,6 +565,10 @@ class TenantWorker:
         if not templates:
             return 0
 
+        if live:
+            wait = runtime.next_send_at - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
         sent_count = 0
         for destination in task.resolved_destinations:
             delivery_key = f"{task.id}:{source_id}:{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
@@ -562,6 +593,8 @@ class TenantWorker:
                 raise
         for template in templates:
             template.clear()
+        if live and sent_count > 0:
+            runtime.next_send_at = time.monotonic() + _random_send_interval()
         return sent_count
 
     async def _send_templates(self, task: ForwardTask, destination: int, templates: list, *, reply_to=None):
@@ -774,7 +807,6 @@ class TenantWorker:
             )
             return True
         offsets = dict(task.offsets or {})
-        delay = max(0, int(task.past.delay or 0))
         user_offset = int(task.past.offset or 0)
         end = task.past.end
         for source in task.resolved_sources:
@@ -806,13 +838,15 @@ class TenantWorker:
                     group.append(message)
                 else:
                     if group and not await self._forward_and_save(
-                        job, task, runtime, source.peer_id, group, offsets, delay=delay
+                        job, task, runtime, source.peer_id, group, offsets,
+                        delay=_random_send_interval()
                     ):
                         return True
                     group = [message]
                     group_key = key
             if group and not await self._forward_and_save(
-                job, task, runtime, source.peer_id, group, offsets, delay=delay
+                job, task, runtime, source.peer_id, group, offsets,
+                delay=_random_send_interval()
             ):
                 return True
         await self.db(

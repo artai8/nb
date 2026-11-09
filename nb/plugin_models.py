@@ -82,16 +82,25 @@ class MarkConfig(BaseModel):
     image: str = "image.png"
     position: str = "bottom_right"
     frame_rate: int = 15
+    # Re-encode video/audio and repack zip so forwarded copies get a new
+    # file_unique_id. Video watermark (video_mark) rides on the same pass.
+    recode: bool = True
+    video_mark: bool = False
+    # Video ads: prepend/append/insert a video clip (uploaded per task).
+    # ad_midroll_at is seconds from the start; 0 means the middle.
+    ad_intro: bool = False
+    ad_midroll: bool = False
+    ad_outro: bool = False
+    ad_midroll_at: float = 0
+    # Runtime paths, filled by the worker from the uploaded assets.
+    ad_intro_path: str = ""
+    ad_midroll_path: str = ""
+    ad_outro_path: str = ""
 
 
 class OcrConfig(BaseModel):
     check: bool = False
     lang: str = "chi_sim"
-
-
-class RecodeConfig(BaseModel):
-    """Re-encode media so the forwarded copy gets a new file_unique_id."""
-    check: bool = False
 
 
 class Replace(BaseModel):
@@ -137,7 +146,6 @@ class PluginConfig(BaseModel):
     caption: Caption = Field(default_factory=Caption)
     spoiler: SpoilerConfig = Field(default_factory=SpoilerConfig)
     inline: InlineButtonConfig = Field(default_factory=InlineButtonConfig)
-    recode: RecodeConfig = Field(default_factory=RecodeConfig)
 
 
 ASYNC_PLUGIN_IDS = ["ocr", "mark"]

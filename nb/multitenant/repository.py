@@ -47,6 +47,7 @@ class MongoRepository:
         self.audit_events: Collection = self.db.audit_events
         self.rate_limits: Collection = self.db.auth_rate_limits
         self.fs = gridfs.GridFS(self.db, collection="watermark_assets")
+        self.ad_fs = gridfs.GridFS(self.db, collection="ad_assets")
 
     def ensure_indexes(self) -> None:
         self.accounts.create_index([("tenant_id", ASCENDING)], unique=True)
@@ -637,6 +638,10 @@ class MongoRepository:
             {"metadata.task_id": task_id, "metadata.tenant_id": tenant_id}, {"_id": 1}
         ):
             self.fs.delete(asset["_id"])
+        for asset in self.db.ad_assets.files.find(
+            {"metadata.task_id": task_id, "metadata.tenant_id": tenant_id}, {"_id": 1}
+        ):
+            self.ad_fs.delete(asset["_id"])
         self.audit(tenant_id, "task.deleted", task_id=task_id)
         return True
 
@@ -693,6 +698,66 @@ class MongoRepository:
             return grid_out.read()
         except Exception:
             return None
+
+    AD_SLOTS = ("intro", "midroll", "outro")
+
+    def put_ad_asset(self, tenant_id: int, task_id: str, slot: str, data: bytes) -> str:
+        if slot not in self.AD_SLOTS:
+            raise ValueError(slot)
+        field = f"ad_{slot}_asset_id"
+        previous_assets = [
+            asset["_id"]
+            for asset in self.db.ad_assets.files.find(
+                {"metadata.task_id": task_id, "metadata.tenant_id": tenant_id,
+                 "metadata.slot": slot},
+                {"_id": 1},
+            )
+        ]
+        asset_id = self.ad_fs.put(
+            data,
+            filename=f"{task_id}-{slot}.mp4",
+            content_type="video/mp4",
+            metadata={"tenant_id": tenant_id, "task_id": task_id, "slot": slot},
+        )
+        result = self.tasks.update_one(
+            {"_id": task_id, "tenant_id": tenant_id},
+            {
+                "$set": {field: str(asset_id), "updated_at": utcnow()},
+                "$inc": {"revision": 1},
+            },
+        )
+        if not result.matched_count:
+            self.ad_fs.delete(asset_id)
+            raise KeyError(task_id)
+        for previous_id in previous_assets:
+            self.ad_fs.delete(previous_id)
+        return str(asset_id)
+
+    def get_ad_asset(self, tenant_id: int, asset_id: str) -> Optional[bytes]:
+        try:
+            grid_out = self.ad_fs.get(ObjectId(asset_id))
+            if grid_out.metadata and grid_out.metadata.get("tenant_id") != tenant_id:
+                return None
+            return grid_out.read()
+        except Exception:
+            return None
+
+    def delete_ad_asset(self, tenant_id: int, task_id: str, slot: str) -> None:
+        if slot not in self.AD_SLOTS:
+            raise ValueError(slot)
+        for asset in self.db.ad_assets.files.find(
+            {"metadata.task_id": task_id, "metadata.tenant_id": tenant_id,
+             "metadata.slot": slot},
+            {"_id": 1},
+        ):
+            self.ad_fs.delete(asset["_id"])
+        self.tasks.update_one(
+            {"_id": task_id, "tenant_id": tenant_id},
+            {
+                "$set": {f"ad_{slot}_asset_id": None, "updated_at": utcnow()},
+                "$inc": {"revision": 1},
+            },
+        )
 
     def claimable_tenant_ids(self) -> list[int]:
         task_ids = self.tasks.distinct(
