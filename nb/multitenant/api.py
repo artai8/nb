@@ -184,6 +184,10 @@ def create_app(
             raise HTTPException(status_code=429, detail="Too many login attempts")
         display_name = " ".join(part for part in [user.first_name, user.last_name] if part)
         repo.upsert_tenant(user.id, username=user.username, display_name=display_name)
+        # 任何人第一次打开 Mini App 就给他配好网页账号（用户名 + 默认密码 admin123，
+        # 标记 must_change_password 提醒改密），不用等到绑定转发账号那一步；
+        # 已有网页账号的租户不动。
+        repo.ensure_web_login(user.id, user.username or "")
         session_exp = expiry(hours=cfg.web_session_hours) if cfg.web_session_hours > 0 else None
         token, expires_at = repo.create_session(
             user.id, kind="miniapp", expires_at=session_exp
