@@ -89,20 +89,20 @@ class ControlBot:
         if self.settings.public_base_url:
             url = f"{self.settings.public_base_url}/miniapp"
             buttons.append([KeyboardButtonWebView("🚀 打开 Liquid Glass 控制台 (Mini App)", url)])
-        buttons.append([
-            Button.request_phone("📱 单手机一键共享号码登录", resize=True, single_use=True),
-        ])
+        # 注意：Telethon 不允许同一条消息混用内联按钮（WebView）和普通键盘按钮
+        # （request_phone），混用会抛 ValueError 导致整条回复发不出去，所以这里只保留 WebView；
+        # 一键共享号码请走 /login 或 /phone。
         await event.respond(
             "✨ **欢迎使用 NB 多租户转发系统 · Liquid Glass 旗舰版**\n\n"
             "**推荐单手机登录方式（无需扫码）：**\n"
-            "1️⃣ 点击下方 **「📱 单手机一键共享号码登录」** 按钮，或直接发送 `/phone +国家码手机号`\n"
+            "1️⃣ 发送 `/login` 打开登录菜单，点「📱 一键共享本机号码」，或直接发送 `/phone +国家码手机号`\n"
             "2️⃣ 收到验证码后，直接输入带空格数字（如 `1 2 3 4 5`）或 `/code 1 2 3 4 5`\n"
             "3️⃣ 也可在 `/web` 网页端可视化输入手机号验证码或粘贴 `StringSession`\n\n"
             "**常用命令：**\n"
             "`/login` 打开多种登录方式菜单\n"
             "`/session <StringSession>` 直接导入已有会话字符串（零扫码零验证码）\n"
             "`/app` 打开 Mini App 控制台\n"
-            "`/web` 获取永久有效的浏览器后台登录链接\n"
+            "`/web` 打开 Web 后台入口\n"
             "`/status` 查看账号与任务状态\n"
             "`/logout` 解绑并删除全部数据",
             buttons=buttons,
@@ -140,10 +140,9 @@ class ControlBot:
         if self.repo.get_account(tenant_id):
             await event.respond("当前账号已经绑定。如需重绑，请先使用 /logout。")
             return
-        token = self.repo.create_magic_link(
-            tenant_id, ttl_minutes=self.settings.magic_link_ttl_minutes
-        )
-        web_url = f"{self.settings.public_base_url}/auth/magic/{token}" if self.settings.public_base_url else ""
+        # 注意：这里不再生成免密登录链接——Telethon 不允许同一条消息混用普通键盘按钮
+        # （request_phone）和内联按钮（Button.url），混用会抛 ValueError 导致整条回复
+        # 发不出去；同时免密链接本身谁拿到都能直接登录，已按决定停用。
         msg = (
             "🔐 **请选择最适合您的登录绑定方式（单手机免扫码优化）：**\n\n"
             "• **方式一（单手机最稳）：一键共享本机号码**\n"
@@ -156,8 +155,6 @@ class ControlBot:
             "  如果您身边有另一台设备，请发送 `/qr` 获取自动刷新的二维码与 `tg://login` 链接。"
         )
         buttons = [[Button.request_phone("📱 一键共享本机号码", resize=True, single_use=True)]]
-        if web_url:
-            buttons.append([Button.url("🌐 打开永久有效 Web 后台登录", web_url)])
         await event.respond(msg, buttons=buttons)
 
     async def qr_login_cmd(self, event) -> None:
