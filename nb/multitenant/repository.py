@@ -26,6 +26,10 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Worker log retention (item 12): keep the newest 500 lines per tenant.
+LOG_BUFFER_MAX_LINES = 500
+
+
 class RevisionConflict(RuntimeError):
     pass
 
@@ -47,6 +51,7 @@ class MongoRepository:
         self.comment_links: Collection = self.db.comment_links
         self.audit_events: Collection = self.db.audit_events
         self.rate_limits: Collection = self.db.auth_rate_limits
+        self.log_records: Collection = self.db.log_records
         self.fs = gridfs.GridFS(self.db, collection="watermark_assets")
         self.ad_fs = gridfs.GridFS(self.db, collection="ad_assets")
 
@@ -68,6 +73,10 @@ class MongoRepository:
         self.sessions.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
         self.deliveries.create_index([("delivery_key", ASCENDING)], unique=True)
         self.deliveries.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+        self.log_records.create_index([("tenant_id", ASCENDING), ("_id", -1)])
+        # Backstop: drop log lines older than 7 days even if the 500-line
+        # trim below never runs for an idle tenant.
+        self.log_records.create_index([("created_at", ASCENDING)], expireAfterSeconds=604800)
         self.comment_links.create_index(
             [
                 ("tenant_id", ASCENDING),
@@ -997,6 +1006,10 @@ class MongoRepository:
             return None
         return job_id
 
+    def job_exists(self, job_key: str) -> bool:
+        """True when a job with this key already exists (any status)."""
+        return self.jobs.find_one({"job_key": job_key}, {"_id": 1}) is not None
+
     def claim_job(self, tenant_id: int, worker_id: str, lease_epoch: int) -> Optional[dict[str, Any]]:
         if not self.lease_is_current(tenant_id, worker_id, lease_epoch):
             return None
@@ -1547,6 +1560,61 @@ class MongoRepository:
 
     def clear_phone_login_challenge(self, tenant_id: int) -> None:
         self.db.login_challenges.delete_one({"_id": tenant_id})
+
+    # ==================== worker logs (item 12, view only) ================
+
+    def save_log_records(self, tenant_id: int, records: list[dict[str, Any]]) -> None:
+        """Append worker log lines, keeping only the newest 500 per tenant."""
+        if not records:
+            return
+        now = utcnow()
+        docs = []
+        for record in records:
+            docs.append({
+                "tenant_id": int(tenant_id),
+                "ts": str(record.get("ts", "")),
+                "level": str(record.get("level", "INFO")),
+                "logger": str(record.get("logger", "")),
+                "message": str(record.get("message", ""))[:4000],
+                "created_at": now,
+            })
+        self.log_records.insert_many(docs)
+        count = self.log_records.count_documents({"tenant_id": int(tenant_id)})
+        if count > LOG_BUFFER_MAX_LINES:
+            boundary = self.log_records.find(
+                {"tenant_id": int(tenant_id)}
+            ).sort("_id", -1).skip(LOG_BUFFER_MAX_LINES - 1).limit(1)
+            boundary = list(boundary)
+            if boundary:
+                self.log_records.delete_many({
+                    "tenant_id": int(tenant_id),
+                    "_id": {"$lt": boundary[0]["_id"]},
+                })
+
+    def list_log_records(
+        self,
+        tenant_id: Optional[int] = None,
+        *,
+        level: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Recent worker log lines, chronological (oldest first)."""
+        query: dict[str, Any] = {}
+        if tenant_id is not None:
+            query["tenant_id"] = int(tenant_id)
+        if level:
+            query["level"] = str(level).upper()
+        limit = max(1, min(int(limit), LOG_BUFFER_MAX_LINES))
+        rows = []
+        for doc in self.log_records.find(query).sort("_id", -1).limit(limit):
+            rows.append({
+                "ts": doc.get("ts", ""),
+                "level": doc.get("level", ""),
+                "logger": doc.get("logger", ""),
+                "message": doc.get("message", ""),
+            })
+        rows.reverse()
+        return rows
 
     def list_recent_deliveries(
         self,

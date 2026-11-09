@@ -664,6 +664,24 @@ def create_app(
     ) -> list[dict]:
         return repo.list_recent_deliveries(tenant_id=tenant_id, limit=30)
 
+    # ==================== worker 日志查看（仅查看，无导出） ====================
+    @app.get("/api/logs")
+    def tenant_logs(
+        tenant_id: int = Depends(current_tenant),
+        level: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        return repo.list_log_records(tenant_id=tenant_id, level=level, limit=limit)
+
+    @app.get("/api/admin/logs")
+    def admin_logs(
+        _: int = Depends(require_admin),
+        level: Optional[str] = None,
+        limit: int = 100,
+        tenant_id: Optional[int] = None,
+    ) -> list[dict]:
+        return repo.list_log_records(tenant_id=tenant_id, level=level, limit=limit)
+
     @app.get("/api/admin/deliveries/recent")
     def admin_recent_deliveries(
         _: int = Depends(require_admin),

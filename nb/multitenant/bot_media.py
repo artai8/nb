@@ -6,13 +6,15 @@ with ``/start <param>``, collect the media album it returns (following
 its "next page" buttons), and return the collected messages so the
 caller can merge them into the forwarded album.
 
-Deliberately NOT ported: the discussion-comment keyword paths --
-collecting the source post's linked discussion group, finding a common
-comment keyword, and triggering the bot from a comment. Those need live
-discussion plumbing and are the most bot-specific part; the start-link
-path below covers the primary use case (a channel post carries a
-resource bot's start link). The original code is preserved in
-``~/workspace/uu798-orig`` if those paths are ever needed.
+Deliberately NOT ported: none of the discussion-comment keyword paths
+remain unported -- they live below (_trim_keyword,
+_extract_comment_keyword, get_discussion_message,
+_collect_discussion_comments, _find_common_comment_keyword,
+_collect_start_links_from_keyword_reply,
+trigger_comment_keyword_and_resolve_bot_media) and are wired into
+resolve_from_message between the post-text start links and the
+entities/markup tail links. The original code is preserved in
+``~/workspace/uu798-orig``.
 """
 import asyncio
 import logging
@@ -21,12 +23,16 @@ import time
 from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
 
-from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+from telethon.tl.functions.messages import (
+    GetBotCallbackAnswerRequest,
+    GetDiscussionMessageRequest,
+)
 from telethon.tl.types import (
     KeyboardButtonCallback,
     KeyboardButtonUrl,
     MessageEntityTextUrl,
     MessageEntityUrl,
+    MessageService,
     ReplyInlineMarkup,
 )
 
@@ -153,6 +159,128 @@ def _msg_has_media(msg) -> bool:
     return False
 
 
+# =====================================================================
+#  Comment-keyword paths (ported from the original single-tenant nb)
+# =====================================================================
+
+def _trim_keyword(value: str) -> str:
+    if not value:
+        return value
+    return value.strip().strip(" \"'“”‘’()（）[]【】{}<>《》")
+
+
+def _get_reply_to_msg_id(message):
+    reply_to = getattr(message, "reply_to", None)
+    if reply_to is not None and hasattr(reply_to, "reply_to_msg_id"):
+        return reply_to.reply_to_msg_id
+    return getattr(message, "reply_to_msg_id", None)
+
+
+def _extract_comment_keyword(text: str, settings: BotMediaSettings):
+    """Keyword between the first matching prefix and the nearest suffix.
+
+    E.g. "评论区回复 暗号123 获取资源" -> "暗号123".
+    """
+    if not text:
+        return None
+    prefixes = settings.comment_keyword_prefixes or []
+    suffixes = settings.comment_keyword_suffixes or []
+    if not prefixes or not suffixes:
+        return None
+    for prefix in prefixes:
+        start = text.find(prefix)
+        if start == -1:
+            continue
+        start_idx = start + len(prefix)
+        ends = [text.find(suffix, start_idx) for suffix in suffixes]
+        ends = [e for e in ends if e != -1]
+        if not ends:
+            continue
+        keyword = _trim_keyword(text[start_idx:min(ends)])
+        if keyword:
+            return keyword
+    return None
+
+
+async def get_discussion_message(client, channel_id, msg_id):
+    try:
+        result = await client(GetDiscussionMessageRequest(
+            peer=channel_id, msg_id=msg_id,
+        ))
+        if result and getattr(result, "messages", None):
+            return result.messages[0]
+    except Exception as e:
+        logger.warning(
+            "bot media: get discussion message failed (channel=%s, msg=%s): %s",
+            channel_id, msg_id, e,
+        )
+    return None
+
+
+async def _collect_discussion_comments(client, channel_id, post_id, settings: BotMediaSettings):
+    """Return (disc_msg, comments, keyword_hint).
+
+    keyword_hint is the first trimmed comment text whose count reaches 5
+    (collection stops early once one does).
+    """
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    if disc_msg is None:
+        return None, [], None
+    comments = []
+    counts = {}
+    keyword_hint = None
+    try:
+        async for comment in client.iter_messages(
+            disc_msg.chat_id, reply_to=disc_msg.id,
+            reverse=True, limit=settings.recent_limit,
+        ):
+            if isinstance(comment, MessageService):
+                continue
+            comments.append(comment)
+            text = _trim_keyword(
+                (getattr(comment, "raw_text", None) or getattr(comment, "text", "") or "").strip()
+            )
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+                if counts[text] >= 5:
+                    keyword_hint = text
+                    break
+    except Exception as e:
+        logger.warning(
+            "bot media: discussion comments failed post=%s: %s", post_id, e
+        )
+        return disc_msg, [], None
+    return disc_msg, comments, keyword_hint
+
+
+def _find_common_comment_keyword(comments) -> Optional[str]:
+    """Most frequent trimmed comment text with count >= 3; earliest wins ties."""
+    counts = {}
+    order = []
+    for comment in comments:
+        text = _trim_keyword(
+            (getattr(comment, "raw_text", None) or getattr(comment, "text", "") or "").strip()
+        )
+        if not text:
+            continue
+        if text not in counts:
+            counts[text] = 0
+            order.append(text)
+        counts[text] += 1
+    best = None
+    best_count = 0
+    best_idx = None
+    for idx, text in enumerate(order):
+        count = counts.get(text, 0)
+        if count < 3:
+            continue
+        if count > best_count or (count == best_count and (best_idx is None or idx < best_idx)):
+            best = text
+            best_count = count
+            best_idx = idx
+    return best
+
+
 class BotMediaResolver:
     """Stateful resolver: one per tenant worker, cache shared across tasks."""
 
@@ -183,6 +311,36 @@ class BotMediaResolver:
         )
         if collected:
             return collected
+        # (2a) Auto comment keyword: the post text itself carries a
+        # "评论区回复 <keyword> 获取资源" style instruction; post the
+        # keyword as a comment and follow the bot's reply.
+        if settings.auto_comment_trigger_enabled:
+            try:
+                keyword = _extract_comment_keyword(raw_text, settings)
+                if keyword:
+                    items = await self.trigger_comment_keyword_and_resolve_bot_media(
+                        client, getattr(message, "chat_id", None),
+                        getattr(message, "id", None), keyword, settings,
+                    )
+                    if items:
+                        return items
+            except Exception:
+                logger.warning(
+                    "bot media comment keyword trigger failed", exc_info=True
+                )
+        # (2b) Passive discussion-comment scan (channel posts only):
+        # keyword hint -> start links sitting in comments -> common keyword.
+        if getattr(message, "post", False):
+            try:
+                items = await self._resolve_from_discussion_comments(
+                    client, message, settings
+                )
+                if items:
+                    return items
+            except Exception:
+                logger.warning(
+                    "bot media discussion comment scan failed", exc_info=True
+                )
         tail = []
         tail.extend(_parse_start_links_from_entities(message, settings))
         tail.extend(
@@ -225,6 +383,129 @@ class BotMediaResolver:
                     "bot keyword trigger failed (%s)", bot_username, exc_info=True
                 )
         return collected_kw
+
+    async def _collect_start_links_from_keyword_reply(self, client, disc_msg, keyword,
+                                                      settings: BotMediaSettings,
+                                                      send_keyword: bool = True):
+        """Post ``keyword`` as a reply in the discussion group (unless
+        send_keyword is False) and poll for a bot reply carrying start
+        links. Buttons/markup first, then text/entities. The keyword
+        comment is posted from the bound user account, as in the original.
+        """
+        latest = await client.get_messages(disc_msg.chat_id, limit=1)
+        last_id = latest[0].id if latest else 0
+        request_msg_id = None
+        if send_keyword:
+            try:
+                sent = await client.send_message(
+                    disc_msg.chat_id, keyword, reply_to=disc_msg.id
+                )
+                request_msg_id = getattr(sent, "id", None)
+            except Exception:
+                logger.warning(
+                    "bot media: failed to post keyword comment", exc_info=True
+                )
+                return []
+        links = []
+        wait_timeout = settings.wait_timeout
+        total_timeout = max(wait_timeout * 2, 8)
+        start = asyncio.get_running_loop().time()
+        while True:
+            responses = await self._collect_new_messages(
+                client, disc_msg.chat_id, last_id, wait_timeout, settings
+            )
+            if responses:
+                last_id = max(m.id for m in responses)
+            matched = []
+            for msg in responses:
+                if request_msg_id is None:
+                    matched.append(msg)
+                    continue
+                reply_to_msg_id = _get_reply_to_msg_id(msg)
+                text = (
+                    getattr(msg, "raw_text", None) or getattr(msg, "text", "") or ""
+                ).lower()
+                if reply_to_msg_id == request_msg_id or keyword.lower() in text:
+                    matched.append(msg)
+            for msg in matched:
+                button_links = _extract_start_links_from_markup(
+                    getattr(msg, "reply_markup", None), settings
+                )
+                if button_links:
+                    return button_links
+            for msg in matched:
+                links.extend(_parse_start_links_from_text(
+                    getattr(msg, "raw_text", None) or getattr(msg, "text", "") or "",
+                    settings,
+                ))
+                links.extend(_parse_start_links_from_entities(msg, settings))
+            if links:
+                return links
+            if asyncio.get_running_loop().time() - start >= total_timeout:
+                break
+        return links
+
+    async def trigger_comment_keyword_and_resolve_bot_media(
+        self, client, channel_id, post_id, keyword, settings: BotMediaSettings,
+    ):
+        keyword = _trim_keyword(keyword or "")
+        if not keyword:
+            return []
+        disc_msg = await get_discussion_message(client, channel_id, post_id)
+        if disc_msg is None:
+            return []
+        links = await self._collect_start_links_from_keyword_reply(
+            client, disc_msg, keyword, settings, send_keyword=True
+        )
+        if not links:
+            return []
+        return await self._collect_from_start_links(client, links, settings)
+
+    async def _resolve_from_discussion_comments(self, client, message, settings: BotMediaSettings):
+        """Passive scan of a channel post's discussion comments, in order:
+        (a) keyword hint (a comment text repeated 5+ times) -> trigger its
+        reply; (b) start links sitting directly in the comments (text,
+        then markup, then entities); (c) common comment keyword (3+)
+        -> trigger its reply. First hit wins.
+        """
+        disc_msg, comments, keyword_hint = await _collect_discussion_comments(
+            client, getattr(message, "chat_id", None),
+            getattr(message, "id", None), settings,
+        )
+        if not comments:
+            return []
+        if keyword_hint and disc_msg is not None:
+            links = await self._collect_start_links_from_keyword_reply(
+                client, disc_msg, keyword_hint, settings
+            )
+            items = await self._collect_from_start_links(client, links, settings)
+            if items:
+                return items
+        for src_fn in (
+            lambda c: _parse_start_links_from_text(
+                getattr(c, "raw_text", None) or getattr(c, "text", "") or "", settings
+            ),
+            lambda c: _extract_start_links_from_markup(
+                getattr(c, "reply_markup", None), settings
+            ),
+            lambda c: _parse_start_links_from_entities(c, settings),
+        ):
+            all_links = []
+            for comment in comments:
+                all_links.extend(src_fn(comment))
+            items = await self._collect_from_start_links(client, all_links, settings)
+            if items:
+                return items
+        if settings.comment_keyword_from_comments_enabled and disc_msg is not None:
+            keyword = _find_common_comment_keyword(comments)
+            if keyword:
+                links = await self._collect_start_links_from_keyword_reply(
+                    client, disc_msg, keyword, settings
+                )
+                items = await self._collect_from_start_links(client, links, settings)
+                if items:
+                    return items
+        return []
 
     async def _collect_from_start_links(self, client, links, settings: BotMediaSettings):
         if not links:

@@ -9,21 +9,88 @@ import random
 import re
 import shutil
 import tempfile
+import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 os.environ.setdefault("NB_MULTITENANT", "1")
 
-# Anti-ban send spacing (防封): every forwarded group waits a fresh random
-# 150-300 seconds before the next one, in both live and past modes.
-SEND_INTERVAL_MIN_SECONDS = 150.0
+# Anti-ban send spacing (防封): ONE shared clock per tenant account — every
+# outbound forward/comment send waits until the worker-level next_send_at,
+# then arms a fresh random 120-300 seconds. A single account never sends
+# two messages back-to-back, no matter which task they belong to.
+SEND_INTERVAL_MIN_SECONDS = 120.0
 SEND_INTERVAL_MAX_SECONDS = 300.0
+
+# FloodWait handling: on any FloodWait the whole tenant pauses 300s, then
+# retries the failed send. Never sleep longer than 300s per retry, even if
+# Telegram asks for more — retry after 300s and re-check.
+FLOOD_PAUSE_SECONDS = 300.0
+
+# Per-item timeouts: the main loop waits at most 10 minutes for one forward
+# item (one live group / one past-or-schedule group step); on timeout it
+# moves on while the stuck work keeps running in the background. A stuck
+# item that still cannot finish after 1 hour is cancelled and its error
+# recorded (job failed / task ERROR).
+ITEM_TIMEOUT_SECONDS = 600.0
+ITEM_ABANDON_SECONDS = 3600.0
+
+# Comment albums (grouped_id) wait 2s for siblings, as in the original.
+COMMENT_GROUP_WAIT_SECONDS = 2.0
+
+# Schedule catch-up: backfill at most the 3 most recent missed run dates.
+SCHEDULE_CATCHUP_MAX_DAYS = 3
+SCHEDULE_CATCHUP_CHECK_SECONDS = 600.0
+
+# Worker log ring buffer (item 12): recent nb.* log records per tenant.
+# Retention count lives in repository.LOG_BUFFER_MAX_LINES (single source).
+LOG_BUFFER_FLUSH_MAX = 2000
+
+# Tenant id of the asyncio task currently running, for the log handler to
+# attribute records to the right tenant (the worker process hosts many).
+_current_tenant_ctx: ContextVar[Optional[int]] = ContextVar(
+    "nb_current_tenant", default=None
+)
+
+
+class _TenantLogHandler(logging.Handler):
+    """Forward nb.* log records into the owning tenant's ring buffer.
+
+    One handler per TenantWorker, all attached to the shared "nb" logger;
+    each accepts only records emitted while its tenant's context is active,
+    so tenants never see each other's logs. Never blocks: a full buffer
+    drops the oldest lines (deque maxlen).
+    """
+
+    def __init__(self, tenant_id: int, buffer: deque, lock: threading.Lock):
+        super().__init__(level=logging.INFO)
+        self._tenant_id = tenant_id
+        self._buffer = buffer
+        self._lock = lock
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if _current_tenant_ctx.get() != self._tenant_id:
+            return
+        try:
+            message = self.format(record)
+        except Exception:
+            return
+        entry = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": message,
+        }
+        with self._lock:
+            self._buffer.append(entry)
 
 # Merge-mode buffer cap (same as the original): when full, the oldest
 # buffered post is flushed out instead of being dropped.
@@ -64,7 +131,7 @@ from nb.plugins import PluginPipeline
 
 from .bot_media import BotMediaResolver, _msg_has_media
 from .models import AccountStatus, ForwardTask, ResolvedEndpoint, TaskMode, TaskStatus
-from .repository import MongoRepository
+from .repository import LOG_BUFFER_MAX_LINES, MongoRepository
 from .security import SessionCipher, get_telegram_proxy
 from .settings import Settings
 
@@ -93,8 +160,6 @@ class TaskRuntime:
     temp_dir: Path
     comment_destinations: list[int] = field(default_factory=list)
     source_discussion_id: Optional[int] = None
-    # monotonic timestamp before which this task must not send again (live).
-    next_send_at: float = 0.0
 
     def close(self) -> None:
         resolved = self.temp_dir.resolve()
@@ -133,9 +198,24 @@ class TenantWorker:
         self.source_routes: dict[int, list[TaskRuntime]] = defaultdict(list)
         self.comment_routes: dict[int, list[ tuple[TaskRuntime, int] ]] = defaultdict(list)
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1000)
-        self.operation_lock = asyncio.Lock()
         self._bot_media = BotMediaResolver()
         self._merge_buffers: dict[tuple, MergeBuffer] = {}
+        # Item 5: ONE shared send clock for the whole tenant account.
+        self._next_send_at: float = 0.0
+        self._send_lock = asyncio.Lock()
+        # Item 3: tenant-wide FloodWait pause (monotonic deadline).
+        self._flood_paused_until: float = 0.0
+        # Item 2: comment-album buffers keyed by (discussion_id, grouped_id).
+        self._comment_group_buffers: dict[tuple, dict] = {}
+        # Item 7: items that timed out and keep running in the background.
+        self._background_items: dict[str, dict] = {}
+        # Item 12: log ring buffer (drained to Mongo every sync cycle).
+        self._log_buffer: deque = deque(maxlen=LOG_BUFFER_FLUSH_MAX)
+        self._log_buffer_lock = threading.Lock()
+        self._log_handler: Optional[_TenantLogHandler] = None
+        # Item 6: per-task last catch-up scan (monotonic), to avoid a Mongo
+        # find_one per task on every 5s sync cycle.
+        self._schedule_catchup_checked: dict[str, float] = {}
         self._stopped = asyncio.Event()
         self._consumer_task: Optional[asyncio.Task] = None
 
@@ -146,6 +226,18 @@ class TenantWorker:
         if self._consumer_task is not None:
             self._consumer_task.cancel()
             await asyncio.gather(self._consumer_task, return_exceptions=True)
+        for info in list(self._background_items.values()):
+            info["task"].cancel()
+        if self._background_items:
+            await asyncio.gather(
+                *(info["task"] for info in self._background_items.values()),
+                return_exceptions=True,
+            )
+        self._background_items.clear()
+        for buf in list(self._comment_group_buffers.values()):
+            if buf.get("flush_task") is not None:
+                buf["flush_task"].cancel()
+        self._comment_group_buffers.clear()
         for rt in list(self.tasks.values()):
             rt.close()
         self.tasks.clear()
@@ -155,9 +247,15 @@ class TenantWorker:
             except Exception:
                 pass
             self.client = None
+        await self._flush_log_buffer()
+        if self._log_handler is not None:
+            logging.getLogger("nb").removeHandler(self._log_handler)
+            self._log_handler = None
         await self.db(self.repo.release_lease, self.tenant_id, self.settings.worker_id, self.epoch)
 
     async def _sync_and_reconcile(self) -> None:
+        await self._flush_log_buffer()
+        await self._reap_background_items()
         account = await self.db(self.repo.get_account, self.tenant_id)
         if not account:
             self._stopped.set()
@@ -201,6 +299,11 @@ class TenantWorker:
         await self._run_next_job()
 
     async def run(self) -> None:
+        token = _current_tenant_ctx.set(self.tenant_id)
+        self._log_handler = _TenantLogHandler(
+            self.tenant_id, self._log_buffer, self._log_buffer_lock
+        )
+        logging.getLogger("nb").addHandler(self._log_handler)
         owner_task = asyncio.current_task()
         lease_task = asyncio.create_task(self._lease_renewer(owner_task))
         try:
@@ -213,6 +316,7 @@ class TenantWorker:
             lease_task.cancel()
             await asyncio.gather(lease_task, return_exceptions=True)
             await self._cleanup()
+            _current_tenant_ctx.reset(token)
 
     async def _lease_renewer(self, owner_task: Optional[asyncio.Task]) -> None:
         while not self._stopped.is_set():
@@ -311,32 +415,179 @@ class TenantWorker:
             logging.warning("Tenant queue applying backpressure tenant=%s kind=%s", self.tenant_id, kind)
         await self.queue.put((kind, event))
 
+    # -- shared send clock / flood pause / item timeout / logs -----------
+
+    def _note_flood_wait(self, seconds: float) -> None:
+        """Tenant-wide 300s pause after any FloodWait (item 3).
+
+        Never sleeps longer than 300s per retry, even if Telegram asks for
+        more — after the pause the failed send is retried and re-checked.
+        """
+        del seconds  # the pause is always a flat 300s by Hon's spec
+        self._flood_paused_until = max(
+            self._flood_paused_until, time.monotonic() + FLOOD_PAUSE_SECONDS
+        )
+        logging.warning(
+            "tenant flood pause tenant=%s until=%.0f",
+            self.tenant_id, self._flood_paused_until,
+        )
+
+    async def _wait_flood_pause(self) -> None:
+        wait = self._flood_paused_until - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    async def _throttle_send(self) -> None:
+        """Worker-level anti-ban throttle (item 5).
+
+        One shared 120-300s clock for the whole tenant account: wait until
+        the window opens, then arm the next window. Also respects the
+        tenant-wide flood pause first. The _send_lock serializes the
+        check+arm so two concurrent sends can never share a window.
+        """
+        await self._wait_flood_pause()
+        async with self._send_lock:
+            wait = self._next_send_at - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._next_send_at = time.monotonic() + _random_send_interval()
+
+    async def _run_item(
+        self,
+        key: str,
+        coro,
+        *,
+        on_error: Optional[Callable] = None,
+        description: str = "",
+    ):
+        """Run one forward item with a 10-minute main-loop budget (item 7).
+
+        Returns the coroutine's result when it finishes in time (exceptions
+        propagate to the caller, as before). On timeout returns None and the
+        work keeps running in the background; the reaper abandons it after
+        1 hour. ``on_error`` (async callable taking the exception) records
+        a late failure or an abandonment.
+        """
+        task = asyncio.create_task(coro)
+        done, _pending = await asyncio.wait({task}, timeout=ITEM_TIMEOUT_SECONDS)
+        if done:
+            return task.result()
+        logging.warning(
+            "item %s timed out after %ss (%s), continuing in background",
+            key, ITEM_TIMEOUT_SECONDS, description or key,
+        )
+        self._background_items[key] = {
+            "task": task,
+            "started_at": time.monotonic(),
+            "on_error": on_error,
+            "description": description or key,
+        }
+        task.add_done_callback(lambda t, k=key: self._background_item_done(k, t))
+        return None
+
+    def _background_item_done(self, key: str, task: asyncio.Task) -> None:
+        info = self._background_items.pop(key, None)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+        logging.exception(
+            "background item %s failed: %s", key, exc,
+        )
+        on_error = (info or {}).get("on_error")
+        if on_error is not None:
+            asyncio.create_task(on_error(exc))
+
+    async def _finish_job_error(self, job_id: str, exc: BaseException) -> None:
+        await self.db(
+            self.repo.finish_job,
+            job_id,
+            worker_id=self.settings.worker_id,
+            lease_epoch=self.epoch,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    async def _reap_background_items(self) -> None:
+        """Cancel stuck background items older than 1h and record (item 7)."""
+        now = time.monotonic()
+        for key, info in list(self._background_items.items()):
+            task = info["task"]
+            if task.done():
+                continue
+            if now - info["started_at"] <= ITEM_ABANDON_SECONDS:
+                continue
+            logging.warning(
+                "abandoning stuck item %s after %ss (%s)",
+                key, ITEM_ABANDON_SECONDS, info.get("description", key),
+            )
+            task.cancel()
+            self._background_items.pop(key, None)
+            exc = TimeoutError(
+                f"item {key} stuck for over 1 hour, abandoned"
+            )
+            on_error = info.get("on_error")
+            if on_error is not None:
+                await on_error(exc)
+
+    async def _flush_log_buffer(self) -> None:
+        """Drain the log ring buffer into Mongo (item 12)."""
+        with self._log_buffer_lock:
+            records = list(self._log_buffer)
+            self._log_buffer.clear()
+        if not records:
+            return
+        try:
+            await self.db(self.repo.save_log_records, self.tenant_id, records)
+        except Exception:
+            logging.exception("log flush failed tenant=%s", self.tenant_id)
+
     async def _consume(self) -> None:
         while True:
             kind, event = await self.queue.get()
             try:
-                while True:
-                    try:
-                        async with self.operation_lock:
-                            if kind == "new":
-                                if getattr(event.message, "grouped_id", None) is None:
-                                    await self._handle_messages(event.chat_id, [event.message])
-                            elif kind == "album":
-                                await self._handle_messages(event.chat_id, list(event.messages))
-                            elif kind == "edited":
-                                await self._handle_edit(event)
-                            elif kind == "deleted":
-                                await self._handle_delete(event)
-                        break
-                    except FloodWaitError as exc:
-                        logging.warning("FloodWait tenant=%s seconds=%s", self.tenant_id, exc.seconds)
-                        await asyncio.sleep(exc.seconds)
-                    except Exception as exc:
-                        logging.exception("Tenant event failed tenant=%s kind=%s", self.tenant_id, kind)
-                        await self._set_event_task_errors(event, exc)
-                        break
+                await self._run_item(
+                    f"event:{kind}:{getattr(getattr(event, 'message', None), 'id', '?')}",
+                    self._dispatch_event(kind, event),
+                    on_error=lambda exc, e=event: self._set_event_task_errors(e, exc),
+                    description=f"{kind} event",
+                )
+            except Exception as exc:
+                logging.exception("Tenant event failed tenant=%s kind=%s", self.tenant_id, kind)
+                await self._set_event_task_errors(event, exc)
             finally:
                 self.queue.task_done()
+
+    async def _dispatch_event(self, kind: str, event) -> None:
+        """Handle one queued event, retrying FloodWaits after the shared pause.
+
+        The whole-event retry matches the old _consume behaviour, but the
+        wait is the tenant-wide 300s pause (item 3), not Telegram's
+        requested seconds. The 1-hour abandon bound comes from the _run_item
+        wrapper that runs this coroutine (item 7).
+        """
+        while True:
+            try:
+                if kind == "new":
+                    if getattr(event.message, "grouped_id", None) is None:
+                        await self._handle_messages(event.chat_id, [event.message])
+                elif kind == "album":
+                    await self._handle_messages(event.chat_id, list(event.messages))
+                elif kind == "edited":
+                    await self._handle_edit(event)
+                elif kind == "deleted":
+                    await self._handle_delete(event)
+                return
+            except FloodWaitError as exc:
+                logging.warning(
+                    "FloodWait tenant=%s kind=%s seconds=%s, pausing %ss",
+                    self.tenant_id, kind, exc.seconds, FLOOD_PAUSE_SECONDS,
+                )
+                self._note_flood_wait(exc.seconds or 0)
+                await self._wait_flood_pause()
 
     async def _set_event_task_errors(self, event, error: Exception) -> None:
         chat_id = getattr(event, "chat_id", None)
@@ -619,6 +870,10 @@ class TenantWorker:
                 bot_messages = await self._bot_media.resolve_for_group(
                     self.client, values, task.bot_media
                 )
+            except FloodWaitError as exc:
+                self._note_flood_wait(exc.seconds or 0)
+                logging.warning("bot media resolution hit FloodWait for task %s", task.id)
+                bot_messages = []
             except Exception:
                 logging.warning("bot media resolution failed for task %s", task.id, exc_info=True)
                 bot_messages = []
@@ -636,10 +891,9 @@ class TenantWorker:
         if not templates:
             return 0
 
-        if live:
-            wait = runtime.next_send_at - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)
+        # Layer A flood retry (item 3): each destination send retries after
+        # the tenant-wide 300s pause, giving up only after 1h (item 7 bound).
+        call_started = time.monotonic()
         sent_count = 0
         for destination in task.resolved_destinations:
             delivery_key = f"{task.id}:{source_id}:{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
@@ -657,9 +911,21 @@ class TenantWorker:
                 reply_to = await self._resolve_reply_to(
                     runtime, source_id, messages, destination.peer_id
                 )
-                sent = await self._send_templates(
-                    task, destination.peer_id, templates, reply_to=reply_to
-                )
+                while True:
+                    # Shared 120-300s throttle (item 5): one window per send,
+                    # per tenant account — live, past, schedule and merge
+                    # flush all go through here.
+                    await self._throttle_send()
+                    try:
+                        sent = await self._send_templates(
+                            task, destination.peer_id, templates, reply_to=reply_to
+                        )
+                        break
+                    except FloodWaitError as exc:
+                        self._note_flood_wait(exc.seconds or 0)
+                        if time.monotonic() - call_started > ITEM_ABANDON_SECONDS:
+                            raise
+                        await self._wait_flood_pause()
                 sent_id = _message_id([m for _, m in sent])
                 # Note: message_map keys are the *source* ids only -- bot-media
                 # templates wrap the bot's messages, which must not pollute the
@@ -685,8 +951,6 @@ class TenantWorker:
                 raise
         for template in templates:
             template.clear()
-        if live and sent_count > 0:
-            runtime.next_send_at = time.monotonic() + _random_send_interval()
         return sent_count
 
     # -- comment-media merge mode (original's MergeContext) -------------
@@ -757,29 +1021,19 @@ class TenantWorker:
             buf.task_id, buf.post_id,
             len(buf.main_messages), len(buf.comment_media),
         )
+        # The send retries inside _forward_messages with the tenant-wide
+        # 300s flood pause for up to 1h (items 3+7); reaching here with a
+        # FloodWait means it gave up — the buffered post is dropped.
         try:
-            async with self.operation_lock:
-                await self._forward_messages(
-                    runtime, buf.source_peer_id, combined,
-                    live=True, from_merge=True,
-                )
-        except FloodWaitError as exc:
-            logging.warning(
-                "merge flush hit FloodWait task=%s seconds=%s, retrying once",
-                buf.task_id, exc.seconds,
+            await self._forward_messages(
+                runtime, buf.source_peer_id, combined,
+                live=True, from_merge=True,
             )
-            await asyncio.sleep(exc.seconds)
-            try:
-                async with self.operation_lock:
-                    await self._forward_messages(
-                        runtime, buf.source_peer_id, combined,
-                        live=True, from_merge=True,
-                    )
-            except Exception:
-                logging.exception(
-                    "merge flush retry failed task=%s post=%s",
-                    buf.task_id, buf.post_id,
-                )
+        except FloodWaitError as exc:
+            logging.exception(
+                "merge flush abandoned after flood retries task=%s post=%s seconds=%s",
+                buf.task_id, buf.post_id, exc.seconds,
+            )
         except Exception:
             logging.exception(
                 "merge flush failed task=%s post=%s",
@@ -948,22 +1202,76 @@ class TenantWorker:
             comments.append(message)
         if not comments:
             return
-        for group in self._group_messages(comments):
-            for runtime, source_peer_id in routes:
-                if runtime.task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
-                    continue
-                try:
-                    await self._forward_comment_group(
-                        runtime, source_peer_id, discussion_id, group
-                    )
-                except FloodWaitError:
-                    raise
-                except Exception:
-                    logging.exception(
-                        "Comment forward failed tenant=%s task=%s",
-                        self.tenant_id,
-                        runtime.task.id,
-                    )
+        # Item 2: comments sharing a grouped_id wait ~2s for siblings (the
+        # original's comment-album buffer); lone comments send immediately.
+        ungrouped = [m for m in comments if getattr(m, "grouped_id", None) is None]
+        grouped: dict[int, list] = {}
+        for message in comments:
+            gid = getattr(message, "grouped_id", None)
+            if gid is not None:
+                grouped.setdefault(int(gid), []).append(message)
+        for message in ungrouped:
+            await self._forward_comment_to_routes(discussion_id, [message])
+        for gid, messages in grouped.items():
+            self._buffer_comment_group(discussion_id, gid, messages)
+
+    async def _forward_comment_to_routes(self, discussion_id: int, group: list) -> None:
+        for runtime, source_peer_id in list(self.comment_routes.get(discussion_id, [])):
+            if runtime.task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
+                continue
+            try:
+                await self._forward_comment_group(
+                    runtime, source_peer_id, discussion_id, group
+                )
+            except FloodWaitError:
+                raise
+            except Exception:
+                logging.exception(
+                    "Comment forward failed tenant=%s task=%s",
+                    self.tenant_id,
+                    runtime.task.id,
+                )
+
+    def _buffer_comment_group(self, discussion_id: int, grouped_id: int, messages: list) -> None:
+        """Hold a comment album ~2s for siblings, then flush once (item 2)."""
+        key = (discussion_id, grouped_id)
+        buf = self._comment_group_buffers.get(key)
+        if buf is None:
+            buf = {"messages": [], "flush_task": None}
+            self._comment_group_buffers[key] = buf
+        known = {int(m.id) for m in buf["messages"]}
+        buf["messages"].extend(m for m in messages if int(m.id) not in known)
+        if buf["flush_task"] is not None:
+            buf["flush_task"].cancel()
+        buf["flush_task"] = asyncio.create_task(self._comment_flush_later(key))
+
+    async def _comment_flush_later(self, key: tuple) -> None:
+        try:
+            await asyncio.sleep(COMMENT_GROUP_WAIT_SECONDS)
+        except asyncio.CancelledError:
+            return
+        await self._flush_comment_group(key)
+
+    async def _flush_comment_group(self, key: tuple) -> None:
+        buf = self._comment_group_buffers.pop(key, None)
+        if buf is None or not buf["messages"]:
+            return
+        discussion_id, _gid = key
+        messages = list(buf["messages"])
+        try:
+            await self._forward_comment_to_routes(discussion_id, messages)
+        except FloodWaitError as exc:
+            # _send_comment already retried with the shared pause for up to
+            # 1h; this is a flood from the link/dest lookup — pause and
+            # retry the group once, then drop it.
+            self._note_flood_wait(exc.seconds or 0)
+            await self._wait_flood_pause()
+            try:
+                await self._forward_comment_to_routes(discussion_id, messages)
+            except Exception:
+                logging.exception("comment group flush retry failed key=%s", key)
+        except Exception:
+            logging.exception("comment group flush failed key=%s", key)
 
     async def _forward_comment_group(
         self, runtime: TaskRuntime, source_peer_id: int, discussion_id: int, group: list
@@ -1089,9 +1397,6 @@ class TenantWorker:
         )
         if not templates:
             return
-        wait = runtime.next_send_at - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
         ids = [int(m.id) for m in group]
         delivery_key = (
             f"{task.id}:{source_peer_id}:comment:{','.join(str(i) for i in ids)}:{dest_chat_id}"
@@ -1106,10 +1411,22 @@ class TenantWorker:
             destination_peer_id=dest_chat_id,
         ):
             return
+        # Layer A flood retry (item 3), same as _forward_messages.
+        call_started = time.monotonic()
         try:
-            sent = await self._send_templates(
-                task, dest_chat_id, templates, reply_to=reply_to
-            )
+            while True:
+                # Shared 120-300s throttle (item 5).
+                await self._throttle_send()
+                try:
+                    sent = await self._send_templates(
+                        task, dest_chat_id, templates, reply_to=reply_to
+                    )
+                    break
+                except FloodWaitError as exc:
+                    self._note_flood_wait(exc.seconds or 0)
+                    if time.monotonic() - call_started > ITEM_ABANDON_SECONDS:
+                        raise
+                    await self._wait_flood_pause()
             sent_id = _message_id([m for _, m in sent])
             message_map = {
                 str(t.message.id): int(m.id)
@@ -1123,8 +1440,6 @@ class TenantWorker:
                 sent_id,
                 message_map=message_map,
             )
-            if sent_id:
-                runtime.next_send_at = time.monotonic() + _random_send_interval()
         except Exception:
             await self.db(self.repo.release_delivery, delivery_key)
             raise
@@ -1284,12 +1599,58 @@ class TenantWorker:
             task = runtime.task
             if task.mode != TaskMode.SCHEDULE or task.status != TaskStatus.ACTIVE:
                 continue
-            if now.strftime("%H:%M") < task.schedule.run_time:
-                continue
-            key = f"schedule:{task.id}:{now.date().isoformat()}"
+            if now.strftime("%H:%M") >= task.schedule.run_time:
+                key = f"schedule:{task.id}:{now.date().isoformat()}"
+                hour, minute = (int(value) for value in task.schedule.run_time.split(":"))
+                scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0).astimezone(timezone.utc)
+                await self.db(
+                    self.repo.create_job,
+                    self.tenant_id,
+                    task.id,
+                    kind="schedule",
+                    job_key=key,
+                    scheduled_at=scheduled_at,
+                    task_revision=task.revision,
+                    replace_cancelled=True,
+                )
+            await self._create_schedule_catchup_jobs(task, now)
+
+    async def _create_schedule_catchup_jobs(self, task: ForwardTask, now: datetime) -> None:
+        """Backfill missed schedule run dates (item 6).
+
+        A whole day down used to lose that day's run forever. On each sync
+        cycle (throttled to once per 10 minutes per task) the most recent
+        missed dates — at most 3, most recent first, never before the task
+        was created — get catch-up jobs. The job_key uniqueness makes this
+        idempotent: a date that already has a job is skipped.
+        """
+        last = self._schedule_catchup_checked.get(task.id, 0.0)
+        if time.monotonic() - last < SCHEDULE_CATCHUP_CHECK_SECONDS:
+            return
+        self._schedule_catchup_checked[task.id] = time.monotonic()
+        try:
             hour, minute = (int(value) for value in task.schedule.run_time.split(":"))
-            scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0).astimezone(timezone.utc)
-            await self.db(
+        except ValueError:
+            return
+        today = now.date()
+        created = task.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        earliest = max(
+            created.astimezone(SHANGHAI).date(),
+            today - timedelta(days=SCHEDULE_CATCHUP_MAX_DAYS),
+        )
+        for offset in range(1, SCHEDULE_CATCHUP_MAX_DAYS + 1):
+            day = today - timedelta(days=offset)
+            if day < earliest:
+                continue
+            key = f"schedule:{task.id}:{day.isoformat()}"
+            if await self.db(self.repo.job_exists, key):
+                continue
+            scheduled_at = datetime(
+                day.year, day.month, day.day, hour, minute, tzinfo=SHANGHAI
+            ).astimezone(timezone.utc)
+            created_id = await self.db(
                 self.repo.create_job,
                 self.tenant_id,
                 task.id,
@@ -1297,8 +1658,12 @@ class TenantWorker:
                 job_key=key,
                 scheduled_at=scheduled_at,
                 task_revision=task.revision,
-                replace_cancelled=True,
             )
+            if created_id:
+                logging.info(
+                    "schedule catch-up: task=%s missed date=%s job=%s",
+                    task.id, day.isoformat(), created_id,
+                )
 
     async def _run_next_job(self) -> None:
         """认领并执行一个排队的 past/schedule 任务（每次同步循环最多一个）。"""
@@ -1366,30 +1731,20 @@ class TenantWorker:
             groups.append(current)
         return groups
 
-    async def _forward_with_flood_retry(
-        self, runtime, source_id: int, messages: list, *, live: bool = False
-    ) -> int:
-        """发一组消息；撞上 FloodWait 就等一会儿重试（最多 2 次，单次等待超过 300 秒直接放弃）。"""
-        for attempt in range(3):
-            try:
-                return await self._forward_messages(runtime, source_id, messages, live=live)
-            except FloodWaitError as exc:
-                wait = int(exc.seconds or 0)
-                if attempt >= 2 or wait > 300:
-                    raise
-                logging.warning(
-                    "FloodWait tenant=%s seconds=%s retry=%s", self.tenant_id, wait, attempt + 1
-                )
-                await asyncio.sleep(min(wait, 300))
-        return 0
-
     async def _forward_and_save(
-        self, job, task, runtime, source_id: int, group: list, offsets: dict, *, delay: float
+        self, job, task, runtime, source_id: int, group: list, offsets: dict
     ) -> bool:
-        """发一组消息并把进度写回任务；返回 False 表示任务中途被改/被停/租约丢了，调用方应中止。"""
-        await self._forward_with_flood_retry(runtime, source_id, group, live=False)
+        """发一组消息并把进度写回任务；返回 False 表示任务中途被改/被停/租约丢了，调用方应中止。
+
+        Flood retries live inside _forward_messages (tenant-wide 300s pause,
+        1h bound). The per-group delay is gone: the shared worker-level
+        throttle (item 5) spaces sends. Offsets only move forward (max) so
+        a late-finishing background group can never rewind progress.
+        """
+        await self._forward_messages(runtime, source_id, group, live=False)
         max_id = max(int(getattr(m, "id", 0) or 0) for m in group)
-        offsets[str(source_id)] = max_id
+        key = str(source_id)
+        offsets[key] = max(int(offsets.get(key, 0) or 0), max_id)
         ok = await self.db(
             self.repo.update_task_offsets,
             self.tenant_id,
@@ -1406,9 +1761,25 @@ class TenantWorker:
                 lease_epoch=self.epoch,
             )
             return False
-        if delay:
-            await asyncio.sleep(delay)
         return True
+
+    async def _forward_group_or_background(
+        self, job, task, runtime, source_id: int, group: list, offsets: dict
+    ):
+        """Send one job group with the 10-minute main-loop budget (item 7).
+
+        Returns True/False from _forward_and_save when it finishes in time
+        (False = stop the job). Returns None on timeout: the group keeps
+        sending in the background and the job moves on to the next group.
+        A late failure marks the job failed via on_error.
+        """
+        first_id = int(getattr(group[0], "id", 0) or 0) if group else 0
+        return await self._run_item(
+            f"job:{job['_id']}:{source_id}:{first_id}",
+            self._forward_and_save(job, task, runtime, source_id, group, offsets),
+            on_error=lambda exc, jid=job["_id"]: self._finish_job_error(jid, exc),
+            description=f"job group {source_id}:{first_id}",
+        )
 
     async def _execute_past_job(self, job) -> bool:
         """执行历史搬运：按 [offset, end] 的消息 ID 区间从旧到新逐组转发，跑完任务变 COMPLETED。
@@ -1465,17 +1836,15 @@ class TenantWorker:
                 if key is not None and group and group_key == key:
                     group.append(message)
                 else:
-                    if group and not await self._forward_and_save(
-                        job, task, runtime, source.peer_id, group, offsets,
-                        delay=_random_send_interval()
-                    ):
+                    if group and await self._forward_group_or_background(
+                        job, task, runtime, source.peer_id, group, offsets
+                    ) is False:
                         return True
                     group = [message]
                     group_key = key
-            if group and not await self._forward_and_save(
-                job, task, runtime, source.peer_id, group, offsets,
-                delay=_random_send_interval()
-            ):
+            if group and await self._forward_group_or_background(
+                job, task, runtime, source.peer_id, group, offsets
+            ) is False:
                 return True
         await self.db(
             self.repo.set_task_status,
@@ -1492,9 +1861,9 @@ class TenantWorker:
 
         每日条数上限（daily_limit）是全任务跨源共享的预算，0 = 不限；
         首次运行没有进度时从最旧的消息开始搬（按上限封顶），而不是只取最
-        新的几条——否则更早的历史会被永久跳过。每组间隔 150~300 秒随机
-        （防封，和实时/历史一致）。任务保持 ACTIVE。返回 True 表示 job
-        已由本方法关掉。"""
+        新的几条——否则更早的历史会被永久跳过。发送间隔由租户级共享节流
+        控制（120~300 秒随机，和实时/历史一致）。任务保持 ACTIVE。返回
+        True 表示 job 已由本方法关掉。"""
         assert self.client is not None
         task = await self.db(self.repo.get_task, self.tenant_id, job["task_id"])
         if task is None or task.status != TaskStatus.ACTIVE:
@@ -1542,10 +1911,9 @@ class TenantWorker:
                     continue
                 messages.append(message)
             for group in self._group_messages(messages):
-                if not await self._forward_and_save(
-                    job, task, runtime, source.peer_id, group, offsets,
-                    delay=_random_send_interval(),
-                ):
+                if await self._forward_group_or_background(
+                    job, task, runtime, source.peer_id, group, offsets
+                ) is False:
                     return True
                 if remaining > 0:
                     remaining -= len(group)

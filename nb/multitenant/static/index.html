@@ -50,6 +50,7 @@
       <button type="button" class="segment-btn active" data-tab="tasksView">转发任务 (<span id="taskCount">0</span>)</button>
       <button type="button" class="segment-btn" id="authTabBtn" data-tab="authView">账号登录</button>
       <button type="button" class="segment-btn" data-tab="streamView">实时转发流水</button>
+      <button type="button" class="segment-btn" id="logsTabBtn" data-tab="logsView">运行日志</button>
     </nav>
 
     <!-- 视图 1：转发任务管理（列表 + 集成式任务与插件编辑器） -->
@@ -96,7 +97,7 @@
                 <option value="past">历史搬运 (Past)</option>
                 <option value="schedule">定时推送 (Schedule)</option>
               </select>
-              <div style="margin-top:6px; font-size:0.8rem; color:var(--text-muted);">实时 / 历史发送间隔：150~300 秒随机（防封）</div>
+              <div style="margin-top:6px; font-size:0.8rem; color:var(--text-muted);">实时 / 历史发送间隔：120~300 秒随机（防封）</div>
             </div>
 
             <div class="col-12 aqua-search-card" style="padding:14px 18px;">
@@ -128,7 +129,7 @@
 
             <div class="col-6 glass-panel">
               <strong style="display:block; font-size:0.86rem; margin-bottom:8px;">历史模式选项</strong>
-              <div style="font-size:0.8rem; color:var(--text-muted);">发送间隔：150~300 秒随机（防封）</div>
+              <div style="font-size:0.8rem; color:var(--text-muted);">发送间隔：120~300 秒随机（防封）</div>
               <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
                 <div>
                   <label style="font-size:0.76rem; font-weight:700;">起始消息 ID</label>
@@ -444,6 +445,25 @@
             <button type="button" id="cancelBtn" class="btn-liquid-ghost">取消</button>
           </div>
         </form>
+      </div>
+    </section>
+
+    <!-- 视图：运行日志（仅查看，无导出） -->
+    <section id="logsView" class="tab-panel hidden">
+      <div class="bento-grid">
+        <div class="col-12 glass-panel">
+          <h3 style="margin:0 0 12px; font-size:1.06rem; font-weight:800;">运行日志</h3>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+            <select id="logLevelFilter" class="pill-input" style="max-width:160px;">
+              <option value="">全部级别</option>
+              <option value="INFO">INFO</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+            <button id="refreshLogsBtn" type="button" class="btn-liquid-secondary">刷新</button>
+          </div>
+          <pre id="logList" style="white-space:pre-wrap; word-break:break-word; font-size:0.82rem; line-height:1.5; max-height:480px; overflow-y:auto; margin:0;">加载中…</pre>
+        </div>
       </div>
     </section>
 

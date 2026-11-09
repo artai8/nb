@@ -51,6 +51,14 @@ class CommentsSettings(BaseModel):
 class BotMediaSettings(BaseModel):
     enabled: bool = True
     enable_keyword_trigger: bool = True
+    auto_comment_trigger_enabled: bool = True
+    comment_keyword_prefixes: List[str] = Field(default_factory=lambda: [
+        "评论区回复", "评论区发送", "在评论区回复", "在评论区发送",
+    ])
+    comment_keyword_suffixes: List[str] = Field(default_factory=lambda: [
+        "获取资源", "领取", "获取", "得到内容",
+    ])
+    comment_keyword_from_comments_enabled: bool = True
     enable_pagination: bool = True
     pagination_mode: Literal["auto", "any"] = "auto"
     pagination_keywords: List[str] = Field(default_factory=list)

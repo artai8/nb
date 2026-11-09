@@ -385,6 +385,7 @@ function applyBoundState(me) {
   const authTabBtn = document.querySelector('#authTabBtn');
   const tasksTabBtn = document.querySelector('.segment-btn[data-tab="tasksView"]');
   const streamTabBtn = document.querySelector('.segment-btn[data-tab="streamView"]');
+  const logsTabBtn = document.querySelector('#logsTabBtn');
   const lockBtn = document.querySelector('#lockScreenBtn');
   const badge = document.querySelector('#loggedInBadge');
   const banner = document.querySelector('#defaultPwBanner');
@@ -395,6 +396,7 @@ function applyBoundState(me) {
     authTabBtn?.classList.add('hidden');
     tasksTabBtn?.classList.remove('hidden');
     streamTabBtn?.classList.remove('hidden');
+    logsTabBtn?.classList.remove('hidden');
     lockBtn?.classList.add('hidden');
     if (authPanel && !authPanel.classList.contains('hidden')) switchTab('tasksView');
     if (me?.must_change_password) {
@@ -410,6 +412,7 @@ function applyBoundState(me) {
     authTabBtn?.classList.remove('hidden');
     tasksTabBtn?.classList.add('hidden');
     streamTabBtn?.classList.add('hidden');
+    logsTabBtn?.classList.add('hidden');
     lockBtn?.classList.remove('hidden');
     banner?.classList.add('hidden');
     // 未绑定时不显示转发任务与实时转发流水，只留账号绑定页
@@ -840,4 +843,30 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDeliveryStream();
     showToast('流水已更新');
   });
+
+  // 运行日志查看（仅查看，无导出）
+  async function loadLogs() {
+    const box = document.querySelector('#logList');
+    if (!box) return;
+    const level = document.querySelector('#logLevelFilter')?.value || '';
+    box.textContent = '加载中…';
+    try {
+      const qs = new URLSearchParams({ limit: '100' });
+      if (level) qs.set('level', level);
+      const remote = await apiFetch(`/api/logs?${qs.toString()}`);
+      if (!Array.isArray(remote) || remote.length === 0) {
+        box.textContent = '暂无日志';
+        return;
+      }
+      box.textContent = remote.map(l => `[${l.ts || ''}] ${l.level || ''} ${l.logger || ''} ${l.message || ''}`).join('\n');
+    } catch (_) {
+      box.textContent = '日志加载失败';
+    }
+  }
+  document.querySelector('#refreshLogsBtn')?.addEventListener('click', () => {
+    loadLogs();
+    showToast('日志已更新');
+  });
+  document.querySelector('#logLevelFilter')?.addEventListener('change', loadLogs);
+  document.querySelector('#logsTabBtn')?.addEventListener('click', loadLogs);
 });

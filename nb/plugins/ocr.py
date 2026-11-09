@@ -30,6 +30,9 @@ class NbOcr(NbPlugin):
             extracted = await run_cpu(_ocr_file, file, lang)
             if extracted and not tm.text:
                 tm.text = extracted.strip()
+        except Exception as e:
+            if not tm.text:
+                tm.text = f"OCR Error: {e}"
         finally:
             cleanup(file)
         return tm
