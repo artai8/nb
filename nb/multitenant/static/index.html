@@ -378,7 +378,18 @@
               </div>
             </div>
 
-            <!-- 6~8. 文本样式 + OCR + 防剧透 -->
+            <!-- 6. 媒体重编码（去 file_unique_id） -->
+            <div class="col-6 glass-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <strong style="font-size:0.95rem;">6. 媒体重编码（去 file_unique_id）</strong>
+                <label style="font-size:0.84rem; font-weight:700;"><input type="checkbox" id="plg_recode_check"> 启用</label>
+              </div>
+              <div style="font-size:0.8rem; color:var(--text-muted); line-height:1.6;">
+                视频重新编码、音频重新编码、ZIP 重新打包后再发送，转发的文件拿不到原来的 file_unique_id。图片用上面的水印插件；语音会变成普通音频文件；超过 500MB 的文件跳过不处理。
+              </div>
+            </div>
+
+            <!-- 7~9. 文本样式 + OCR + 防剧透 -->
             <div class="col-6 glass-panel" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
               <div>
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">

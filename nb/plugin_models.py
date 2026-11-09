@@ -89,6 +89,11 @@ class OcrConfig(BaseModel):
     lang: str = "chi_sim"
 
 
+class RecodeConfig(BaseModel):
+    """Re-encode media so the forwarded copy gets a new file_unique_id."""
+    check: bool = False
+
+
 class Replace(BaseModel):
     check: bool = False
     text: Dict[str, str] = Field(default_factory=dict)
@@ -132,6 +137,7 @@ class PluginConfig(BaseModel):
     caption: Caption = Field(default_factory=Caption)
     spoiler: SpoilerConfig = Field(default_factory=SpoilerConfig)
     inline: InlineButtonConfig = Field(default_factory=InlineButtonConfig)
+    recode: RecodeConfig = Field(default_factory=RecodeConfig)
 
 
 ASYNC_PLUGIN_IDS = ["ocr", "mark"]

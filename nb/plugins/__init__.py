@@ -71,6 +71,7 @@ from .filter import NbFilter
 from .fmt import NbFmt
 from .mark import NbMark
 from .ocr import NbOcr
+from .recode import NbRecode
 from .replace import NbReplace
 from .spoiler import NbSpoiler
 
@@ -120,13 +121,15 @@ class PluginPipeline:
             self.plugins.append(NbSpoiler(self.config.spoiler))
         if self.config.mark.check:
             self.plugins.append(NbMark(self.config.mark))
+        if self.config.recode.check:
+            self.plugins.append(NbRecode(self.config.recode))
         if self.config.inline.check:
             self.plugins.append(NbInlineButtons(self.config.inline))
 
     async def apply(self, message: Any, *, skip_plugins: Optional[List[str]] = None) -> Optional[NbMessage]:
         if not self.plugins and any(
             getattr(getattr(self.config, k, None), "check", False)
-            for k in ["filter", "ocr", "replace", "caption", "fmt", "spoiler", "mark", "inline"]
+            for k in ["filter", "ocr", "replace", "caption", "fmt", "spoiler", "mark", "inline", "recode"]
         ):
             await self.initialize()
         skip = set(skip_plugins or [])

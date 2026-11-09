@@ -245,6 +245,8 @@ function populateTaskForm(task) {
   document.querySelector('#plg_ocr_lang').value = p.ocr?.lang || 'chi_sim+eng';
 
   document.querySelector('#plg_spoiler_check').checked = Boolean(p.spoiler?.check);
+
+  document.querySelector('#plg_recode_check').checked = Boolean(p.recode?.check);
 }
 
 function collectPluginsFromForm() {
@@ -302,6 +304,9 @@ function collectPluginsFromForm() {
     },
     spoiler: {
       check: document.querySelector('#plg_spoiler_check').checked
+    },
+    recode: {
+      check: document.querySelector('#plg_recode_check').checked
     }
   };
 }
@@ -314,7 +319,8 @@ const PLUGIN_LABELS = {
   mark: '水印',
   fmt: '排版',
   ocr: 'OCR',
-  spoiler: '防剧透'
+  spoiler: '防剧透',
+  recode: '重编码去重'
 };
 
 function renderTasks() {
