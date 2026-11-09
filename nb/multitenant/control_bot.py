@@ -39,6 +39,27 @@ def _get_proxy():
     return get_telegram_proxy()
 
 
+# Telegram 命令菜单：默认（未绑定）显示全部 9 个；已绑定只显示 5 个，不再出现登录命令。
+_COMMANDS_FULL = [
+    ("start", "开始使用"),
+    ("login", "登录绑定方式菜单"),
+    ("qr", "扫码登录"),
+    ("phone", "手机号登录"),
+    ("session", "导入 StringSession"),
+    ("app", "打开 Mini App 控制台"),
+    ("web", "打开 Web 后台入口"),
+    ("status", "查看账号与任务状态"),
+    ("logout", "解绑并删除全部数据"),
+]
+_COMMANDS_BOUND = [
+    ("start", "开始使用"),
+    ("app", "打开 Mini App 控制台"),
+    ("web", "打开 Web 后台入口"),
+    ("status", "查看账号与任务状态"),
+    ("logout", "解绑并删除全部数据"),
+]
+
+
 class ControlBot:
     def __init__(self, settings: Settings, repository: MongoRepository) -> None:
         self.settings = settings
@@ -85,7 +106,9 @@ class ControlBot:
         self.repo.upsert_tenant(sender.id, username=sender.username or "", display_name=name)
         url = f"{self.settings.public_base_url}/miniapp" if self.settings.public_base_url else ""
         account = self.repo.get_account(int(sender.id))
-        if account and str(account.get("status", "active")) in ("active", "reauth_required"):
+        bound = bool(account) and str(account.get("status", "active")) in ("active", "reauth_required")
+        await self._sync_menu(int(sender.id), bound, peer=await event.get_input_sender())
+        if bound:
             # 已绑定：不再展示登录步骤，直接给控制台入口（两个都是内联按钮，可以同框）。
             buttons = []
             if url:
@@ -119,6 +142,27 @@ class ControlBot:
             "`/logout` 解绑并删除全部数据",
             buttons=buttons,
         )
+
+    async def _sync_menu(self, tenant_id: int, bound: bool, peer=None) -> None:
+        """按绑定状态同步该私聊的命令菜单（Telegram 支持按聊天单独设置菜单）。
+        已绑定只留 5 个命令，不再显示登录命令；未绑定显示全部 9 个。
+        菜单同步失败不影响主流程，只记日志。"""
+        try:
+            from telethon.tl.functions.bots import SetBotCommandsRequest
+            from telethon.tl.types import BotCommand, BotCommandScopePeer
+
+            if peer is None:
+                peer = await self.bot.get_input_entity(tenant_id)
+            cmds = _COMMANDS_BOUND if bound else _COMMANDS_FULL
+            await self.bot(
+                SetBotCommandsRequest(
+                    scope=BotCommandScopePeer(peer=peer),
+                    lang_code="",
+                    commands=[BotCommand(command=c, description=d) for c, d in cmds],
+                )
+            )
+        except Exception as exc:
+            logging.warning("Sync menu failed tenant=%s: %s", tenant_id, type(exc).__name__)
 
     def _allow_login(self, tenant_id: int) -> bool:
         now = time.monotonic()
@@ -378,6 +422,7 @@ class ControlBot:
             username=me.username or "",
             display_name=display_name,
         )
+        await self._sync_menu(tenant_id, bound=True)
         await client.disconnect()
         self.attempts.pop(tenant_id, None)
         await self.bot.send_message(
@@ -484,6 +529,7 @@ class ControlBot:
             await event.respond("当前没有已绑定账号。")
             return
         self.repo.request_account_delete(tenant_id)
+        await self._sync_menu(tenant_id, bound=False, peer=await event.get_input_sender())
         await event.respond("任务已停止，Telegram 授权正在后台撤销并删除全部数据。")
 
     @staticmethod
