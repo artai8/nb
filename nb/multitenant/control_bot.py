@@ -104,6 +104,9 @@ class ControlBot:
         sender = await event.get_sender()
         name = " ".join(part for part in [sender.first_name, sender.last_name] if part)
         self.repo.upsert_tenant(sender.id, username=sender.username or "", display_name=name)
+        # /start 时就按 Telegram 用户名配好网页账号（用户名 + 默认密码 admin123），
+        # 已有网页账号的租户不动；不用等到打开 Mini App 或绑定那一步。
+        self.repo.ensure_web_login(int(sender.id), sender.username or "")
         url = f"{self.settings.public_base_url}/miniapp" if self.settings.public_base_url else ""
         account = self.repo.get_account(int(sender.id))
         bound = bool(account) and str(account.get("status", "active")) in ("active", "reauth_required")
@@ -115,7 +118,7 @@ class ControlBot:
             buttons = []
             if url:
                 buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
-                buttons.append([Button.url("🌐 打开 Web 后台", url)])
+                buttons.append([Button.url("🌐 打开 Web 控制台", url)])
             await event.respond(
                 "✅ **您的账号已经绑定，可以直接使用控制台配置转发任务。**\n\n"
                 "`/status` 查看账号与任务状态\n"
@@ -125,23 +128,13 @@ class ControlBot:
             return
         buttons = []
         if url:
-            buttons.append([KeyboardButtonWebView("🚀 打开 Liquid Glass 控制台 (Mini App)", url)])
-        # 注意：Telethon 不允许同一条消息混用内联按钮（WebView）和普通键盘按钮
-        # （request_phone），混用会抛 ValueError 导致整条回复发不出去，所以这里只保留 WebView；
+            buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
+            buttons.append([Button.url("🌐 打开 Web 控制台", url)])
+        # 注意：Telethon 不允许同一条消息混用内联按钮（WebView / URL）和普通键盘按钮
+        # （request_phone），混用会抛 ValueError 导致整条回复发不出去，所以这里只保留内联按钮；
         # 一键共享号码请走 /login 或 /phone。
         await event.respond(
-            "✨ **欢迎使用 NB 多租户转发系统 · Liquid Glass 旗舰版**\n\n"
-            "**推荐单手机登录方式（无需扫码）：**\n"
-            "1️⃣ 发送 `/login` 打开登录菜单，点「📱 一键共享本机号码」，或直接发送 `/phone +国家码手机号`\n"
-            "2️⃣ 收到验证码后，直接输入带空格数字（如 `1 2 3 4 5`)\n"
-            "3️⃣ 也可在 `/web` 网页端可视化输入手机号验证码或粘贴 `StringSession`\n\n"
-            "**常用命令：**\n"
-            "`/login` 打开多种登录方式菜单\n"
-            "`/session <StringSession>` 直接导入已有会话字符串（零扫码零验证码）\n"
-            "`/app` 打开 Mini App 控制台\n"
-            "`/web` 打开 Web 后台入口\n"
-            "`/status` 查看账号与任务状态\n"
-            "`/logout` 解绑并删除全部数据",
+            "✨ **欢迎使用 NB 转发系统旗舰版**",
             buttons=buttons,
         )
 
