@@ -398,7 +398,7 @@ function applyBoundState(me) {
       banner?.classList.add('hidden');
     }
   } else {
-    accountLabel.textContent = `租户 #${me?.tenant_id || '已就绪'}`;
+    accountLabel.textContent = me?.username ? `@${me.username}` : `租户 #${me?.tenant_id || '已就绪'}`;
     badge?.classList.add('hidden');
     authTabBtn?.classList.remove('hidden');
     lockBtn?.classList.remove('hidden');

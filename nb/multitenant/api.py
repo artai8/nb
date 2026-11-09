@@ -395,6 +395,7 @@ def create_app(
             is_admin=_is_admin_tenant(tenant_id),
             account_status=account_doc.get("status") if account_doc else None,
             account=account_view,
+            username=str(tenant_doc.get("username") or ""),
             web_username=str(tenant_doc.get("web_username") or ""),
             must_change_password=bool(tenant_doc.get("must_change_password") or False),
         )

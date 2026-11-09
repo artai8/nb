@@ -171,6 +171,7 @@ class TenantView(BaseModel):
     is_admin: bool = False
     account_status: Optional[AccountStatus] = None
     account: Optional[AccountView] = None
+    username: str = ""
     web_username: str = ""
     must_change_password: bool = False
 
