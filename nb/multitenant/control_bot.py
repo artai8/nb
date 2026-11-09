@@ -71,8 +71,6 @@ class ControlBot:
         self.bot.add_event_handler(self.login, events.NewMessage(pattern=r"^/login$", func=private))
         self.bot.add_event_handler(self.qr_login_cmd, events.NewMessage(pattern=r"^/qr$", func=private))
         self.bot.add_event_handler(self.phone, events.NewMessage(pattern=r"^/phone(?:\s+(.+))?$", func=private))
-        self.bot.add_event_handler(self.code, events.NewMessage(pattern=r"^/code(?:\s+(.+))?$", func=private))
-        self.bot.add_event_handler(self.password, events.NewMessage(pattern=r"^/password(?:\s+(.+))?$", func=private))
         self.bot.add_event_handler(self.session_import, events.NewMessage(pattern=r"^/session(?:\s+(.+))?$", func=private))
         self.bot.add_event_handler(self.app, events.NewMessage(pattern=r"^/app$", func=private))
         self.bot.add_event_handler(self.web, events.NewMessage(pattern=r"^/web$", func=private))
@@ -96,7 +94,7 @@ class ControlBot:
             "✨ **欢迎使用 NB 多租户转发系统 · Liquid Glass 旗舰版**\n\n"
             "**推荐单手机登录方式（无需扫码）：**\n"
             "1️⃣ 发送 `/login` 打开登录菜单，点「📱 一键共享本机号码」，或直接发送 `/phone +国家码手机号`\n"
-            "2️⃣ 收到验证码后，直接输入带空格数字（如 `1 2 3 4 5`）或 `/code 1 2 3 4 5`\n"
+            "2️⃣ 收到验证码后，直接输入带空格数字（如 `1 2 3 4 5`)\n"
             "3️⃣ 也可在 `/web` 网页端可视化输入手机号验证码或粘贴 `StringSession`\n\n"
             "**常用命令：**\n"
             "`/login` 打开多种登录方式菜单\n"
@@ -205,7 +203,7 @@ class ControlBot:
             attempt = self.attempts.get(tenant_id)
             if attempt and attempt.client is client:
                 attempt.waiting_password = True
-                await self.bot.send_message(chat_id, "🔐 该账号启用了两步验证，请直接发送您的两步验证密码（或 `/password 密码`）。")
+                await self.bot.send_message(chat_id, "🔐 该账号启用了两步验证，请直接发送您的两步验证密码。")
         except Exception as exc:
             logging.warning("QR login failed for tenant=%s: %s", tenant_id, type(exc).__name__)
             await self.bot.send_message(chat_id, "扫码登录中断，请使用单手机 `/phone +国家码手机号` 登录。")
@@ -229,10 +227,12 @@ class ControlBot:
                 tenant_id,
                 LoginAttempt(client=client, created_at=time.monotonic(), phone=phone),
             )
+            digits = phone.lstrip("+")
+            masked = f"+{digits[:4]}****{digits[-4:]}" if len(digits) > 8 else phone
             await event.respond(
-                "✅ **验证码已发送至您的 Telegram 客户端！**\n\n"
-                "⚠️ **单手机防拦截提示**：为了防止 Telegram 官方检测到您在对话中转发自己的登录验证码而自动作废，请**加入空格或符号**发送验证码：\n"
-                "• 直接发送：`1 2 3 4 5` 或 `/code 1-2-3-4-5`\n"
+                f"✅ **验证码已发送到 {masked}！**\n\n"
+                "请直接发送验证码（Telegram 官方发来的那串数字）：\n"
+                "• 直接发送：`1 2 3 4 5`（数字之间加空格，防止被 Telegram 拦截作废）\n"
                 "• 机器人收到后会立即自动删除您的验证码消息并完成绑定（**已取消 5 分钟超时限制**）。",
                 buttons=Button.clear(),
             )
@@ -254,14 +254,6 @@ class ControlBot:
             return
         await self._start_phone_login(event, match.group(1))
 
-    async def code(self, event) -> None:
-        await self._best_effort_delete(event)
-        match = re.match(r"^/code\s+(.+)$", event.raw_text or "")
-        if not match:
-            await event.respond("请发送 `/code 1 2 3 4 5`。")
-            return
-        await self._verify_code_input(event, match.group(1))
-
     async def _verify_code_input(self, event, raw_code: str) -> None:
         tenant_id = int(event.sender_id)
         attempt = self.attempts.get(tenant_id)
@@ -278,18 +270,10 @@ class ControlBot:
             await self._complete_login(tenant_id, attempt.client, event.chat_id)
         except SessionPasswordNeededError:
             attempt.waiting_password = True
-            await event.respond("🔐 该账号启用了两步验证 (2FA)，请直接发送您的两步验证密码（或 `/password 密码`）。")
+            await event.respond("🔐 该账号启用了两步验证 (2FA)，请直接发送您的两步验证密码。")
         except Exception as exc:
             logging.warning("Code login failed tenant=%s: %s", tenant_id, type(exc).__name__)
             await event.respond("验证码错误或被 Telegram 拦截失效（请务必用空格隔开数字如 `1 2 3 4 5` 发送），必要时重新 `/phone`。")
-
-    async def password(self, event) -> None:
-        await self._best_effort_delete(event)
-        match = re.match(r"^/password\s+(.+)$", event.raw_text or "", re.S)
-        if not match:
-            await event.respond("请发送 `/password 您的两步验证密码`。")
-            return
-        await self._verify_password_input(event, match.group(1))
 
     async def _verify_password_input(self, event, pwd: str) -> None:
         tenant_id = int(event.sender_id)
