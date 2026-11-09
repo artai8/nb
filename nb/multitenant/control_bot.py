@@ -206,7 +206,7 @@ class ControlBot:
             "• **方式二（网页可视化向导）：Web 后台登录**\n"
             "  发送 `/web` 进入网页端，在玻璃拟态面板中直接输入手机号/验证码或导入 Session\n\n"
             "• **方式三（最极速零风控）：StringSession 直接导入**\n"
-            "  发送 `/session 1BVtsO...` 瞬间完成绑定\n\n"
+            "  直接粘贴 StringSession 字符串即可，瞬间完成绑定\n\n"
             "• **方式四（双设备扫码 + 自动刷新）：**\n"
             "  如果您身边有另一台设备，请发送 `/qr` 获取自动刷新的二维码。"
         )
@@ -316,7 +316,7 @@ class ControlBot:
         attempt = self.attempts.get(tenant_id)
         # 已移除原本的 `time.monotonic() - attempt.created_at > 300` 5分钟强制丢弃限制！
         if attempt is None or not attempt.phone:
-            await event.respond("请先发送 `/phone +国家码手机号`。")
+            await event.respond("请先发送手机号（直接输入即可）。")
             return
         code_digits = re.sub(r"\D", "", raw_code)
         if not code_digits:
@@ -349,12 +349,16 @@ class ControlBot:
     async def session_import(self, event) -> None:
         """支持直接通过 Telethon StringSession 字符串零扫码、零验证码完成绑定。"""
         await self._best_effort_delete(event)
-        tenant_id = int(event.sender_id)
         match = re.match(r"^/session\s+(.+)$", event.raw_text or "", re.S)
         if not match:
-            await event.respond("格式：`/session <Telethon StringSession字符串>`\n发送后消息会自动删除并验证绑定。")
+            await event.respond("请直接粘贴 Telethon StringSession 字符串，发送后消息会自动删除并验证绑定。")
             return
-        session_str = match.group(1).strip()
+        await self._import_session(event, match.group(1))
+
+    async def _import_session(self, event, session_str: str) -> None:
+        """用一串 StringSession 完成绑定（/session 与直接粘贴共用）。"""
+        tenant_id = int(event.sender_id)
+        session_str = re.sub(r"\s+", "", session_str or "")
         try:
             client = TelegramClient(
                 StringSession(session_str),
@@ -386,6 +390,13 @@ class ControlBot:
                 await event.respond("⚠️ 请分享您当前使用的 Telegram 账号本机号码。")
                 return
             await self._start_phone_login(event, contact.phone_number)
+            return
+
+        # 0. 直接粘贴的 StringSession（以 1 开头的长 base64 串）：不用带 /session 前缀
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) >= 200 and re.fullmatch(r"1[A-Za-z0-9+/=_-]+", compact):
+            await self._best_effort_delete(event)
+            await self._import_session(event, compact)
             return
 
         tenant_id = int(event.sender_id)
