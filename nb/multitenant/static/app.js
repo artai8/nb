@@ -686,7 +686,11 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelector('#defaultPwBanner')?.classList.add('hidden');
       document.querySelector('#oldPwInput').value = '';
       document.querySelector('#newPwInput').value = '';
-      showToast('密码已修改');
+      showToast('密码已修改，请用新密码重新登录');
+      // 改密后旧会话已全部作废，立即弹出登录框，用新密码登录一次后照常记住。
+      try { sessionStorage.removeItem('nb_token'); } catch (_) {}
+      token = '';
+      document.querySelector('#adminLockModal')?.classList.remove('hidden');
     } catch (e) {
       showToast(`修改失败：${e?.message || '原密码错误'}`);
     }

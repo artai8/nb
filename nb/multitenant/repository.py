@@ -126,7 +126,9 @@ class MongoRepository:
         return chosen
 
     def change_web_password(self, tenant_id: int, old_password: str, new_password: str) -> bool:
-        """租户自助改网页密码：验旧密码，通过后更新哈希并清除 must_change_password。"""
+        """租户自助改网页密码：验旧密码，通过后更新哈希、清除 must_change_password，
+        并作废该租户全部登录会话——改密后所有已登录的页面都失效，要用新密码重新登录一次
+        （重新登录后会话照常长期记住）。"""
         doc = self.tenants.find_one({"_id": tenant_id})
         if not doc or not doc.get("password_hash"):
             return False
@@ -142,6 +144,7 @@ class MongoRepository:
                 }
             },
         )
+        self.sessions.delete_many({"tenant_id": tenant_id})
         self.audit(tenant_id, "tenant.web_password_changed")
         return True
 
@@ -1305,6 +1308,9 @@ class MongoRepository:
             {"$set": updates, "$setOnInsert": {"created_at": utcnow()}},
             upsert=True,
         )
+        if new_password:
+            # 管理员改了租户密码也一样：作废该租户全部登录会话，要用新密码重新登录一次。
+            self.sessions.delete_many({"tenant_id": tenant_id})
         doc = self.tenants.find_one({"_id": tenant_id}) or {"_id": tenant_id}
         doc["tenant_id"] = doc.pop("_id")
         doc.pop("password_hash", None)
