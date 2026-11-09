@@ -217,21 +217,18 @@ async def get_discussion_message(client, channel_id, msg_id):
     return None
 
 
-async def _collect_discussion_comments(client, channel_id, post_id, settings: BotMediaSettings):
-    """Return (disc_msg, comments, keyword_hint).
+async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettings):
+    """Iterate replies to ``reply_to`` in ``peer``; return (comments, keyword_hint).
 
     keyword_hint is the first trimmed comment text whose count reaches 5
-    (collection stops early once one does).
+    (collection stops early once one does). Failures return ([], None).
     """
-    disc_msg = await get_discussion_message(client, channel_id, post_id)
-    if disc_msg is None:
-        return None, [], None
     comments = []
     counts = {}
     keyword_hint = None
     try:
         async for comment in client.iter_messages(
-            disc_msg.chat_id, reply_to=disc_msg.id,
+            peer, reply_to=reply_to,
             reverse=True, limit=settings.recent_limit,
         ):
             if isinstance(comment, MessageService):
@@ -247,10 +244,80 @@ async def _collect_discussion_comments(client, channel_id, post_id, settings: Bo
                     break
     except Exception as e:
         logger.warning(
-            "bot media: discussion comments failed post=%s: %s", post_id, e
+            "bot media: comment replies failed peer=%s reply_to=%s: %s",
+            peer, reply_to, e,
         )
-        return disc_msg, [], None
+        return [], None
+    return comments, keyword_hint
+
+
+async def _collect_discussion_comments(client, channel_id, post_id, settings: BotMediaSettings):
+    """Return (disc_msg, comments, keyword_hint).
+
+    keyword_hint is the first trimmed comment text whose count reaches 5
+    (collection stops early once one does).
+
+    The channel post is read first (GetRepliesRequest on the channel
+    peer): for album posts GetDiscussionMessageRequest returns the
+    mirror of the LAST photo while the comment thread is rooted at the
+    FIRST photo's mirror, so reading through the mirror can raise
+    MSG_ID_INVALID and yield nothing. The mirror read is kept only as
+    a fallback, used when the channel-peer read fails or finds nothing.
+    """
+    disc_msg = await get_discussion_message(client, channel_id, post_id)
+    comments, keyword_hint = await _read_comment_replies(
+        client, channel_id, post_id, settings
+    )
+    if comments:
+        return disc_msg, comments, keyword_hint
+    if disc_msg is None:
+        return None, [], None
+    comments, keyword_hint = await _read_comment_replies(
+        client, disc_msg.chat_id, disc_msg.id, settings
+    )
     return disc_msg, comments, keyword_hint
+
+
+def _thread_root_msg_id(comments):
+    """Most common reply_to_msg_id among the comments: the discussion
+    thread's real root. Top-level comments reply to the thread root, so
+    the most frequent value is the root even when a few comments are
+    nested replies to other comments."""
+    counts = {}
+    order = []
+    for comment in comments:
+        root = _get_reply_to_msg_id(comment)
+        if root is None:
+            continue
+        if root not in counts:
+            counts[root] = 0
+            order.append(root)
+        counts[root] += 1
+    best = None
+    best_count = 0
+    for root in order:
+        if counts[root] > best_count:
+            best = root
+            best_count = counts[root]
+    return best
+
+
+def _keyword_post_target(disc_msg, comments):
+    """(chat_id, reply_to_msg_id) for posting the keyword comment.
+
+    Prefer the thread root the comments themselves reply to; fall back
+    to the discussion mirror. The mirror can be the wrong photo of an
+    album, and a keyword comment posted as a reply to it never reaches
+    the bot watching the real thread.
+    """
+    root = _thread_root_msg_id(comments) if comments else None
+    if root is not None and comments:
+        chat_id = getattr(comments[0], "chat_id", None)
+        if chat_id is not None:
+            return chat_id, root
+    if disc_msg is not None:
+        return getattr(disc_msg, "chat_id", None), getattr(disc_msg, "id", None)
+    return None, None
 
 
 def _find_common_comment_keyword(comments) -> Optional[str]:
@@ -386,19 +453,32 @@ class BotMediaResolver:
 
     async def _collect_start_links_from_keyword_reply(self, client, disc_msg, keyword,
                                                       settings: BotMediaSettings,
-                                                      send_keyword: bool = True):
+                                                      send_keyword: bool = True,
+                                                      post_target=None):
         """Post ``keyword`` as a reply in the discussion group (unless
         send_keyword is False) and poll for a bot reply carrying start
         links. Buttons/markup first, then text/entities. The keyword
         comment is posted from the bound user account, as in the original.
+
+        ``post_target`` is an optional (chat_id, reply_to_msg_id) pair
+        for the keyword comment; when omitted the discussion mirror
+        (disc_msg.chat_id, disc_msg.id) is used. Callers pass the real
+        thread root here, since the mirror can be the wrong photo of an
+        album post.
         """
-        latest = await client.get_messages(disc_msg.chat_id, limit=1)
+        if post_target is not None:
+            thread_chat_id, thread_root_id = post_target
+        elif disc_msg is not None:
+            thread_chat_id, thread_root_id = disc_msg.chat_id, disc_msg.id
+        else:
+            return []
+        latest = await client.get_messages(thread_chat_id, limit=1)
         last_id = latest[0].id if latest else 0
         request_msg_id = None
         if send_keyword:
             try:
                 sent = await client.send_message(
-                    disc_msg.chat_id, keyword, reply_to=disc_msg.id
+                    thread_chat_id, keyword, reply_to=thread_root_id
                 )
                 request_msg_id = getattr(sent, "id", None)
             except Exception:
@@ -412,7 +492,7 @@ class BotMediaResolver:
         start = asyncio.get_running_loop().time()
         while True:
             responses = await self._collect_new_messages(
-                client, disc_msg.chat_id, last_id, wait_timeout, settings
+                client, thread_chat_id, last_id, wait_timeout, settings
             )
             if responses:
                 last_id = max(m.id for m in responses)
@@ -451,11 +531,15 @@ class BotMediaResolver:
         keyword = _trim_keyword(keyword or "")
         if not keyword:
             return []
-        disc_msg = await get_discussion_message(client, channel_id, post_id)
-        if disc_msg is None:
+        disc_msg, comments, _hint = await _collect_discussion_comments(
+            client, channel_id, post_id, settings
+        )
+        post_target = _keyword_post_target(disc_msg, comments)
+        if post_target[0] is None:
             return []
         links = await self._collect_start_links_from_keyword_reply(
-            client, disc_msg, keyword, settings, send_keyword=True
+            client, disc_msg, keyword, settings, send_keyword=True,
+            post_target=post_target,
         )
         if not links:
             return []
@@ -474,9 +558,11 @@ class BotMediaResolver:
         )
         if not comments:
             return []
-        if keyword_hint and disc_msg is not None:
+        post_target = _keyword_post_target(disc_msg, comments)
+        if keyword_hint and post_target[0] is not None:
             links = await self._collect_start_links_from_keyword_reply(
-                client, disc_msg, keyword_hint, settings
+                client, disc_msg, keyword_hint, settings,
+                post_target=post_target,
             )
             items = await self._collect_from_start_links(client, links, settings)
             if items:
@@ -496,11 +582,12 @@ class BotMediaResolver:
             items = await self._collect_from_start_links(client, all_links, settings)
             if items:
                 return items
-        if settings.comment_keyword_from_comments_enabled and disc_msg is not None:
+        if settings.comment_keyword_from_comments_enabled and post_target[0] is not None:
             keyword = _find_common_comment_keyword(comments)
             if keyword:
                 links = await self._collect_start_links_from_keyword_reply(
-                    client, disc_msg, keyword, settings
+                    client, disc_msg, keyword, settings,
+                    post_target=post_target,
                 )
                 items = await self._collect_from_start_links(client, links, settings)
                 if items:
