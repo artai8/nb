@@ -83,9 +83,23 @@ class ControlBot:
         sender = await event.get_sender()
         name = " ".join(part for part in [sender.first_name, sender.last_name] if part)
         self.repo.upsert_tenant(sender.id, username=sender.username or "", display_name=name)
+        url = f"{self.settings.public_base_url}/miniapp" if self.settings.public_base_url else ""
+        account = self.repo.get_account(int(sender.id))
+        if account and str(account.get("status", "active")) in ("active", "reauth_required"):
+            # 已绑定：不再展示登录步骤，直接给控制台入口（两个都是内联按钮，可以同框）。
+            buttons = []
+            if url:
+                buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
+                buttons.append([Button.url("🌐 打开 Web 后台", url)])
+            await event.respond(
+                "✅ **您的账号已经绑定，可以直接使用控制台配置转发任务。**\n\n"
+                "`/status` 查看账号与任务状态\n"
+                "`/logout` 解绑并删除全部数据",
+                buttons=buttons,
+            )
+            return
         buttons = []
-        if self.settings.public_base_url:
-            url = f"{self.settings.public_base_url}/miniapp"
+        if url:
             buttons.append([KeyboardButtonWebView("🚀 打开 Liquid Glass 控制台 (Mini App)", url)])
         # 注意：Telethon 不允许同一条消息混用内联按钮（WebView）和普通键盘按钮
         # （request_phone），混用会抛 ValueError 导致整条回复发不出去，所以这里只保留 WebView；
