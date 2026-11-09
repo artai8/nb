@@ -15,12 +15,12 @@ class NbFilter(NbPlugin):
         if not self.filters.check:
             return tm
 
-        # 1. Users filter
-        if tm.sender_id:
-            if self.filters.users.blacklist and tm.sender_id in self.filters.users.blacklist:
-                return None
-            if self.filters.users.whitelist and tm.sender_id not in self.filters.users.whitelist:
-                return None
+        # 1. Users filter (no sender_id guard: a channel post has an empty
+        # sender_id, and it must NOT slip past a non-empty whitelist)
+        if self.filters.users.blacklist and tm.sender_id in self.filters.users.blacklist:
+            return None
+        if self.filters.users.whitelist and tm.sender_id not in self.filters.users.whitelist:
+            return None
 
         # 2. Files filter
         f_black = [x.value if hasattr(x, "value") else str(x) for x in self.filters.files.blacklist]

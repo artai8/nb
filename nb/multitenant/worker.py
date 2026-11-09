@@ -34,7 +34,14 @@ from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, UserAlread
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, GetDiscussionMessageRequest
-from telethon.tl.types import Channel, ChatInviteAlready, MessageService
+from telethon.tl.types import (
+    Channel,
+    ChatInviteAlready,
+    InputMediaUploadedDocument,
+    InputMediaUploadedPhoto,
+    MessageMediaPhoto,
+    MessageService,
+)
 
 from nb.plugins import PluginPipeline
 
@@ -646,18 +653,24 @@ class TenantWorker:
         """
         assert self.client is not None
         media_templates = [template for template in templates if getattr(template.message, "media", None)]
+        # Inline buttons are only sent when the inline plugin is on (its mode
+        # already transformed or removed them); otherwise they are dropped,
+        # as in the original (stale buttons cause send errors).
+        buttons_on = bool(getattr(task.plugins.inline, "check", False))
         sent: list = []
         if media_templates:
             captions = [template.text or "" for template in media_templates]
             for group in _chunks(media_templates):
-                files = [template.new_file or template.message.media for template in group]
+                files = [await self._file_for_send(t) for t in group]
                 group_captions = captions[:len(group)]
                 captions = captions[len(group):]
+                buttons = group[-1].reply_markup if buttons_on else None
                 result = await self.client.send_file(
                     destination,
                     files,
                     caption=group_captions,
                     reply_to=reply_to,
+                    buttons=buttons,
                 )
                 results = result if isinstance(result, list) else [result]
                 sent.extend(zip(group, results))
@@ -666,15 +679,43 @@ class TenantWorker:
             for template in templates:
                 if not template.text:
                     continue
+                buttons = template.reply_markup if buttons_on else None
                 result = await self.client.send_message(
                     destination,
                     template.text,
                     reply_to=reply_to,
                     link_preview=False,
+                    buttons=buttons,
                 )
                 sent.append((template, result))
                 reply_to = None
         return sent
+
+    async def _file_for_send(self, template):
+        """File argument for send_file, preserving the spoiler flag.
+
+        Unrewritten media goes by reference (Telethon reads media.spoiler
+        when building the InputMedia). A rewritten file (new_file) is
+        uploaded and wrapped in an InputMedia with spoiler=True when the
+        template is spoiler-marked, because a bare path upload drops the flag.
+        """
+        media = getattr(template.message, "media", None)
+        spoiler = bool(media is not None and getattr(media, "spoiler", False))
+        new_file = getattr(template, "new_file", None)
+        if not new_file:
+            return template.message.media
+        if not spoiler:
+            return new_file
+        uploaded = await self.client.upload_file(new_file)
+        if isinstance(media, MessageMediaPhoto):
+            return InputMediaUploadedPhoto(file=uploaded, spoiler=True)
+        doc = getattr(media, "document", None)
+        return InputMediaUploadedDocument(
+            file=uploaded,
+            mime_type=getattr(doc, "mime_type", None) or "application/octet-stream",
+            attributes=list(getattr(doc, "attributes", []) or []),
+            spoiler=True,
+        )
 
     async def _discussion_group_id(self, channel_id: int) -> Optional[int]:
         assert self.client is not None

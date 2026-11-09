@@ -1,6 +1,7 @@
 """Regex and literal text replacement plugin."""
 
 import re
+from nb.plugin_models import STYLE_CODES
 from nb.plugins import NbMessage, NbPlugin
 
 
@@ -24,7 +25,15 @@ class NbReplace(NbPlugin):
         for pattern, repl in mapping.items():
             if not pattern:
                 continue
-            if self.replace.regex:
+            if repl in STYLE_CODES:
+                # style-name replacement: wrap the matched text in the style
+                # markers instead of inserting the style name literally
+                code = STYLE_CODES[repl]
+                if self.replace.regex:
+                    text = re.sub(pattern, lambda m: f"{code}{m.group(0)}{code}", text)
+                else:
+                    text = text.replace(pattern, f"{code}{pattern}{code}")
+            elif self.replace.regex:
                 text = re.sub(pattern, repl, text)
             else:
                 text = text.replace(pattern, repl)

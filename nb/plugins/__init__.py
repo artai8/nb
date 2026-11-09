@@ -9,6 +9,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+from telethon.tl.types import (
+    KeyboardButtonCallback,
+    KeyboardButtonRow,
+    KeyboardButtonSwitchInline,
+    KeyboardButtonUrl,
+    ReplyInlineMarkup,
+)
+
 from nb.plugin_models import InlineButtonMode, PluginConfig, STYLE_CODES, Style
 from nb.utils import cleanup
 
@@ -78,18 +86,84 @@ from .replace import NbReplace
 from .spoiler import NbSpoiler
 
 
+def _replace_in_string(original: str, replacements: dict) -> str:
+    result = original or ""
+    for old, new in (replacements or {}).items():
+        if old:
+            result = result.replace(old, new)
+    return result
+
+
+def _parse_replacements_raw(raw: str) -> dict:
+    mapping: dict = {}
+    for line in (raw or "").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            if k.strip():
+                mapping[k.strip()] = v.strip()
+    return mapping
+
+
 class NbInlineButtons(NbPlugin):
     id_ = "inline"
 
     def __init__(self, data) -> None:
         self.cfg = data
+        self.url_replacements = dict(data.url_replacements or {})
+        if not self.url_replacements and data.url_replacements_raw:
+            self.url_replacements = _parse_replacements_raw(data.url_replacements_raw)
+        self.text_replacements = dict(data.text_replacements or {})
+        if not self.text_replacements and data.text_replacements_raw:
+            self.text_replacements = _parse_replacements_raw(data.text_replacements_raw)
 
     def modify(self, tm: NbMessage) -> Optional[NbMessage]:
         if not self.cfg.check:
             return tm
-        if self.cfg.mode == InlineButtonMode.REMOVE:
-            tm.reply_markup = None
+        tm.reply_markup = self._process_markup(tm.reply_markup)
         return tm
+
+    def _process_markup(self, reply_markup):
+        if reply_markup is None:
+            return None
+        if not isinstance(reply_markup, ReplyInlineMarkup):
+            return None  # non-inline markup (e.g. reply keyboard) is dropped
+        if self.cfg.mode == InlineButtonMode.REMOVE:
+            return None
+        new_rows = []
+        for row in reply_markup.rows:
+            new_buttons = []
+            for button in row.buttons:
+                processed = self._process_button(button)
+                if processed is not None:
+                    new_buttons.append(processed)
+            if new_buttons:
+                new_rows.append(KeyboardButtonRow(buttons=new_buttons))
+        if not new_rows:
+            return None
+        return ReplyInlineMarkup(rows=new_rows)
+
+    def _process_button(self, button):
+        btn_text = button.text or ""
+        if self.cfg.mode == InlineButtonMode.REPLACE_ALL and self.text_replacements:
+            btn_text = _replace_in_string(btn_text, self.text_replacements)
+        if isinstance(button, KeyboardButtonUrl):
+            url = button.url or ""
+            if self.url_replacements:
+                url = _replace_in_string(url, self.url_replacements)
+            return KeyboardButtonUrl(text=btn_text, url=url)
+        if isinstance(button, KeyboardButtonCallback):
+            if self.cfg.mode == InlineButtonMode.REPLACE_ALL:
+                return KeyboardButtonCallback(text=btn_text, data=button.data)
+            return button
+        if isinstance(button, KeyboardButtonSwitchInline):
+            if self.cfg.mode == InlineButtonMode.REPLACE_ALL:
+                return KeyboardButtonSwitchInline(
+                    text=btn_text,
+                    query=button.query,
+                    same_peer=getattr(button, "same_peer", False),
+                )
+            return button
+        return button
 
 
 @dataclass
@@ -119,10 +193,10 @@ class PluginPipeline:
             self.plugins.append(NbCaption(self.config.caption))
         if self.config.fmt.check:
             self.plugins.append(NbFmt(self.config.fmt))
-        if self.config.spoiler.check:
-            self.plugins.append(NbSpoiler(self.config.spoiler))
         if self.config.mark.check:
             self.plugins.append(NbMark(self.config.mark))
+        if self.config.spoiler.check:
+            self.plugins.append(NbSpoiler(self.config.spoiler))
         if self.config.inline.check:
             self.plugins.append(NbInlineButtons(self.config.inline))
 
@@ -158,15 +232,59 @@ class PluginPipeline:
         *,
         skip_plugins: Optional[List[str]] = None,
         fail_open: bool = False,
+        base_text: Optional[str] = None,
     ) -> List[NbMessage]:
-        results: List[NbMessage] = []
-        for msg in messages:
-            applied = await self.apply(msg, skip_plugins=skip_plugins)
-            if applied is not None:
-                results.append(applied)
-            elif fail_open:
-                results.append(NbMessage(msg, download_dir=self.download_dir))
-        return results
+        """Apply the pipeline to a group (album): plugins that define
+        ``modify_group`` see the whole group at once (caption adds its
+        header/footer only once per group); the rest run per message.
+        One failing plugin is skipped, never fatal to the group. If every
+        message is filtered out and fail_open is set, the originals are
+        restored and sent unfiltered.
+        """
+        if not self.plugins and any(
+            getattr(getattr(self.config, k, None), "check", False)
+            for k in ["filter", "ocr", "replace", "caption", "fmt", "spoiler", "mark", "inline"]
+        ):
+            await self.initialize()
+        tms: List[NbMessage] = [
+            m if isinstance(m, NbMessage) else NbMessage(m, download_dir=self.download_dir)
+            for m in messages
+        ]
+        if base_text and tms:
+            tms[0].text = base_text
+            tms[0].raw_text = base_text
+        skip = set(skip_plugins or [])
+        for plugin in self.plugins:
+            if plugin.id_ in skip:
+                continue
+            try:
+                if hasattr(plugin, "modify_group"):
+                    res = plugin.modify_group(tms)
+                    if inspect.isawaitable(res):
+                        res = await res
+                    tms = list(res) if res is not None else []
+                else:
+                    new_tms: List[NbMessage] = []
+                    for tm in tms:
+                        res = plugin.modify(tm)
+                        if inspect.isawaitable(res):
+                            res = await res
+                        if res is not None:
+                            new_tms.append(res)
+                    tms = new_tms
+            except Exception:
+                log.exception("Plugin %s failed on group, skipping plugin", plugin.id_)
+                continue
+            tms = [tm for tm in tms if tm]
+        if fail_open and not tms:
+            tms = [
+                m if isinstance(m, NbMessage) else NbMessage(m, download_dir=self.download_dir)
+                for m in messages
+            ]
+            if base_text and tms:
+                tms[0].text = base_text
+                tms[0].raw_text = base_text
+        return tms
 
     def dry_run_text(self, sample_text: str, *, file_type: str = "nofile", sender: str = "") -> DryRunPreviewResult:
         """插件沙盒实时测试器：无需等待频道发消息，直接测试过滤、替换、页眉页脚与排版效果。"""
@@ -230,20 +348,20 @@ class PluginPipeline:
                         if k.strip():
                             mapping[k.strip()] = v.strip()
             for pat, rep in mapping.items():
-                if r_cfg.regex:
+                if not pat:
+                    continue
+                if rep in STYLE_CODES:
+                    code = STYLE_CODES[rep]
+                    if r_cfg.regex:
+                        text = re.sub(pat, lambda m: f"{code}{m.group(0)}{code}", text)
+                    else:
+                        text = text.replace(pat, f"{code}{pat}{code}")
+                elif r_cfg.regex:
                     text = re.sub(pat, rep, text)
                 else:
                     text = text.replace(pat, rep)
 
-        # 3. Format
-        fmt_cfg = self.config.fmt
-        if fmt_cfg.check and fmt_cfg.style != Style.PRESERVE and text:
-            result.applied_plugins.append(f"fmt({fmt_cfg.style.value})")
-            code = STYLE_CODES.get(fmt_cfg.style.value, "")
-            if code:
-                text = f"{code}{text}{code}"
-
-        # 4. Caption
+        # 3. Caption (before fmt, same as the real pipeline)
         c_cfg = self.config.caption
         if c_cfg.check:
             result.applied_plugins.append("caption")
@@ -251,6 +369,14 @@ class PluginPipeline:
                 text = f"{c_cfg.header}\n{text}".strip()
             if c_cfg.footer:
                 text = f"{text}\n{c_cfg.footer}".strip()
+
+        # 4. Format
+        fmt_cfg = self.config.fmt
+        if fmt_cfg.check and fmt_cfg.style != Style.PRESERVE and text:
+            result.applied_plugins.append(f"fmt({fmt_cfg.style.value})")
+            code = STYLE_CODES.get(fmt_cfg.style.value, "")
+            if code:
+                text = f"{code}{text}{code}"
 
         # 5. Spoiler
         if self.config.spoiler.check:
