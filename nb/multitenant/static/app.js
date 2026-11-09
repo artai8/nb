@@ -380,15 +380,19 @@ function renderTasks() {
 function applyBoundState(me) {
   const bound = Boolean(me?.account);
   const authTabBtn = document.querySelector('#authTabBtn');
+  const tasksTabBtn = document.querySelector('.segment-btn[data-tab="tasksView"]');
+  const streamTabBtn = document.querySelector('.segment-btn[data-tab="streamView"]');
   const lockBtn = document.querySelector('#lockScreenBtn');
   const badge = document.querySelector('#loggedInBadge');
   const banner = document.querySelector('#defaultPwBanner');
+  const authPanel = document.querySelector('#authView');
   if (bound) {
     accountLabel.textContent = `@${me.account.username || me.tenant_id}`;
     badge?.classList.remove('hidden');
     authTabBtn?.classList.add('hidden');
+    tasksTabBtn?.classList.remove('hidden');
+    streamTabBtn?.classList.remove('hidden');
     lockBtn?.classList.add('hidden');
-    const authPanel = document.querySelector('#authView');
     if (authPanel && !authPanel.classList.contains('hidden')) switchTab('tasksView');
     if (me?.must_change_password) {
       const userSpan = document.querySelector('#defaultPwUser');
@@ -401,13 +405,12 @@ function applyBoundState(me) {
     accountLabel.textContent = me?.username ? `@${me.username}` : `租户 #${me?.tenant_id || '已就绪'}`;
     badge?.classList.add('hidden');
     authTabBtn?.classList.remove('hidden');
+    tasksTabBtn?.classList.add('hidden');
+    streamTabBtn?.classList.add('hidden');
     lockBtn?.classList.remove('hidden');
     banner?.classList.add('hidden');
-    // 未绑定时首次打开默认显示账号绑定页
-    if (!window.__authTabAutoShown) {
-      window.__authTabAutoShown = true;
-      switchTab('authView');
-    }
+    // 未绑定时不显示转发任务与实时转发流水，只留账号绑定页
+    if (authPanel && authPanel.classList.contains('hidden')) switchTab('authView');
   }
 }
 
