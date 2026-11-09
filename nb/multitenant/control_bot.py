@@ -187,9 +187,10 @@ class ControlBot:
                     chat_id,
                     f"📷 **二维码登录（第 {round_idx + 1}/5 次自动保鲜）**\n"
                     f"• 另一台设备：打开 Telegram → 设置 → 设备 → 扫描二维码\n"
-                    f"• 桌面端/跨端直连：`{qr_login.url}`\n"
+                    f"• 点下方按钮直接唤起 Telegram 确认登录，不用扫码\n"
                     f"• 单手机不便扫码？直接发送 `/phone +国家码手机号`",
                     file=buffer,
+                    buttons=[[Button.url("📱 一键唤起 Telegram 确认登录", qr_login.url)]],
                 )
                 try:
                     await qr_login.wait(timeout=35)
