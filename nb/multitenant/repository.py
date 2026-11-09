@@ -125,6 +125,15 @@ class MongoRepository:
         self.audit(tenant_id, "tenant.web_login_created", username=chosen)
         return chosen
 
+    def get_web_login(self, tenant_id: int) -> dict[str, Any]:
+        """返回租户的网页登录信息（用户名、是否仍为默认密码）。
+        密码本身只存哈希，无法取回；仍为默认密码时调用方可用 DEFAULT_WEB_PASSWORD。"""
+        doc = self.tenants.find_one({"_id": tenant_id}) or {}
+        return {
+            "web_username": doc.get("web_username") or "",
+            "must_change_password": bool(doc.get("must_change_password")),
+        }
+
     def change_web_password(self, tenant_id: int, old_password: str, new_password: str) -> bool:
         """租户自助改网页密码：验旧密码，通过后更新哈希、清除 must_change_password，
         并作废该租户全部登录会话——改密后所有已登录的页面都失效，要用新密码重新登录一次

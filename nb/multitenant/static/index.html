@@ -30,7 +30,7 @@
           <span id="loggedInBadge" class="hidden" style="font-size: 0.72rem; font-weight: 800; color: #1d9d63; background: #e6f7ee; border-radius: 999px; padding: 2px 8px; margin-left: 2px;">已登录</span>
         </div>
         <button id="refreshBtn" class="glass-circle-icon" title="刷新数据" type="button">↻</button>
-        <button id="lockScreenBtn" class="glass-circle-icon" title="账号登录 / 注册" type="button">🔒</button>
+        <button id="lockScreenBtn" class="glass-circle-icon" title="账号登录" type="button">🔒</button>
       </div>
     </header>
 
@@ -487,7 +487,7 @@
 
   </div>
 
-  <!-- 登录与新用户注册弹窗 (Login & Registration Gate) -->
+  <!-- 登录弹窗 (Login Gate) -->
   <div id="adminLockModal" class="hidden" style="position:fixed; inset:0; z-index:9000; background:rgba(229,226,236,0.68); backdrop-filter:blur(26px); -webkit-backdrop-filter:blur(26px); display:flex; align-items:center; justify-content:center; padding:18px;">
     <div class="liquid-slab" style="max-width:460px; width:100%; padding:30px 28px; text-align:center;">
       <div class="slab-brand-icon" style="width:54px; height:54px; margin:0 auto 12px; border-radius:18px;">
@@ -497,50 +497,19 @@
         </svg>
       </div>
 
-      <div class="segmented-track" style="margin:0 auto 18px;">
-        <button type="button" class="segment-btn active" data-auth-mode="login" style="padding:7px 20px; font-size:0.84rem;">账号登录</button>
-        <button type="button" class="segment-btn" data-auth-mode="register" style="padding:7px 20px; font-size:0.84rem;">新用户注册</button>
-      </div>
-
       <!-- 登录表单 -->
       <form id="adminGateForm" style="display:flex; flex-direction:column; gap:12px; text-align:left;">
         <div>
-          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">用户名 / 租户 ID</label>
-          <input id="gateUsernameInput" type="text" class="pill-input" required placeholder="输入您的用户名或租户 ID">
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">用户名 (可到 bot 获取）</label>
+          <input id="gateUsernameInput" type="text" class="pill-input" required placeholder="输入您的用户名">
         </div>
         <div>
-          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">登录密码</label>
+          <label style="display:block; font-size:0.8rem; font-weight:700; margin-bottom:5px;">登录密码(可到 bot 获取）</label>
           <input id="gatePasswordInput" type="password" class="pill-input" required placeholder="输入密码">
         </div>
         <button type="submit" class="btn-liquid-primary" style="width:100%; margin-top:4px;">登录进入控制台</button>
       </form>
 
-      <!-- 新用户注册表单 -->
-      <form id="userRegisterForm" class="hidden" style="display:flex; flex-direction:column; gap:10px; text-align:left;">
-        <div>
-          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">设置用户名</label>
-          <input id="regUsernameInput" type="text" class="pill-input" required placeholder="设置登录用户名">
-        </div>
-        <div>
-          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">显示昵称 / 备注</label>
-          <input id="regDisplayInput" type="text" class="pill-input" placeholder="选填，如：运营一组">
-        </div>
-        <div>
-          <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">绑定 Telegram User ID (选填)</label>
-          <input id="regTenantIdInput" type="number" class="pill-input" placeholder="选填，留空自动分配租户号">
-        </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-          <div>
-            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">设置密码</label>
-            <input id="regPasswordInput" type="password" class="pill-input" required placeholder="至少 4 位">
-          </div>
-          <div>
-            <label style="display:block; font-size:0.78rem; font-weight:700; margin-bottom:4px;">确认密码</label>
-            <input id="regConfirmInput" type="password" class="pill-input" required placeholder="再次输入密码">
-          </div>
-        </div>
-        <button type="submit" class="btn-liquid-secondary" style="width:100%; margin-top:4px;">立即注册并进入</button>
-      </form>
     </div>
   </div>
 

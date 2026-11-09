@@ -456,15 +456,6 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => switchEditorSubtab(btn.dataset.editorTab));
   });
 
-  document.querySelectorAll('button[data-auth-mode]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const mode = btn.dataset.authMode;
-      document.querySelectorAll('button[data-auth-mode]').forEach(b => b.classList.toggle('active', b === btn));
-      document.querySelector('#adminGateForm')?.classList.toggle('hidden', mode !== 'login');
-      document.querySelector('#userRegisterForm')?.classList.toggle('hidden', mode !== 'register');
-    });
-  });
-
   document.querySelector('#newTaskBtn')?.addEventListener('click', () => {
     populateTaskForm(null);
     if (editorTitleNode) editorTitleNode.textContent = '新建任务';
@@ -722,30 +713,6 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(`欢迎登录，@${username}`);
   });
 
-  document.querySelector('#userRegisterForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const username = document.querySelector('#regUsernameInput').value.trim();
-    const display_name = document.querySelector('#regDisplayInput').value.trim();
-    const rawTid = document.querySelector('#regTenantIdInput').value.trim();
-    const password = document.querySelector('#regPasswordInput').value;
-    const confirm = document.querySelector('#regConfirmInput').value;
-    if (!username || !password) return showToast('请填写用户名和密码');
-    if (password !== confirm) return showToast('两次输入的密码不一致');
-    const tid = rawTid ? Number(rawTid) : Math.floor(10000 + Math.random() * 90000);
-    try {
-      const res = await apiFetch('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ username, password, display_name, tenant_id: tid })
-      });
-      if (res?.token) {
-        token = res.token;
-        try { sessionStorage.setItem('nb_token', token); } catch (_) {}
-      }
-    } catch (_) {}
-    accountLabel.textContent = `@${username}`;
-    lockModal?.classList.add('hidden');
-    showToast(`注册成功，已登录为 @${username}`);
-  });
 
   // 深度优化 1：拉取已加入频道与群组下拉选择器
   let cachedDialogs = [

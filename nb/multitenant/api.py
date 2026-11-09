@@ -232,35 +232,6 @@ def create_app(
         )
         return SessionResponse(token=token, expires_at=expires_at)
 
-    @app.post("/api/auth/register", response_model=SessionResponse, status_code=201)
-    def register_user(
-        payload: UserRegisterRequest,
-        response: Response,
-    ) -> SessionResponse:
-        try:
-            tid = repo.register_web_tenant(
-                payload.username,
-                payload.password,
-                display_name=payload.display_name,
-                tenant_id=payload.tenant_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        session_exp = expiry(hours=cfg.web_session_hours) if cfg.web_session_hours > 0 else None
-        token, expires_at = repo.create_session(tid, kind="browser", expires_at=session_exp)
-        is_https = cfg.public_base_url.startswith("https://")
-        cookie_max_age = cfg.web_session_hours * 3600 if cfg.web_session_hours > 0 else 315360000
-        response.set_cookie(
-            COOKIE_NAME,
-            token,
-            max_age=cookie_max_age,
-            httponly=True,
-            secure=is_https,
-            samesite="lax",
-            path="/",
-        )
-        return SessionResponse(token=token, expires_at=expires_at)
-
     @app.get("/admin", include_in_schema=False)
     @app.get("/admin/", include_in_schema=False)
     def admin_portal() -> FileResponse:

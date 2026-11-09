@@ -22,7 +22,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 from telethon.tl.types import KeyboardButtonRequestPhone, KeyboardButtonWebView, ReplyKeyboardMarkup, KeyboardButtonRow
 
-from .repository import MongoRepository
+from .repository import DEFAULT_WEB_PASSWORD, MongoRepository
 from .security import SessionCipher, get_telegram_proxy
 from .settings import Settings
 
@@ -48,6 +48,7 @@ _COMMANDS_FULL = [
     ("session", "导入 StringSession"),
     ("app", "打开 Mini App 控制台"),
     ("web", "打开 Web 后台入口"),
+    ("zh", "查看网页登录用户名和密码"),
     ("status", "查看账号与任务状态"),
     ("logout", "解绑并删除全部数据"),
 ]
@@ -55,6 +56,7 @@ _COMMANDS_BOUND = [
     ("start", "开始使用"),
     ("app", "打开 Mini App 控制台"),
     ("web", "打开 Web 后台入口"),
+    ("zh", "查看网页登录用户名和密码"),
     ("status", "查看账号与任务状态"),
     ("logout", "解绑并删除全部数据"),
 ]
@@ -95,6 +97,7 @@ class ControlBot:
         self.bot.add_event_handler(self.session_import, events.NewMessage(pattern=r"^/session(?:\s+(.+))?$", func=private))
         self.bot.add_event_handler(self.app, events.NewMessage(pattern=r"^/app$", func=private))
         self.bot.add_event_handler(self.web, events.NewMessage(pattern=r"^/web$", func=private))
+        self.bot.add_event_handler(self.zh, events.NewMessage(pattern=r"^/zh$", func=private))
         self.bot.add_event_handler(self.status, events.NewMessage(pattern=r"^/status$", func=private))
         self.bot.add_event_handler(self.logout, events.NewMessage(pattern=r"^/logout$", func=private))
         # 处理免前缀验证码/密码输入（明文验证码与两步验证密码直接发送即可）
@@ -140,7 +143,7 @@ class ControlBot:
 
     async def _sync_menu(self, tenant_id: int, bound: bool, peer=None) -> None:
         """按绑定状态同步该私聊的命令菜单（Telegram 支持按聊天单独设置菜单）。
-        已绑定只留 5 个命令，不再显示登录命令；未绑定显示全部 9 个。
+        已绑定只留 6 个命令，不再显示登录命令；未绑定显示全部 10 个。
         菜单同步失败不影响主流程，只记日志。"""
         try:
             from telethon.tl.functions.bots import SetBotCommandsRequest
@@ -467,6 +470,39 @@ class ControlBot:
             "🌐 **Web 后台入口：**\n打开后请在登录 / 注册页登录已有账号或注册新账号。",
             buttons=[[Button.url("✨ 打开 Web 后台", url)]],
         )
+
+    async def zh(self, event) -> None:
+        """查看当前账号的网页登录用户名和密码。
+        账号是 /start 时按 Telegram 用户名自动配的（默认密码 admin123）；
+        密码改过以后只存了哈希，无法取回，只能显示用户名并提示已修改。"""
+        tenant_id = int(event.sender_id)
+        try:
+            sender = await event.get_sender()
+            tg_username = (getattr(sender, "username", "") or "")
+        except Exception:
+            tg_username = ""
+        self.repo.upsert_tenant(tenant_id, username=tg_username)
+        self.repo.ensure_web_login(tenant_id, tg_username)
+        info = self.repo.get_web_login(tenant_id)
+        web_username = info.get("web_username") or ""
+        if not web_username:
+            await event.respond("暂未生成网页登录账号，请先发送 /start 再试一次。")
+            return
+        if info.get("must_change_password"):
+            text = (
+                "🔐 您的网页登录信息：\n"
+                f"用户名：{web_username}\n"
+                f"登录密码：{DEFAULT_WEB_PASSWORD}\n"
+                "（仍是默认密码，请尽快在控制台修改）"
+            )
+        else:
+            text = (
+                "🔐 您的网页登录信息：\n"
+                f"用户名：{web_username}\n"
+                "登录密码：已修改过，无法查看\n"
+                "忘记密码请联系管理员重置。"
+            )
+        await event.respond(text)
 
     async def status(self, event) -> None:
         account = self.repo.get_account(int(event.sender_id))
