@@ -27,16 +27,28 @@
         <div id="accountBadge" class="glass-status-pill" style="padding: 8px 16px;">
           <span class="check-badge-violet">✓</span>
           <span id="accountLabel" style="font-size: 0.86rem; font-weight: 700;">未绑定账号</span>
+          <span id="loggedInBadge" class="hidden" style="font-size: 0.72rem; font-weight: 800; color: #1d9d63; background: #e6f7ee; border-radius: 999px; padding: 2px 8px; margin-left: 2px;">已登录</span>
         </div>
         <button id="refreshBtn" class="glass-circle-icon" title="刷新数据" type="button">↻</button>
         <button id="lockScreenBtn" class="glass-circle-icon" title="账号登录 / 注册" type="button">🔒</button>
       </div>
     </header>
 
+    <!-- 默认密码提醒横幅：网页账号为默认密码 admin123 时显示 -->
+    <div id="defaultPwBanner" class="hidden" style="margin: 14px 0 4px; padding: 14px 16px; border-radius: 16px; background: #fff7e6; border: 1px solid #f5c66b; display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 0.9rem; font-weight: 800; color: #8a5a00;">⚠️ 您正在使用默认密码登录，请尽快修改</div>
+      <div style="font-size: 0.82rem; color: #6b5a2e;">网页账号 <strong id="defaultPwUser"></strong> 的密码仍是默认的 admin123，知道用户名的人可以直接登录，请立即修改。</div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <input id="oldPwInput" type="password" class="pill-input" style="flex: 1; min-width: 140px;" placeholder="原密码（admin123）">
+        <input id="newPwInput" type="password" class="pill-input" style="flex: 1; min-width: 140px;" placeholder="新密码（至少 4 位）">
+        <button id="changePwBtn" type="button" class="btn-liquid-primary" style="padding: 8px 18px;">修改密码</button>
+      </div>
+    </div>
+
     <!-- 精简后的 3 栏主导航 -->
     <nav class="segmented-track" aria-label="主导航">
       <button type="button" class="segment-btn active" data-tab="tasksView">转发任务 (<span id="taskCount">0</span>)</button>
-      <button type="button" class="segment-btn" data-tab="authView">账号登录</button>
+      <button type="button" class="segment-btn" id="authTabBtn" data-tab="authView">账号登录</button>
       <button type="button" class="segment-btn" data-tab="streamView">实时转发流水</button>
     </nav>
 

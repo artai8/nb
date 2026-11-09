@@ -35,6 +35,7 @@ from .models import (
     PluginSandboxResponse,
     UserLoginRequest,
     UserRegisterRequest,
+    ChangePasswordRequest,
     ForwardTask,
     ForwardTaskInput,
     MiniAppAuthRequest,
@@ -341,6 +342,15 @@ def create_app(
         )
         return SessionResponse(token=token, expires_at=expires_at)
 
+    @app.post("/api/auth/change-password")
+    def change_password(
+        payload: ChangePasswordRequest,
+        tenant_id: int = Depends(current_tenant),
+    ) -> dict:
+        if not repo.change_web_password(tenant_id, payload.old_password, payload.new_password):
+            raise HTTPException(status_code=401, detail="原密码错误或账号未设置网页密码")
+        return {"ok": True}
+
     @app.get("/auth/magic/{token}", include_in_schema=False)
     def magic_login(token: str) -> RedirectResponse:
         result = repo.consume_magic_link(
@@ -379,11 +389,14 @@ def create_app(
     def _build_tenant_view(tenant_id: int) -> TenantView:
         account_doc = repo.get_account(tenant_id)
         account_view = AccountView.model_validate(account_doc) if account_doc else None
+        tenant_doc = repo.tenants.find_one({"_id": tenant_id}) or {}
         return TenantView(
             tenant_id=tenant_id,
             is_admin=_is_admin_tenant(tenant_id),
             account_status=account_doc.get("status") if account_doc else None,
             account=account_view,
+            web_username=str(tenant_doc.get("web_username") or ""),
+            must_change_password=bool(tenant_doc.get("must_change_password") or False),
         )
 
     @app.get("/api/me", response_model=TenantView)

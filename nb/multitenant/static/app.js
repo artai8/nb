@@ -377,6 +377,35 @@ function renderTasks() {
   }).join('');
 }
 
+function applyBoundState(me) {
+  const bound = Boolean(me?.account);
+  const authTabBtn = document.querySelector('#authTabBtn');
+  const lockBtn = document.querySelector('#lockScreenBtn');
+  const badge = document.querySelector('#loggedInBadge');
+  const banner = document.querySelector('#defaultPwBanner');
+  if (bound) {
+    accountLabel.textContent = `@${me.account.username || me.tenant_id}`;
+    badge?.classList.remove('hidden');
+    authTabBtn?.classList.add('hidden');
+    lockBtn?.classList.add('hidden');
+    const authPanel = document.querySelector('#authView');
+    if (authPanel && !authPanel.classList.contains('hidden')) switchTab('tasksView');
+    if (me?.must_change_password) {
+      const userSpan = document.querySelector('#defaultPwUser');
+      if (userSpan) userSpan.textContent = me.web_username ? `@${me.web_username}` : '';
+      banner?.classList.remove('hidden');
+    } else {
+      banner?.classList.add('hidden');
+    }
+  } else {
+    accountLabel.textContent = `租户 #${me?.tenant_id || '已就绪'}`;
+    badge?.classList.add('hidden');
+    authTabBtn?.classList.remove('hidden');
+    lockBtn?.classList.remove('hidden');
+    banner?.classList.add('hidden');
+  }
+}
+
 async function syncBackendState() {
   try {
     if (tg?.initData) {
@@ -390,11 +419,7 @@ async function syncBackendState() {
       }
     }
     const me = await apiFetch('/api/me');
-    if (me?.account) {
-      accountLabel.textContent = `@${me.account.username || me.tenant_id}`;
-    } else {
-      accountLabel.textContent = `租户 #${me?.tenant_id || '已就绪'}`;
-    }
+    applyBoundState(me);
     const remoteTasks = await apiFetch('/api/tasks');
     if (Array.isArray(remoteTasks)) {
       tasks = remoteTasks;
@@ -581,6 +606,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const acc = await apiFetch('/api/account/phone/verify', { method: 'POST', body: JSON.stringify({ phone, code, password }) });
       accountLabel.textContent = `@${acc.username || acc.tenant_id}`;
+      syncBackendState();
       showToast('账号绑定成功');
     } catch (_) {
       accountLabel.textContent = phone || '已绑定';
@@ -594,6 +620,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const acc = await apiFetch('/api/account/session', { method: 'POST', body: JSON.stringify({ session_string }) });
       accountLabel.textContent = `@${acc.username || acc.tenant_id}`;
+      syncBackendState();
       showToast('Session 导入成功');
     } catch (_) {
       accountLabel.textContent = '已绑定';
@@ -613,6 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!res.ok) throw new Error('上传失败');
       const acc = await res.json();
       accountLabel.textContent = `@${acc.username || acc.tenant_id}`;
+      syncBackendState();
       showToast('.session 文件绑定成功');
     } catch (_) {
       accountLabel.textContent = '已绑定';
@@ -641,6 +669,23 @@ document.addEventListener('DOMContentLoaded', () => {
         linkNode.classList.remove('hidden');
       }
       showToast('已生成客户端唤起链接');
+    }
+  });
+
+  document.querySelector('#changePwBtn')?.addEventListener('click', async () => {
+    const oldPw = document.querySelector('#oldPwInput')?.value || '';
+    const newPw = document.querySelector('#newPwInput')?.value || '';
+    if (!oldPw || !newPw) return showToast('请填写原密码和新密码');
+    if (newPw.length < 4) return showToast('新密码至少 4 位');
+    if (oldPw === newPw) return showToast('新密码不能和原密码相同');
+    try {
+      await apiFetch('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ old_password: oldPw, new_password: newPw }) });
+      document.querySelector('#defaultPwBanner')?.classList.add('hidden');
+      document.querySelector('#oldPwInput').value = '';
+      document.querySelector('#newPwInput').value = '';
+      showToast('密码已修改');
+    } catch (e) {
+      showToast(`修改失败：${e?.message || '原密码错误'}`);
     }
   });
 

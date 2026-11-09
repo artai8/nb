@@ -171,6 +171,8 @@ class TenantView(BaseModel):
     is_admin: bool = False
     account_status: Optional[AccountStatus] = None
     account: Optional[AccountView] = None
+    web_username: str = ""
+    must_change_password: bool = False
 
 
 class MiniAppAuthRequest(BaseModel):
@@ -214,6 +216,11 @@ class UserRegisterRequest(BaseModel):
 class UserLoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=80)
     password: str = Field(..., min_length=1, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=4, max_length=128)
 
 
 class AdminTenantUpdateRequest(BaseModel):

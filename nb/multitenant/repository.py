@@ -30,6 +30,9 @@ class RevisionConflict(RuntimeError):
     pass
 
 
+DEFAULT_WEB_PASSWORD = "admin123"
+
+
 class MongoRepository:
     def __init__(self, uri: str, database: str, *, client=None) -> None:
         self.client = client or MongoClient(uri, tz_aware=True)
@@ -90,6 +93,58 @@ class MongoRepository:
             upsert=True,
         )
 
+    def ensure_web_login(self, tenant_id: int, username: str = "") -> Optional[str]:
+        """绑定 Telegram 账号时自动配一个网页登录账号。
+        用户名优先用 Telegram 用户名，密码默认 admin123，并标记 must_change_password。
+        该租户已有网页账号时不动；用户名被别的租户占了就用 tg<tenant_id> 兜底。
+        返回最终的网页用户名，实在配不出时返回 None。"""
+        doc = self.tenants.find_one({"_id": tenant_id}, {"web_username": 1})
+        if doc and doc.get("web_username"):
+            return str(doc["web_username"])
+        base = (username or "").strip().lstrip("@").lower()
+        candidates = [c for c in [base, f"tg{tenant_id}"] if c]
+        chosen: Optional[str] = None
+        for cand in candidates:
+            other = self.tenants.find_one({"web_username": cand})
+            if other is None or int(other["_id"]) == int(tenant_id):
+                chosen = cand
+                break
+        if chosen is None:
+            return None
+        self.tenants.update_one(
+            {"_id": tenant_id},
+            {
+                "$set": {
+                    "web_username": chosen,
+                    "password_hash": hash_password(DEFAULT_WEB_PASSWORD),
+                    "must_change_password": True,
+                    "updated_at": utcnow(),
+                }
+            },
+        )
+        self.audit(tenant_id, "tenant.web_login_created", username=chosen)
+        return chosen
+
+    def change_web_password(self, tenant_id: int, old_password: str, new_password: str) -> bool:
+        """租户自助改网页密码：验旧密码，通过后更新哈希并清除 must_change_password。"""
+        doc = self.tenants.find_one({"_id": tenant_id})
+        if not doc or not doc.get("password_hash"):
+            return False
+        if not verify_password(old_password, str(doc["password_hash"])):
+            return False
+        self.tenants.update_one(
+            {"_id": tenant_id},
+            {
+                "$set": {
+                    "password_hash": hash_password(new_password),
+                    "must_change_password": False,
+                    "updated_at": utcnow(),
+                }
+            },
+        )
+        self.audit(tenant_id, "tenant.web_password_changed")
+        return True
+
     def save_account(
         self,
         tenant_id: int,
@@ -116,6 +171,9 @@ class MongoRepository:
             },
             upsert=True,
         )
+        # 绑定 Telegram 账号时自动配一个网页登录账号（用户名用 Telegram 用户名），
+        # 密码默认 admin123，并标记 must_change_password，提醒用户尽快改密。
+        self.ensure_web_login(tenant_id, username)
         self.audit(tenant_id, "account.bound")
 
     def get_account(self, tenant_id: int) -> Optional[Dict[str, Any]]:
