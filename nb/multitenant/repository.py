@@ -44,6 +44,7 @@ class MongoRepository:
         self.leases: Collection = self.db.worker_leases
         self.sessions: Collection = self.db.web_sessions
         self.deliveries: Collection = self.db.delivery_records
+        self.comment_links: Collection = self.db.comment_links
         self.audit_events: Collection = self.db.audit_events
         self.rate_limits: Collection = self.db.auth_rate_limits
         self.fs = gridfs.GridFS(self.db, collection="watermark_assets")
@@ -67,6 +68,25 @@ class MongoRepository:
         self.sessions.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
         self.deliveries.create_index([("delivery_key", ASCENDING)], unique=True)
         self.deliveries.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+        self.comment_links.create_index(
+            [
+                ("tenant_id", ASCENDING),
+                ("task_id", ASCENDING),
+                ("discussion_id", ASCENDING),
+                ("top_id", ASCENDING),
+            ],
+            unique=True,
+        )
+        # lookups for edit/delete/reply/comment mapping (find_sent_message)
+        self.deliveries.create_index(
+            [
+                ("tenant_id", ASCENDING),
+                ("task_id", ASCENDING),
+                ("source_peer_id", ASCENDING),
+                ("destination_peer_id", ASCENDING),
+                ("state", ASCENDING),
+            ]
+        )
         self.audit_events.create_index([("tenant_id", ASCENDING), ("created_at", -1)])
         self.rate_limits.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
@@ -1109,6 +1129,51 @@ class MongoRepository:
 
     def release_delivery(self, delivery_key: str) -> None:
         self.deliveries.delete_one({"delivery_key": delivery_key, "state": "sending"})
+
+    def save_comment_link(
+        self,
+        tenant_id: int,
+        task_id: str,
+        discussion_id: int,
+        top_id: int,
+        channel_post_id: int,
+    ) -> None:
+        """Record that discussion message ``top_id`` mirrors channel post
+        ``channel_post_id`` (seen via fwd_from.channel_post)."""
+        self.comment_links.update_one(
+            {
+                "tenant_id": tenant_id,
+                "task_id": task_id,
+                "discussion_id": discussion_id,
+                "top_id": int(top_id),
+            },
+            {
+                "$set": {
+                    "channel_post_id": int(channel_post_id),
+                    "updated_at": utcnow(),
+                },
+                "$setOnInsert": {"created_at": utcnow()},
+            },
+            upsert=True,
+        )
+
+    def get_comment_link(
+        self,
+        tenant_id: int,
+        task_id: str,
+        discussion_id: int,
+        top_id: int,
+    ) -> Optional[int]:
+        doc = self.comment_links.find_one(
+            {
+                "tenant_id": tenant_id,
+                "task_id": task_id,
+                "discussion_id": discussion_id,
+                "top_id": int(top_id),
+            },
+            {"channel_post_id": 1},
+        )
+        return int(doc["channel_post_id"]) if doc else None
 
     def find_sent_message(
         self,

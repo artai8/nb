@@ -66,8 +66,6 @@ class TaskRuntime:
     task: ForwardTask
     pipeline: PluginPipeline
     temp_dir: Path
-    post_mapping: dict[tuple[int, int, int], int] = field(default_factory=dict)
-    message_mapping: dict[tuple[int, int, int], int] = field(default_factory=dict)
     comment_destinations: list[int] = field(default_factory=list)
     source_discussion_id: Optional[int] = None
     # monotonic timestamp before which this task must not send again (live).
@@ -583,9 +581,27 @@ class TenantWorker:
             ):
                 continue
             try:
-                sent = await self._send_templates(task, destination.peer_id, templates)
-                sent_id = _message_id(sent)
-                await self.db(self.repo.mark_delivery_sent, delivery_key, sent_id)
+                reply_to = await self._resolve_reply_to(
+                    runtime, source_id, messages, destination.peer_id
+                )
+                sent = await self._send_templates(
+                    task, destination.peer_id, templates, reply_to=reply_to
+                )
+                sent_id = _message_id([m for _, m in sent])
+                # Note: message_map keys are the *source* ids; each template
+                # wraps its source message (template.message.id).
+                message_map = {
+                    str(t.message.id): int(m.id)
+                    for t, m in sent
+                    if getattr(t.message, "id", None) is not None
+                    and getattr(m, "id", None) is not None
+                }
+                await self.db(
+                    self.repo.mark_delivery_sent,
+                    delivery_key,
+                    sent_id,
+                    message_map=message_map,
+                )
                 if sent_id:
                     sent_count += 1
             except Exception:
@@ -597,10 +613,40 @@ class TenantWorker:
             runtime.next_send_at = time.monotonic() + _random_send_interval()
         return sent_count
 
+    async def _resolve_reply_to(
+        self, runtime: TaskRuntime, source_id: int, messages: list, dest_peer_id: int
+    ):
+        """Map a source message's reply target to the matching destination message.
+
+        Returns None when the group does not reply to anything, or when the
+        replied-to post was never forwarded here (filtered / not yet sent) --
+        the message then goes out as a top-level post rather than threading
+        onto the wrong one.
+        """
+        first = messages[0] if messages else None
+        reply_to = getattr(first, "reply_to", None) if first is not None else None
+        target = getattr(reply_to, "reply_to_msg_id", None) if reply_to is not None else None
+        if not target:
+            return None
+        return await self.db(
+            self.repo.find_sent_message,
+            self.tenant_id,
+            runtime.task.id,
+            source_id,
+            int(target),
+            dest_peer_id,
+        )
+
     async def _send_templates(self, task: ForwardTask, destination: int, templates: list, *, reply_to=None):
+        """Send templates; return (template, sent_message) pairs in send order.
+
+        The pairs are the source->destination message mapping: each template
+        wraps the original source message (template.message.id), so the caller
+        can persist message_map for reply/edit/delete/comment lookups.
+        """
         assert self.client is not None
         media_templates = [template for template in templates if getattr(template.message, "media", None)]
-        sent = []
+        sent: list = []
         if media_templates:
             captions = [template.text or "" for template in media_templates]
             for group in _chunks(media_templates):
@@ -613,7 +659,8 @@ class TenantWorker:
                     caption=group_captions,
                     reply_to=reply_to,
                 )
-                sent.extend(result if isinstance(result, list) else [result])
+                results = result if isinstance(result, list) else [result]
+                sent.extend(zip(group, results))
                 reply_to = None
         else:
             for template in templates:
@@ -625,7 +672,7 @@ class TenantWorker:
                     reply_to=reply_to,
                     link_preview=False,
                 )
-                sent.append(result)
+                sent.append((template, result))
                 reply_to = None
         return sent
 
@@ -642,13 +689,353 @@ class TenantWorker:
         return None
 
     async def _handle_comments(self, discussion_id: int, messages: list) -> None:
+        """Forward discussion-group comments to the matching destination posts.
+
+        A message here is either a channel-post mirror (``fwd_from.channel_post``:
+        record the discussion->post link, do not forward) or a comment on a post
+        (``reply_to_top_id`` points at the mirror). The destination post comes
+        from the delivery mapping; dest_mode "comments" replies inside the
+        destination post's own discussion thread, "discussion" sends to the
+        configured discussion groups. Comment failures are best-effort: logged,
+        never fatal to the task.
+        """
+        assert self.client is not None
+        routes = list(self.comment_routes.get(discussion_id, []))
+        if not routes:
+            return
+        values = [m for m in messages if not isinstance(m, MessageService)]
+        if not values:
+            return
+        comments: list = []
+        for message in values:
+            fwd = getattr(message, "fwd_from", None)
+            channel_post = getattr(fwd, "channel_post", None) if fwd else None
+            if channel_post:
+                for runtime, _src in routes:
+                    await self.db(
+                        self.repo.save_comment_link,
+                        self.tenant_id,
+                        runtime.task.id,
+                        discussion_id,
+                        int(message.id),
+                        int(channel_post),
+                    )
+                continue
+            comments.append(message)
+        if not comments:
+            return
+        for group in self._group_messages(comments):
+            for runtime, source_peer_id in routes:
+                if runtime.task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
+                    continue
+                try:
+                    await self._forward_comment_group(
+                        runtime, source_peer_id, discussion_id, group
+                    )
+                except FloodWaitError:
+                    raise
+                except Exception:
+                    logging.exception(
+                        "Comment forward failed tenant=%s task=%s",
+                        self.tenant_id,
+                        runtime.task.id,
+                    )
+
+    async def _forward_comment_group(
+        self, runtime: TaskRuntime, source_peer_id: int, discussion_id: int, group: list
+    ) -> None:
+        task = runtime.task
+        cfg = task.comments
+        first = group[0]
+        if cfg.only_media and not getattr(first, "media", None):
+            return
+        if not cfg.include_text_comments and not getattr(first, "media", None):
+            return
+        if cfg.skip_bot_comments:
+            try:
+                sender = await first.get_sender()
+            except Exception:
+                sender = None
+            if sender is not None and getattr(sender, "bot", False):
+                return
+        reply_to = getattr(first, "reply_to", None)
+        top_id = None
+        if reply_to is not None:
+            top_id = getattr(reply_to, "reply_to_top_id", None) or getattr(
+                reply_to, "reply_to_msg_id", None
+            )
+        if top_id is None:
+            return  # not attached to any channel post
+        channel_post_id = await self.db(
+            self.repo.get_comment_link,
+            self.tenant_id,
+            task.id,
+            discussion_id,
+            int(top_id),
+        )
+        if channel_post_id is None:
+            try:
+                top_msg = await self.client.get_messages(discussion_id, ids=int(top_id))
+            except Exception:
+                top_msg = None
+            fwd = getattr(top_msg, "fwd_from", None) if top_msg else None
+            channel_post_id = getattr(fwd, "channel_post", None) if fwd else None
+            if channel_post_id:
+                await self.db(
+                    self.repo.save_comment_link,
+                    self.tenant_id,
+                    task.id,
+                    discussion_id,
+                    int(top_id),
+                    int(channel_post_id),
+                )
+        if channel_post_id is None:
+            return
+        for destination in task.resolved_destinations:
+            dest_post_id = await self.db(
+                self.repo.find_sent_message,
+                self.tenant_id,
+                task.id,
+                source_peer_id,
+                int(channel_post_id),
+                destination.peer_id,
+            )
+            if dest_post_id is None:
+                continue  # source post was never forwarded here
+            if cfg.dest_mode == "discussion":
+                targets = [(peer, None) for peer in runtime.comment_destinations]
+            else:
+                disc = await self._get_discussion_message(
+                    destination.peer_id, dest_post_id
+                )
+                if disc is None:
+                    continue
+                targets = [(disc.chat_id, disc.id)]
+            for dest_chat_id, dest_top_id in targets:
+                await self._send_comment(
+                    runtime, source_peer_id, group, dest_chat_id, dest_top_id
+                )
+
+    async def _get_discussion_message(self, channel_id: int, msg_id: int):
+        try:
+            result = await self.client(
+                GetDiscussionMessageRequest(peer=channel_id, msg_id=msg_id)
+            )
+            if result and result.messages:
+                return result.messages[0]
+        except Exception as exc:
+            logging.warning(
+                "Get discussion message failed channel=%s msg=%s: %s",
+                channel_id,
+                msg_id,
+                exc,
+            )
         return None
+
+    async def _send_comment(
+        self,
+        runtime: TaskRuntime,
+        source_peer_id: int,
+        group: list,
+        dest_chat_id: int,
+        reply_to,
+    ) -> None:
+        task = runtime.task
+        templates = (
+            await runtime.pipeline.apply_group(group)
+            if len(group) > 1
+            else ([t] if (t := await runtime.pipeline.apply(group[0])) else [])
+        )
+        if not templates:
+            return
+        wait = runtime.next_send_at - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        ids = [int(m.id) for m in group]
+        delivery_key = (
+            f"{task.id}:{source_peer_id}:comment:{','.join(str(i) for i in ids)}:{dest_chat_id}"
+        )
+        if not await self.db(
+            self.repo.claim_delivery,
+            delivery_key,
+            self.tenant_id,
+            task.id,
+            source_peer_id=source_peer_id,
+            source_message_ids=ids,
+            destination_peer_id=dest_chat_id,
+        ):
+            return
+        try:
+            sent = await self._send_templates(
+                task, dest_chat_id, templates, reply_to=reply_to
+            )
+            sent_id = _message_id([m for _, m in sent])
+            message_map = {
+                str(t.message.id): int(m.id)
+                for t, m in sent
+                if getattr(t.message, "id", None) is not None
+                and getattr(m, "id", None) is not None
+            }
+            await self.db(
+                self.repo.mark_delivery_sent,
+                delivery_key,
+                sent_id,
+                message_map=message_map,
+            )
+            if sent_id:
+                runtime.next_send_at = time.monotonic() + _random_send_interval()
+        except Exception:
+            await self.db(self.repo.release_delivery, delivery_key)
+            raise
 
     async def _handle_edit(self, event) -> None:
-        return None
+        """Sync a source-post edit to its forwarded copies (live tasks only).
+
+        If the new text is exactly the delete trigger (default ".deleteMe"),
+        delete every forwarded copy and the source message itself. Otherwise
+        re-run the plugins and edit the text on each copy (text only).
+        The trigger is checked on the raw text BEFORE plugins run.
+        """
+        assert self.client is not None
+        message = getattr(event, "message", None)
+        chat_id = getattr(event, "chat_id", None)
+        if message is None or chat_id is None:
+            return
+        src_id = int(getattr(message, "id", 0) or 0)
+        if not src_id:
+            return
+        for runtime in list(self.source_routes.get(chat_id, [])):
+            task = runtime.task
+            if task.mode != TaskMode.LIVE:
+                continue
+            if task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
+                continue
+            try:
+                await self._sync_edit(runtime, chat_id, message, src_id)
+            except FloodWaitError:
+                raise
+            except Exception:
+                logging.exception(
+                    "Edit sync failed tenant=%s task=%s",
+                    self.tenant_id,
+                    task.id,
+                )
+
+    async def _sync_edit(
+        self, runtime: TaskRuntime, chat_id: int, message, src_id: int
+    ) -> None:
+        task = runtime.task
+        trigger = task.live.delete_on_edit or ""
+        raw_text = getattr(message, "text", None) or getattr(message, "raw_text", "") or ""
+        if trigger and raw_text == trigger:
+            for destination in task.resolved_destinations:
+                dest_id = await self.db(
+                    self.repo.find_sent_message,
+                    self.tenant_id,
+                    task.id,
+                    chat_id,
+                    src_id,
+                    destination.peer_id,
+                )
+                if dest_id:
+                    try:
+                        await self.client.delete_messages(destination.peer_id, dest_id)
+                    except Exception:
+                        pass
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+        tm = await runtime.pipeline.apply(message)
+        if tm is None:
+            return
+        try:
+            new_text = tm.text or ""
+            if not new_text:
+                return
+            for destination in task.resolved_destinations:
+                dest_id = await self.db(
+                    self.repo.find_sent_message,
+                    self.tenant_id,
+                    task.id,
+                    chat_id,
+                    src_id,
+                    destination.peer_id,
+                )
+                if not dest_id:
+                    continue
+                try:
+                    await self.client.edit_message(
+                        destination.peer_id, dest_id, new_text
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        "Edit sync failed task=%s dest=%s: %s",
+                        task.id,
+                        destination.peer_id,
+                        exc,
+                    )
+        finally:
+            tm.clear()
 
     async def _handle_delete(self, event) -> None:
-        return None
+        """Sync a source-post deletion to its forwarded copies.
+
+        Only for live tasks with delete_sync on (default off, as in the
+        original). Without the switch, a deletion in the source is ignored.
+        """
+        assert self.client is not None
+        deleted_ids = getattr(event, "deleted_ids", None)
+        if deleted_ids is None:
+            single = getattr(event, "deleted_id", None)
+            deleted_ids = [single] if single is not None else []
+        if not deleted_ids:
+            return
+        chat_id = getattr(event, "chat_id", None)
+        chats = [chat_id] if chat_id is not None else list(self.source_routes.keys())
+        for raw_id in deleted_ids:
+            try:
+                src_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            for cid in chats:
+                for runtime in list(self.source_routes.get(cid, [])):
+                    task = runtime.task
+                    if task.mode != TaskMode.LIVE:
+                        continue
+                    if not task.live.delete_sync:
+                        continue
+                    if task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
+                        continue
+                    try:
+                        await self._sync_delete(runtime, cid, src_id)
+                    except FloodWaitError:
+                        raise
+                    except Exception:
+                        logging.exception(
+                            "Delete sync failed tenant=%s task=%s",
+                            self.tenant_id,
+                            task.id,
+                        )
+
+    async def _sync_delete(self, runtime: TaskRuntime, chat_id: int, src_id: int) -> None:
+        task = runtime.task
+        for destination in task.resolved_destinations:
+            dest_id = await self.db(
+                self.repo.find_sent_message,
+                self.tenant_id,
+                task.id,
+                chat_id,
+                src_id,
+                destination.peer_id,
+            )
+            if not dest_id:
+                continue
+            try:
+                await self.client.delete_messages(destination.peer_id, dest_id)
+            except Exception:
+                pass
 
     async def _schedule_due_jobs(self) -> None:
         now = datetime.now(SHANGHAI)
