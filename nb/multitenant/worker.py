@@ -129,7 +129,7 @@ from telethon.tl.types import (
 
 from nb.plugins import PluginPipeline
 
-from .bot_media import BotMediaResolver, _msg_has_media
+from .bot_media import BotMediaResolver, _collect_discussion_comments, _msg_has_media
 from .models import AccountStatus, ForwardTask, ResolvedEndpoint, TaskMode, TaskStatus
 from .repository import LOG_BUFFER_MAX_LINES, MongoRepository
 from .security import SessionCipher, get_telegram_proxy
@@ -1279,17 +1279,8 @@ class TenantWorker:
         task = runtime.task
         cfg = task.comments
         first = group[0]
-        if cfg.only_media and not getattr(first, "media", None):
-            return
-        if not cfg.include_text_comments and not getattr(first, "media", None):
-            return
-        if cfg.skip_bot_comments:
-            try:
-                sender = await first.get_sender()
-            except Exception:
-                sender = None
-            if sender is not None and getattr(sender, "bot", False):
-                return
+        # Filtering (media-only, skip-bot) lives in _forward_comments_to_dest,
+        # shared with past/schedule; here only the channel post is resolved.
         reply_to = getattr(first, "reply_to", None)
         top_id = None
         if reply_to is not None:
@@ -1340,30 +1331,76 @@ class TenantWorker:
                         task.id, channel_post_id, len(media), len(buf.comment_media),
                     )
             return
-        for destination in task.resolved_destinations:
-            dest_post_id = await self.db(
-                self.repo.find_sent_message,
-                self.tenant_id,
-                task.id,
-                source_peer_id,
-                int(channel_post_id),
-                destination.peer_id,
-            )
-            if dest_post_id is None:
-                continue  # source post was never forwarded here
-            if cfg.dest_mode == "discussion":
-                targets = [(peer, None) for peer in runtime.comment_destinations]
-            else:
-                disc = await self._get_discussion_message(
-                    destination.peer_id, dest_post_id
-                )
-                if disc is None:
+        await self._forward_comments_to_dest(
+            runtime, source_peer_id, int(channel_post_id), group
+        )
+
+    async def _forward_comments_to_dest(
+        self, runtime: TaskRuntime, source_peer_id: int, channel_post_id: int, comments: list
+    ) -> None:
+        """Sync one channel post's discussion comments to its destinations.
+
+        Shared by live comment sync (_forward_comment_group) and by the
+        past/schedule path (_forward_and_save). Only media comments are
+        forwarded -- a media comment's own caption travels with it, but
+        text-only comments are never synced, whatever
+        ``include_text_comments`` says (comment sync is for resources, not
+        chatter). Comments are grouped by grouped_id without waiting: live
+        groups arrive pre-buffered, past/schedule comments already exist.
+        At most ``recent_limit`` comments per post.
+        """
+        task = runtime.task
+        cfg = task.comments
+        limit = max(0, int(getattr(task.bot_media, "recent_limit", 80) or 80))
+        values = [
+            m for m in list(comments)[:limit]
+            if not isinstance(m, MessageService)
+            and not getattr(getattr(m, "fwd_from", None), "channel_post", None)
+        ]
+        if not values:
+            return
+        ungrouped = [m for m in values if getattr(m, "grouped_id", None) is None]
+        grouped: dict[int, list] = {}
+        for message in values:
+            gid = getattr(message, "grouped_id", None)
+            if gid is not None:
+                grouped.setdefault(int(gid), []).append(message)
+        groups = [[m] for m in ungrouped] + list(grouped.values())
+        for group in groups:
+            media = [m for m in group if _msg_has_media(m)]
+            if not media:
+                continue  # text-only comments are never synced
+            if cfg.skip_bot_comments:
+                try:
+                    sender = await media[0].get_sender()
+                except Exception:
+                    sender = None
+                if sender is not None and getattr(sender, "bot", False):
                     continue
-                targets = [(disc.chat_id, disc.id)]
-            for dest_chat_id, dest_top_id in targets:
-                await self._send_comment(
-                    runtime, source_peer_id, group, dest_chat_id, dest_top_id
+            for destination in task.resolved_destinations:
+                dest_post_id = await self.db(
+                    self.repo.find_sent_message,
+                    self.tenant_id,
+                    task.id,
+                    source_peer_id,
+                    int(channel_post_id),
+                    destination.peer_id,
                 )
+                if dest_post_id is None:
+                    continue  # source post was never forwarded here
+                if cfg.dest_mode == "discussion":
+                    targets = [(peer, None) for peer in runtime.comment_destinations]
+                else:
+                    disc = await self._get_discussion_message(
+                        destination.peer_id, dest_post_id
+                    )
+                    if disc is None:
+                        continue
+                    targets = [(disc.chat_id, disc.id)]
+                for dest_chat_id, dest_top_id in targets:
+                    await self._send_comment(
+                        runtime, source_peer_id, media, dest_chat_id, dest_top_id
+                    )
 
     async def _get_discussion_message(self, channel_id: int, msg_id: int):
         try:
@@ -1740,8 +1777,49 @@ class TenantWorker:
         1h bound). The per-group delay is gone: the shared worker-level
         throttle (item 5) spaces sends. Offsets only move forward (max) so
         a late-finishing background group can never rewind progress.
+
+        Batch 8: past/schedule groups also honour the task's comment
+        switches. The discussion comments of the group's first post are
+        read once (old comments already exist -- no merge wait). Merge on:
+        media comments join this group as one album (one throttle slot,
+        like the live merge flush). Merge off + comments enabled: after
+        the post itself is sent, media comments are synced to the
+        destination post's discussion thread via _forward_comments_to_dest
+        (text-only comments are never synced). Offsets are always computed
+        from the original group only -- comment ids live in the discussion
+        group's id space and must never advance the channel offset.
         """
-        await self._forward_messages(runtime, source_id, group, live=False)
+        comments = task.comments
+        post = next(
+            (m for m in group if not isinstance(m, MessageService)),
+            None,
+        )
+        disc_comments: list = []
+        if post is not None and (comments.merge_comment_media or comments.enabled):
+            try:
+                _disc, disc_comments, _hint = await _collect_discussion_comments(
+                    self.client, source_id, int(post.id), task.bot_media
+                )
+            except Exception:
+                logging.warning(
+                    "past/schedule comment read failed task=%s post=%s",
+                    task.id, post.id, exc_info=True,
+                )
+                disc_comments = []
+        send_group = group
+        if comments.merge_comment_media and disc_comments:
+            cap = min(int(task.bot_media.recent_limit or 80), 100)
+            media = [
+                m for m in disc_comments
+                if not isinstance(m, MessageService) and _msg_has_media(m)
+            ][:cap]
+            if media:
+                send_group = _dedupe_messages(list(group) + media)
+                logging.info(
+                    "past/schedule merge: task=%s post=%s main=%d comment_media=%d",
+                    task.id, post.id, len(group), len(media),
+                )
+        sent_count = await self._forward_messages(runtime, source_id, send_group, live=False)
         max_id = max(int(getattr(m, "id", 0) or 0) for m in group)
         key = str(source_id)
         offsets[key] = max(int(offsets.get(key, 0) or 0), max_id)
@@ -1761,6 +1839,24 @@ class TenantWorker:
                 lease_epoch=self.epoch,
             )
             return False
+        if (
+            not comments.merge_comment_media
+            and comments.enabled
+            and disc_comments
+            and sent_count > 0
+            and post is not None
+        ):
+            try:
+                await self._forward_comments_to_dest(
+                    runtime, source_id, int(post.id), disc_comments
+                )
+            except FloodWaitError:
+                raise
+            except Exception:
+                logging.exception(
+                    "past/schedule comment sync failed task=%s post=%s",
+                    task.id, post.id,
+                )
         return True
 
     async def _forward_group_or_background(
