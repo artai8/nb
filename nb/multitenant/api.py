@@ -84,6 +84,15 @@ def _sqlite_session_to_string(data: bytes) -> str:
             pass
 
 
+def _looks_like_video(data: bytes) -> bool:
+    """mp4/mov (ftyp box), mkv/webm (EBML header)."""
+    if len(data) < 12:
+        return False
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return True
+    return data[4:8] == b"ftyp"
+
+
 def create_app(
     settings: Optional[Settings] = None,
     repository: Optional[MongoRepository] = None,
@@ -769,15 +778,6 @@ def create_app(
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         return task
-
-def _looks_like_video(data: bytes) -> bool:
-    """mp4/mov (ftyp box), mkv/webm (EBML header)."""
-    if len(data) < 12:
-        return False
-    if data[:4] == b"\x1aE\xdf\xa3":
-        return True
-    return data[4:8] == b"ftyp"
-
 
     @app.post("/api/tasks/{task_id}/watermark")
     async def upload_watermark(
