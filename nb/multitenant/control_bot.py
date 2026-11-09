@@ -97,7 +97,7 @@ class ControlBot:
         self.bot.add_event_handler(self.web, events.NewMessage(pattern=r"^/web$", func=private))
         self.bot.add_event_handler(self.status, events.NewMessage(pattern=r"^/status$", func=private))
         self.bot.add_event_handler(self.logout, events.NewMessage(pattern=r"^/logout$", func=private))
-        # 处理一键共享手机号 (Contact Share) 与免前缀验证码/密码输入
+        # 处理免前缀验证码/密码输入（明文验证码与两步验证密码直接发送即可）
         self.bot.add_event_handler(self.on_contact_or_smart_input, events.NewMessage(func=private))
 
     async def start(self, event) -> None:
@@ -130,9 +130,9 @@ class ControlBot:
         if url:
             buttons.append([KeyboardButtonWebView("🚀 打开 Mini App 控制台", url)])
             buttons.append([Button.url("🌐 打开 Web 控制台", url)])
-        # 注意：Telethon 不允许同一条消息混用内联按钮（WebView / URL）和普通键盘按钮
-        # （request_phone），混用会抛 ValueError 导致整条回复发不出去，所以这里只保留内联按钮；
-        # 一键共享号码请走 /login 或 /phone。
+        # 注意：Telethon 不允许同一条消息混用内联按钮（WebView / URL）和普通键盘按钮，
+        # 混用会抛 ValueError 导致整条回复发不出去，所以这里只保留内联按钮；
+        # 手机号登录请走 /login 或 /phone。
         await event.respond(
             "✨ **欢迎使用 NB 转发系统旗舰版**",
             buttons=buttons,
@@ -194,19 +194,20 @@ class ControlBot:
         # 注意：这里不再生成免密登录链接——Telethon 不允许同一条消息混用普通键盘按钮
         # （request_phone）和内联按钮（Button.url），混用会抛 ValueError 导致整条回复
         # 发不出去；同时免密链接本身谁拿到都能直接登录，已按决定停用。
+        # 注意：一键共享本机号码与 /phone 手机号登录是同一个功能，已按要求删掉前者，
+        # 这里只保留手机号登录；同时 request_phone 键盘按钮也不再发送。
         msg = (
-            "🔐 **请选择最适合您的登录绑定方式（单手机免扫码优化）：**\n\n"
-            "• **方式一（单手机最稳）：一键共享本机号码**\n"
-            "  点击底部键盘 **「📱 一键共享本机号码」** 或发送 `/phone +8613800000000`\n\n"
+            "🔐 **请选择最适合您的登录绑定方式：**\n\n"
+            "• **方式一（手机号登录）：**\n"
+            "  发送 `/phone +8613800000000`，验证码会发到你的 Telegram 消息里（不是手机短信），收到后直接发送验证码\n\n"
             "• **方式二（网页可视化向导）：Web 后台登录**\n"
             "  发送 `/web` 进入网页端，在玻璃拟态面板中直接输入手机号/验证码或导入 Session\n\n"
             "• **方式三（最极速零风控）：StringSession 直接导入**\n"
             "  发送 `/session 1BVtsO...` 瞬间完成绑定\n\n"
             "• **方式四（双设备扫码 + 自动刷新）：**\n"
-            "  如果您身边有另一台设备，请发送 `/qr` 获取自动刷新的二维码与 `tg://login` 链接。"
+            "  如果您身边有另一台设备，请发送 `/qr` 获取自动刷新的二维码。"
         )
-        buttons = [[Button.request_phone("📱 一键共享本机号码", resize=True, single_use=True)]]
-        await event.respond(msg, buttons=buttons)
+        await event.respond(msg)
 
     async def qr_login_cmd(self, event) -> None:
         """支持自动续期循环刷新的二维码 + tg://login Deep Link 登录。"""
@@ -283,7 +284,7 @@ class ControlBot:
             masked = f"+{digits[:4]}****{digits[-4:]}" if len(digits) > 8 else phone
             await event.respond(
                 f"✅ **验证码已发送到 {masked}！**\n\n"
-                "请直接发送验证码（Telegram 官方发来的那串数字）：\n"
+                "验证码会发到你的 Telegram 消息里（不是手机短信），请直接发送验证码（Telegram 官方发来的那串数字）：\n"
                 "• 直接发送：`1 2 3 4 5`（数字之间加空格，防止被 Telegram 拦截作废）\n"
                 "• 机器人收到后会立即自动删除您的验证码消息并完成绑定（**已取消 5 分钟超时限制**）。",
                 buttons=Button.clear(),
@@ -300,9 +301,7 @@ class ControlBot:
         await self._best_effort_delete(event)
         match = re.match(r"^/phone\s+(.+)$", event.raw_text or "")
         if not match:
-            await event.respond("格式: `/phone +国家码手机号`，或者点击下方按钮一键共享手机号：", buttons=[
-                [Button.request_phone("📱 一键共享本机号码", resize=True, single_use=True)]
-            ])
+            await event.respond("格式: `/phone +国家码手机号`，例如 `/phone +8613800000000`。")
             return
         await self._start_phone_login(event, match.group(1))
 
@@ -311,7 +310,7 @@ class ControlBot:
         attempt = self.attempts.get(tenant_id)
         # 已移除原本的 `time.monotonic() - attempt.created_at > 300` 5分钟强制丢弃限制！
         if attempt is None or not attempt.phone:
-            await event.respond("请先发送 `/phone +国家码手机号` 或点击共享号码按钮。")
+            await event.respond("请先发送 `/phone +国家码手机号`。")
             return
         code_digits = re.sub(r"\D", "", raw_code)
         if not code_digits:
@@ -368,32 +367,23 @@ class ControlBot:
             await event.respond("❌ StringSession 格式无效或连接失败。")
 
     async def on_contact_or_smart_input(self, event) -> None:
-        """处理用户点击『共享本机号码』按钮或直接输入验证码/2FA密码（无需手打命令前缀）。"""
+        """处理直接输入的验证码/2FA密码（无需手打命令前缀）。
+        注意：一键共享本机号码已按要求删除，不再处理 Contact 分享。"""
         text = (event.raw_text or "").strip()
         if text.startswith("/"):
             return
-        # 1. 如果用户通过底部按钮分享了本人手机号 Contact
-        if getattr(event.message, "contact", None):
-            contact = event.message.contact
-            await self._best_effort_delete(event)
-            if contact.user_id and int(contact.user_id) != int(event.sender_id):
-                await event.respond("⚠️ 请分享您当前使用的 Telegram 账号本机号码。")
-                return
-            await self._start_phone_login(event, contact.phone_number)
-            return
-
         tenant_id = int(event.sender_id)
         attempt = self.attempts.get(tenant_id)
         if not attempt:
             return
 
-        # 2. 如果正在等待两步验证密码，直接把非命令文本当作密码处理
+        # 1. 如果正在等待两步验证密码，直接把非命令文本当作密码处理
         if attempt.waiting_password and text:
             await self._best_effort_delete(event)
             await self._verify_password_input(event, text)
             return
 
-        # 3. 如果已发送验证码，且用户直接发送了包含 5 位数字的内容（或转发了官方验证码通知）
+        # 2. 如果已发送验证码，且用户直接发送了包含 5 位数字的内容（或转发了官方验证码通知）
         if attempt.phone and not attempt.waiting_password:
             digits = re.findall(r"\b\d{5}\b", re.sub(r"[\s.-]", "", text))
             if digits or (4 <= len(re.sub(r"\D", "", text)) <= 6):
