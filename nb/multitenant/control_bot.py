@@ -169,10 +169,10 @@ class ControlBot:
         asyncio.create_task(self._qr_loop(tenant_id, client, event.chat_id))
 
     async def _qr_loop(self, tenant_id: int, client: TelegramClient, chat_id: int) -> None:
-        """自动刷新 QR token（最多持续 5 轮），避免 Telegram 服务端 30 秒令牌过期导致扫不出。"""
+        """自动刷新 QR token（最多持续 2 轮），避免 Telegram 服务端 30 秒令牌过期导致扫不出。"""
         try:
             qr_login = await client.qr_login()
-            for round_idx in range(5):
+            for round_idx in range(2):
                 attempt = self.attempts.get(tenant_id)
                 if attempt is None or attempt.client is not client:
                     return
@@ -185,12 +185,10 @@ class ControlBot:
                 buffer.seek(0)
                 await self.bot.send_message(
                     chat_id,
-                    f"📷 **二维码登录（第 {round_idx + 1}/5 次自动保鲜）**\n"
+                    f"📷 **二维码登录（第 {round_idx + 1}/2 次自动保鲜）**\n"
                     f"• 另一台设备：打开 Telegram → 设置 → 设备 → 扫描二维码\n"
-                    f"• 点下方按钮直接唤起 Telegram 确认登录，不用扫码\n"
-                    f"• 单手机不便扫码？直接发送 `/phone +国家码手机号`",
+                    f"• 注意：二维码不指定号码，哪个号扫码就绑哪个号；想绑指定号码请用 `/phone +国家码手机号`",
                     file=buffer,
-                    buttons=[[Button.url("📱 一键唤起 Telegram 确认登录", qr_login.url)]],
                 )
                 try:
                     await qr_login.wait(timeout=35)
