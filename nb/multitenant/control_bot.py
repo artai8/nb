@@ -199,7 +199,7 @@ class ControlBot:
         msg = (
             "🔐 **请选择最适合您的登录绑定方式：**\n\n"
             "• **方式一（手机号登录）：**\n"
-            "  发送 `/phone +8613800000000`，验证码会发到你的 Telegram 消息里（不是手机短信），收到后直接发送验证码\n\n"
+            "  发送 `/phone +8613800000000`（或只发 `/phone`，按提示直接输入手机号或点按钮发送），验证码会发到你的 Telegram 消息里（不是手机短信），收到后直接发送验证码\n\n"
             "• **方式二（网页可视化向导）：Web 后台登录**\n"
             "  发送 `/web` 进入网页端，在玻璃拟态面板中直接输入手机号/验证码或导入 Session\n\n"
             "• **方式三（最极速零风控）：StringSession 直接导入**\n"
@@ -301,7 +301,10 @@ class ControlBot:
         await self._best_effort_delete(event)
         match = re.match(r"^/phone\s+(.+)$", event.raw_text or "")
         if not match:
-            await event.respond("格式: `/phone +国家码手机号`，例如 `/phone +8613800000000`。")
+            await event.respond(
+                "请直接输入手机号（带国家码，如 +8613800000000），或点击下方按钮发送本机号码：",
+                buttons=[[Button.request_phone("📱 发送手机号", resize=True, single_use=True)]],
+            )
             return
         await self._start_phone_login(event, match.group(1))
 
@@ -367,23 +370,38 @@ class ControlBot:
             await event.respond("❌ StringSession 格式无效或连接失败。")
 
     async def on_contact_or_smart_input(self, event) -> None:
-        """处理直接输入的验证码/2FA密码（无需手打命令前缀）。
-        注意：一键共享本机号码已按要求删除，不再处理 Contact 分享。"""
+        """处理手机号登录的输入：点“发送手机号”按钮分享的 Contact、直接明文输入的手机号、
+        以及进行中登录的验证码/2FA密码（无需手打命令前缀）。"""
         text = (event.raw_text or "").strip()
         if text.startswith("/"):
             return
+        # 1. 点“发送手机号”按钮分享了本人手机号 Contact
+        if getattr(event.message, "contact", None):
+            contact = event.message.contact
+            await self._best_effort_delete(event)
+            if contact.user_id and int(contact.user_id) != int(event.sender_id):
+                await event.respond("⚠️ 请分享您当前使用的 Telegram 账号本机号码。")
+                return
+            await self._start_phone_login(event, contact.phone_number)
+            return
+
         tenant_id = int(event.sender_id)
         attempt = self.attempts.get(tenant_id)
         if not attempt:
+            # 没有进行中的登录时，直接输入的手机号（带国家码）也当作 /phone 处理
+            normalized = re.sub(r"[\s\-]", "", text)
+            if re.fullmatch(r"\+?\d{10,15}", normalized or ""):
+                await self._best_effort_delete(event)
+                await self._start_phone_login(event, normalized)
             return
 
-        # 1. 如果正在等待两步验证密码，直接把非命令文本当作密码处理
+        # 2. 如果正在等待两步验证密码，直接把非命令文本当作密码处理
         if attempt.waiting_password and text:
             await self._best_effort_delete(event)
             await self._verify_password_input(event, text)
             return
 
-        # 2. 如果已发送验证码，且用户直接发送了包含 5 位数字的内容（或转发了官方验证码通知）
+        # 3. 如果已发送验证码，且用户直接发送了包含 5 位数字的内容（或转发了官方验证码通知）
         if attempt.phone and not attempt.waiting_password:
             digits = re.findall(r"\b\d{5}\b", re.sub(r"[\s.-]", "", text))
             if digits or (4 <= len(re.sub(r"\D", "", text)) <= 6):
