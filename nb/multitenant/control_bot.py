@@ -411,13 +411,12 @@ class ControlBot:
     async def web(self, event) -> None:
         tenant_id = int(event.sender_id)
         self.repo.upsert_tenant(tenant_id)
-        token = self.repo.create_magic_link(
-            tenant_id, ttl_minutes=self.settings.magic_link_ttl_minutes
-        )
-        url = f"{self.settings.public_base_url}/auth/magic/{token}"
+        # /web 只给登录/注册页入口，不再发免密直登链接：免密链接是谁拿到、
+        # 在哪台设备打开都会直接登进该租户；要进后台请在页面上登录或注册。
+        url = f"{self.settings.public_base_url}/miniapp"
         await event.respond(
-            "🌐 **您的专属 Web 后台登录链接（已取消 5 分钟时间限制，长期有效且支持多端打开）：**",
-            buttons=[[Button.url("✨ 打开 Liquid Glass Web 后台", url)]],
+            "🌐 **Web 后台入口：**\n打开后请在登录 / 注册页登录已有账号或注册新账号。",
+            buttons=[[Button.url("✨ 打开 Web 后台", url)]],
         )
 
     async def status(self, event) -> None:
