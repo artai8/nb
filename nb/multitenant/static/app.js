@@ -70,6 +70,7 @@ let tasks = [
     show_forwarded_from: false,
     live: { sequential_updates: false, delete_sync: true, delete_on_edit: '.deleteMe' },
     past: { delay: 0, offset: 0, end: null },
+    schedule: { run_time: '08:00', daily_limit: 0 },
     comments: { enabled: true, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: true },
     bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: ['下一页'], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
     plugins: defaultPluginConfig()
@@ -166,6 +167,7 @@ function populateTaskForm(task) {
     show_forwarded_from: false,
     live: { sequential_updates: false, delete_sync: false, delete_on_edit: '.deleteMe' },
     past: { delay: 0, offset: 0, end: null },
+    schedule: { run_time: '08:00', daily_limit: 0 },
     comments: { enabled: false, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: false },
     bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: [], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
     plugins: defaultPluginConfig()
@@ -174,13 +176,16 @@ function populateTaskForm(task) {
   document.querySelector('#taskId').value = t.id || '';
   document.querySelector('#taskRevision').value = String(t.revision || 1);
   document.querySelector('#taskName').value = t.name || '';
-  document.querySelector('#taskMode').value = t.mode === 'schedule' ? 'live' : (t.mode || 'live');
+  document.querySelector('#taskMode').value = t.mode || 'live';
   document.querySelector('#sourceChat').value = (t.sources || []).join('\n');
   document.querySelector('#targetChat').value = (t.destinations || []).join('\n');
 
 
   document.querySelector('#pastOffset').value = String(t.past?.offset ?? 0);
   document.querySelector('#pastEnd').value = t.past?.end != null ? String(t.past.end) : '';
+
+  document.querySelector('#scheduleRunTime').value = t.schedule?.run_time || '08:00';
+  document.querySelector('#scheduleDailyLimit').value = String(t.schedule?.daily_limit ?? 0);
 
   document.querySelector('#commentsEnabled').checked = Boolean(t.comments?.enabled);
   document.querySelector('#commentsSourceMode').value = t.comments?.source_mode || 'comments';
@@ -517,10 +522,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const id = document.querySelector('#taskId').value;
     const endRaw = document.querySelector('#pastEnd').value.trim();
     const editingTask = id ? tasks.find(t => t.id === id) : null;
-    const savedMode = (editingTask && editingTask.mode === 'schedule') ? 'schedule' : document.querySelector('#taskMode').value;
     const payload = {
       name: document.querySelector('#taskName').value.trim(),
-      mode: savedMode,
+      mode: document.querySelector('#taskMode').value,
       sources: lines(document.querySelector('#sourceChat').value),
       destinations: lines(document.querySelector('#targetChat').value),
       show_forwarded_from: (editingTask && editingTask.show_forwarded_from) || false,
@@ -530,7 +534,10 @@ document.addEventListener('DOMContentLoaded', () => {
         offset: Number(document.querySelector('#pastOffset').value || 0),
         end: endRaw ? Number(endRaw) : null
       },
-      schedule: (editingTask && editingTask.schedule) || { run_time: '08:00', daily_limit: 0 },
+      schedule: {
+        run_time: document.querySelector('#scheduleRunTime').value.trim() || '08:00',
+        daily_limit: Number(document.querySelector('#scheduleDailyLimit').value || 0)
+      },
       comments: {
         enabled: document.querySelector('#commentsEnabled').checked,
         source_mode: document.querySelector('#commentsSourceMode').value,
