@@ -45,6 +45,7 @@ from telethon.tl.types import (
 
 from nb.plugins import PluginPipeline
 
+from .bot_media import BotMediaResolver
 from .models import AccountStatus, ForwardTask, ResolvedEndpoint, TaskMode, TaskStatus
 from .repository import MongoRepository
 from .security import SessionCipher, get_telegram_proxy
@@ -97,6 +98,7 @@ class TenantWorker:
         self.comment_routes: dict[int, list[ tuple[TaskRuntime, int] ]] = defaultdict(list)
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1000)
         self.operation_lock = asyncio.Lock()
+        self._bot_media = BotMediaResolver()
         self._stopped = asyncio.Event()
         self._consumer_task: Optional[asyncio.Task] = None
 
@@ -562,6 +564,23 @@ class TenantWorker:
         values = [message for message in messages if not isinstance(message, MessageService)]
         if not values:
             return 0
+        # Bot media: a source post may carry a resource bot's t.me start link;
+        # talk to the bot and merge the album it returns into this group
+        # before plugins run (same combined-group semantics as the original).
+        if task.bot_media.enabled:
+            try:
+                bot_messages = await self._bot_media.resolve_for_group(
+                    self.client, values, task.bot_media
+                )
+            except Exception:
+                logging.warning("bot media resolution failed for task %s", task.id, exc_info=True)
+                bot_messages = []
+            if bot_messages:
+                source_keys = {(getattr(m, "chat_id", None), m.id) for m in values}
+                values = values + [
+                    m for m in bot_messages
+                    if (getattr(m, "chat_id", None), m.id) not in source_keys
+                ]
         templates = (
             await runtime.pipeline.apply_group(values)
             if len(values) > 1
@@ -595,12 +614,15 @@ class TenantWorker:
                     task, destination.peer_id, templates, reply_to=reply_to
                 )
                 sent_id = _message_id([m for _, m in sent])
-                # Note: message_map keys are the *source* ids; each template
-                # wraps its source message (template.message.id).
+                # Note: message_map keys are the *source* ids only -- bot-media
+                # templates wrap the bot's messages, which must not pollute the
+                # mapping (a bot message id could collide with a source id).
+                source_idents = {id(m) for m in messages}
                 message_map = {
                     str(t.message.id): int(m.id)
                     for t, m in sent
-                    if getattr(t.message, "id", None) is not None
+                    if id(t.message) in source_idents
+                    and getattr(t.message, "id", None) is not None
                     and getattr(m, "id", None) is not None
                 }
                 await self.db(
@@ -660,6 +682,16 @@ class TenantWorker:
         sent: list = []
         if media_templates:
             captions = [template.text or "" for template in media_templates]
+            # A text-only source post (e.g. a bare start link) plus bot media
+            # would otherwise lose its text entirely; fold it into the first
+            # caption, mirroring the original's combined_caption.
+            text_only = [
+                template.text
+                for template in templates
+                if not getattr(template.message, "media", None) and template.text
+            ]
+            if text_only and captions:
+                captions[0] = "\n\n".join(text_only + [captions[0]]) if captions[0] else "\n\n".join(text_only)
             for group in _chunks(media_templates):
                 files = [await self._file_for_send(t) for t in group]
                 group_captions = captions[:len(group)]

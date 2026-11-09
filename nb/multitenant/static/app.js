@@ -41,8 +41,7 @@ function defaultPluginConfig() {
     mark: {
       check: false,
       image: 'image.png',
-      position: 'bottom_right',
-      frame_rate: 15
+      position: 'bottom_right'
     },
     fmt: {
       check: false,
@@ -67,12 +66,11 @@ let tasks = [
     revision: 1,
     sources: ['-100188291001'],
     destinations: ['-100199384756'],
-    show_forwarded_from: false,
-    live: { sequential_updates: false, delete_sync: true, delete_on_edit: '.deleteMe' },
-    past: { delay: 0, offset: 0, end: null },
+    live: { delete_sync: true, delete_on_edit: '.deleteMe' },
+    past: { offset: 0, end: null },
     schedule: { run_time: '08:00', daily_limit: 0 },
     comments: { enabled: true, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: true },
-    bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: ['下一页'], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
+    bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: ['下一页'], tme_link_blacklist: [], enable_pagination: true },
     plugins: defaultPluginConfig()
   }
 ];
@@ -164,12 +162,11 @@ function populateTaskForm(task) {
     mode: 'live',
     sources: [],
     destinations: [],
-    show_forwarded_from: false,
-    live: { sequential_updates: false, delete_sync: false, delete_on_edit: '.deleteMe' },
-    past: { delay: 0, offset: 0, end: null },
+    live: { delete_sync: false, delete_on_edit: '.deleteMe' },
+    past: { offset: 0, end: null },
     schedule: { run_time: '08:00', daily_limit: 0 },
     comments: { enabled: false, source_mode: 'comments', dest_mode: 'comments', only_media: false, include_text_comments: true, skip_bot_comments: false, merge_comment_media: false },
-    bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: [], tme_link_blacklist: [], auto_comment_trigger_enabled: true, enable_pagination: true, force_forward_on_empty: true },
+    bot_media: { enabled: true, poll_interval: 1.2, wait_timeout: 12, max_pages: 5, pagination_keywords: [], tme_link_blacklist: [], enable_pagination: true },
     plugins: defaultPluginConfig()
   };
 
@@ -203,9 +200,7 @@ function populateTaskForm(task) {
   document.querySelector('#botMediaMaxPages').value = String(t.bot_media?.max_pages ?? 5);
   document.querySelector('#botMediaKeywords').value = (t.bot_media?.pagination_keywords || []).join(', ');
   document.querySelector('#botMediaBlacklist').value = (t.bot_media?.tme_link_blacklist || []).join(', ');
-  document.querySelector('#botMediaAutoTrigger').checked = Boolean(t.bot_media?.auto_comment_trigger_enabled ?? true);
   document.querySelector('#botMediaPagination').checked = Boolean(t.bot_media?.enable_pagination ?? true);
-  document.querySelector('#botMediaForceEmpty').checked = Boolean(t.bot_media?.force_forward_on_empty ?? true);
 
   const p = t.plugins || defaultPluginConfig();
   document.querySelector('#plg_filter_check').checked = Boolean(p.filter?.check);
@@ -527,10 +522,8 @@ document.addEventListener('DOMContentLoaded', () => {
       mode: document.querySelector('#taskMode').value,
       sources: lines(document.querySelector('#sourceChat').value),
       destinations: lines(document.querySelector('#targetChat').value),
-      show_forwarded_from: (editingTask && editingTask.show_forwarded_from) || false,
-      live: (editingTask && editingTask.live) || { sequential_updates: false, delete_sync: false, delete_on_edit: '.deleteMe' },
+      live: (editingTask && editingTask.live) || { delete_sync: false, delete_on_edit: '.deleteMe' },
       past: {
-        delay: 0,
         offset: Number(document.querySelector('#pastOffset').value || 0),
         end: endRaw ? Number(endRaw) : null
       },
@@ -556,9 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
         max_pages: Number(document.querySelector('#botMediaMaxPages').value || 5),
         pagination_keywords: commaList(document.querySelector('#botMediaKeywords').value),
         tme_link_blacklist: commaList(document.querySelector('#botMediaBlacklist').value),
-        auto_comment_trigger_enabled: document.querySelector('#botMediaAutoTrigger').checked,
-        enable_pagination: document.querySelector('#botMediaPagination').checked,
-        force_forward_on_empty: document.querySelector('#botMediaForceEmpty').checked
+        enable_pagination: document.querySelector('#botMediaPagination').checked
       },
       plugins: collectPluginsFromForm()
     };

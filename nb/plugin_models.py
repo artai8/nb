@@ -81,7 +81,6 @@ class MarkConfig(BaseModel):
     check: bool = False
     image: str = "image.png"
     position: str = "bottom_right"
-    frame_rate: int = 15
     # Re-encode video/audio and repack zip so forwarded copies get a new
     # file_unique_id. Video watermark (video_mark) rides on the same pass.
     recode: bool = True
@@ -118,7 +117,6 @@ class Caption(BaseModel):
 
 class SpoilerConfig(BaseModel):
     check: bool = False
-    media: bool = False
 
 
 class InlineButtonMode(str, Enum):

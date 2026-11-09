@@ -44,45 +44,30 @@ class CommentsSettings(BaseModel):
     only_media: bool = False
     include_text_comments: bool = True
     skip_bot_comments: bool = False
-    skip_admin_comments: bool = False
-    post_mapping_mode: Literal["auto", "manual"] = "auto"
-    manual_post_mapping: Dict[str, str] = Field(default_factory=dict)
     merge_comment_media: bool = False
     merge_wait_seconds: int = Field(default=60, ge=10, le=600)
 
 
 class BotMediaSettings(BaseModel):
     enabled: bool = True
-    auto_comment_trigger_enabled: bool = True
     enable_keyword_trigger: bool = True
     enable_pagination: bool = True
     pagination_mode: Literal["auto", "any"] = "auto"
     pagination_keywords: List[str] = Field(default_factory=list)
     pagination_ignore_keywords: List[str] = Field(default_factory=list)
     tme_link_blacklist: List[str] = Field(default_factory=list)
-    ignore_filter: bool = True
-    force_forward_on_empty: bool = True
     poll_interval: float = Field(default=1.2, ge=0.1, le=30)
     wait_timeout: float = Field(default=12, ge=1, le=120)
     max_pages: int = Field(default=5, ge=1, le=50)
     recent_limit: int = Field(default=80, ge=10, le=1000)
-    comment_keyword_prefixes: List[str] = Field(
-        default_factory=lambda: ["评论区回复", "评论区发送", "在评论区回复", "在评论区发送"]
-    )
-    comment_keyword_suffixes: List[str] = Field(
-        default_factory=lambda: ["获取资源", "领取", "获取", "得到内容"]
-    )
-    comment_keyword_from_comments_enabled: bool = True
 
 
 class LiveTaskSettings(BaseModel):
-    sequential_updates: bool = False
     delete_sync: bool = False
     delete_on_edit: Optional[str] = ".deleteMe"
 
 
 class PastTaskSettings(BaseModel):
-    delay: int = Field(default=0, ge=0, le=100)
     offset: int = Field(default=0, ge=0)
     end: Optional[int] = Field(default=None, ge=0)
 
@@ -114,7 +99,6 @@ class ForwardTaskInput(BaseModel):
     mode: TaskMode = TaskMode.LIVE
     sources: List[str] = Field(default_factory=list)
     destinations: List[str] = Field(default_factory=list)
-    show_forwarded_from: bool = False
     comments: CommentsSettings = Field(default_factory=CommentsSettings)
     bot_media: BotMediaSettings = Field(default_factory=BotMediaSettings)
     live: LiveTaskSettings = Field(default_factory=LiveTaskSettings)

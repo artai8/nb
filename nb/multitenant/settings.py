@@ -39,8 +39,7 @@ class Settings(BaseSettings):
     worker_capacity: int = 20
     poll_seconds: float = 3.0
     sync_interval_seconds: float = 5.0
-    # 0 表示取消登录链接与会话的 5 分钟/固定时间限制（永久有效，直到主动登出）
-    magic_link_ttl_minutes: int = 0
+    # 登录链接默认永久有效（create_magic_link 的 ttl_minutes=0），直到主动登出
     magic_link_Reusable: bool = True
     web_session_hours: int = 87600  # 默认 10 年 (3650天)
     admin_username: str = "admin"
