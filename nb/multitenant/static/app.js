@@ -185,10 +185,6 @@ function populateTaskForm(task) {
   document.querySelector('#scheduleDailyLimit').value = String(t.schedule?.daily_limit ?? 0);
 
   document.querySelector('#commentsEnabled').checked = Boolean(t.comments?.enabled);
-  document.querySelector('#commentsSourceMode').value = t.comments?.source_mode || 'comments';
-  document.querySelector('#commentsDestMode').value = t.comments?.dest_mode || 'comments';
-  document.querySelector('#commentsSourceGroup').value = t.comments?.source_discussion_group || '';
-  document.querySelector('#commentsDestGroups').value = (t.comments?.dest_discussion_groups || []).join(', ');
   document.querySelector('#commentsOnlyMedia').checked = Boolean(t.comments?.only_media);
   document.querySelector('#commentsIncludeText').checked = Boolean(t.comments?.include_text_comments ?? true);
   document.querySelector('#commentsSkipBot').checked = Boolean(t.comments?.skip_bot_comments);
@@ -536,10 +532,6 @@ document.addEventListener('DOMContentLoaded', () => {
       },
       comments: {
         enabled: document.querySelector('#commentsEnabled').checked,
-        source_mode: document.querySelector('#commentsSourceMode').value,
-        dest_mode: document.querySelector('#commentsDestMode').value,
-        source_discussion_group: document.querySelector('#commentsSourceGroup').value.trim() || null,
-        dest_discussion_groups: commaList(document.querySelector('#commentsDestGroups').value),
         only_media: document.querySelector('#commentsOnlyMedia').checked,
         include_text_comments: document.querySelector('#commentsIncludeText').checked,
         skip_bot_comments: document.querySelector('#commentsSkipBot').checked,
