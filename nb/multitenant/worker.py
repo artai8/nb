@@ -204,6 +204,11 @@ class TaskRuntime:
     temp_dir: Path
     comment_destinations: list[int] = field(default_factory=list)
     source_discussion_id: Optional[int] = None
+    # True when any destination channel has no linked discussion group
+    # (cached at runtime build; runtimes rebuild on task revision change).
+    # Comment resources then fall back to travelling with the post instead
+    # of syncing into a discussion thread that does not exist.
+    dest_without_discussion: bool = False
 
     def close(self) -> None:
         resolved = self.temp_dir.resolve()
@@ -760,12 +765,30 @@ class TenantWorker:
             for raw in task.comments.dest_discussion_groups:
                 endpoint = await self._resolve_endpoint(str(raw), destination=True)
                 comment_destinations.append(endpoint.peer_id)
+        # Cache whether any destination lacks a linked discussion group.
+        # Only matters when comments are on and merge is off; _build runs
+        # once per task revision, so this costs one lookup per destination
+        # instead of one per post.
+        dest_without_discussion = False
+        if (
+            task.comments.enabled
+            and not task.comments.merge_comment_media
+            and self.client is not None
+        ):
+            for endpoint in task.resolved_destinations:
+                try:
+                    if await self._discussion_group_id(endpoint.peer_id) is None:
+                        dest_without_discussion = True
+                        break
+                except Exception:
+                    continue
         return TaskRuntime(
             task=task,
             pipeline=pipeline,
             temp_dir=temp_dir,
             comment_destinations=comment_destinations,
             source_discussion_id=source_discussion_id,
+            dest_without_discussion=dest_without_discussion,
         )
 
     async def _validate_task(self, task: ForwardTask) -> None:
@@ -900,15 +923,24 @@ class TenantWorker:
         # Merge mode (live channel posts only): hold the post in a buffer so
         # comment media can join it, instead of sending immediately. The
         # flush re-enters here with from_merge=True and skips this gate.
-        if live and not from_merge and task.comments.merge_comment_media:
+        # Effective merge also covers the no-discussion-group fallback:
+        # with the destination switch on "comments" but no thread to sync
+        # into, the post waits for comment media the same way.
+        if live and not from_merge and self._effective_merge(runtime):
             if getattr(values[0], "post", False):
                 if self._buffer_merge(runtime, source_id, values):
                     return 0
         # Bot media: a source post may carry a resource bot's t.me start link;
-        # talk to the bot and merge the album it returns into this group
-        # before plugins run (same combined-group semantics as the original).
-        # The merge flush skips this: the original's merge path never did
-        # bot-media resolution either.
+        # talk to the bot and fetch the album it returns. Where the fetched
+        # resources go follows the same destination switch as comment media:
+        # "channel" merges them into the post album (today's behaviour);
+        # "comments" sends them to the destination post's discussion thread
+        # after the post, via the comment-sync path. The keyword-trigger
+        # fetch itself (posting the keyword, waiting for the bot's reply)
+        # is unaffected -- only the destination of the fetched resources
+        # changes. The merge flush skips this: the original's merge path
+        # never did bot-media resolution either.
+        bot_messages: list = []
         if task.bot_media.enabled and not from_merge:
             try:
                 bot_messages = await self._bot_media.resolve_for_group(
@@ -921,7 +953,7 @@ class TenantWorker:
             except Exception:
                 logging.warning("bot media resolution failed for task %s", task.id, exc_info=True)
                 bot_messages = []
-            if bot_messages:
+            if bot_messages and self._bot_rides_with_post(runtime):
                 source_keys = {(getattr(m, "chat_id", None), m.id) for m in values}
                 values = values + [
                     m for m in bot_messages
@@ -993,6 +1025,23 @@ class TenantWorker:
             except Exception:
                 await self.db(self.repo.release_delivery, delivery_key)
                 raise
+        if bot_messages and not self._bot_rides_with_post(runtime) and sent_count > 0:
+            # Destination switch is "comments": bot resources do not ride
+            # with the post. Send them to the destination post's discussion
+            # thread afterwards, same path as comment sync (media only).
+            # When the destination has no discussion group, that path's
+            # own fallback sends them straight to the channel instead.
+            try:
+                await self._forward_comments_to_dest(
+                    runtime, source_id, int(values[0].id), bot_messages,
+                    from_bot=True,
+                )
+            except FloodWaitError:
+                raise
+            except Exception:
+                logging.exception(
+                    "bot media thread sync failed task=%s", task.id,
+                )
         for template in templates:
             template.clear()
         return sent_count
@@ -1324,6 +1373,52 @@ class TenantWorker:
                 ) from exc
             raise
 
+    def _effective_merge(self, runtime: TaskRuntime) -> bool:
+        """Should comment media travel with the post as one album?
+
+        True when the task's destination switch says so
+        (merge_comment_media), or when comments are on but a destination
+        channel has no linked discussion group -- there is no thread to
+        sync into, so the resources ride with the post instead.
+        """
+        cfg = runtime.task.comments
+        return bool(
+            cfg.merge_comment_media
+            or (cfg.enabled and runtime.dest_without_discussion)
+        )
+
+    def _fallback_merge(self, runtime: TaskRuntime) -> bool:
+        """Effective merge that comes only from the no-discussion-group
+        fallback (the destination switch itself is off). Unlike pure
+        merge, late comments are NOT discarded here -- they fall through
+        to the sync path, whose own fallback sends them to the channel.
+        """
+        cfg = runtime.task.comments
+        return bool(
+            cfg.enabled
+            and not cfg.merge_comment_media
+            and runtime.dest_without_discussion
+        )
+
+    def _bot_rides_with_post(self, runtime: TaskRuntime) -> bool:
+        """Bot-media resources merge into the post album when the
+        destination switch says "channel", when comment sync is off
+        entirely (the switch then has no thread to sync into -- this is
+        the historical behaviour), or when the no-discussion-group
+        fallback applies. Only when comments are on, the switch says
+        "comments" and a discussion thread exists do bot resources go
+        to the thread instead. (Unlike _effective_merge, this must not
+        be used for the live merge gate: with comments off, buffering
+        the post would stall every live post for comments that can
+        never arrive.)
+        """
+        cfg = runtime.task.comments
+        return bool(
+            cfg.merge_comment_media
+            or not cfg.enabled
+            or runtime.dest_without_discussion
+        )
+
     async def _discussion_group_id(self, channel_id: int) -> Optional[int]:
         assert self.client is not None
         try:
@@ -1484,11 +1579,15 @@ class TenantWorker:
                 )
         if channel_post_id is None:
             return
-        # Merge mode: media comments join the buffered album for this post;
-        # anything that cannot join is discarded, exactly like the original
-        # (the post is not forwarded yet while buffered, so there is no
-        # destination post to reply to here).
-        if cfg.merge_comment_media:
+        # Merge mode: media comments join the buffered album for this post.
+        # Pure merge discards anything that cannot join (exactly like the
+        # original -- the post is not forwarded yet while buffered, so
+        # there is no destination post to reply to here). Fallback merge
+        # (destination switch on "comments" but no discussion group) joins
+        # while the buffer exists; once the post has been sent (buffer
+        # gone) it falls through to the sync path, whose own fallback
+        # sends the media straight to the channel.
+        if cfg.merge_comment_media or self._fallback_merge(runtime):
             key = (task.id, source_peer_id, int(channel_post_id))
             buf = self._merge_buffers.get(key)
             if buf is not None:
@@ -1500,20 +1599,26 @@ class TenantWorker:
                         "merge buffer: task=%s post=%s comment media +%d (total %d)",
                         task.id, channel_post_id, len(media), len(buf.comment_media),
                     )
-            return
+                return
+            if cfg.merge_comment_media:
+                return
         await self._forward_comments_to_dest(
             runtime, source_peer_id, int(channel_post_id), group
         )
 
     async def _forward_comments_to_dest(
-        self, runtime: TaskRuntime, source_peer_id: int, channel_post_id: int, comments: list
+        self, runtime: TaskRuntime, source_peer_id: int, channel_post_id: int, comments: list,
+        from_bot: bool = False,
     ) -> None:
         """Sync one channel post's discussion comments to its destinations.
 
         Shared by live comment sync (_forward_comment_group) and by the
-        past/schedule path (_forward_and_save). Only media comments are
-        forwarded -- a media comment's own caption travels with it, but
-        text-only comments are never synced, whatever
+        past/schedule path (_forward_and_save). Also carries bot-media
+        resources fetched for the post when the destination switch says
+        "comments" (from_bot=True) -- those are fetched deliberately, so
+        the skip_bot_comments check does not apply to them. Only media
+        items are forwarded -- a media item's own caption travels with
+        it, but text-only comments are never synced, whatever
         ``include_text_comments`` says (comment sync is for resources, not
         chatter). Comments are grouped by grouped_id without waiting: live
         groups arrive pre-buffered, past/schedule comments already exist.
@@ -1540,7 +1645,7 @@ class TenantWorker:
             media = [m for m in group if _msg_has_media(m)]
             if not media:
                 continue  # text-only comments are never synced
-            if cfg.skip_bot_comments:
+            if cfg.skip_bot_comments and not from_bot:
                 try:
                     sender = await media[0].get_sender()
                 except Exception:
@@ -1565,8 +1670,13 @@ class TenantWorker:
                         destination.peer_id, dest_post_id
                     )
                     if disc is None:
-                        continue
-                    targets = [(disc.chat_id, disc.id)]
+                        # No discussion thread on this destination (no
+                        # linked discussion group): send the comment media
+                        # straight to the channel as its own album (one
+                        # throttle slot) instead of silently dropping it.
+                        targets = [(destination.peer_id, None)]
+                    else:
+                        targets = [(disc.chat_id, disc.id)]
                 for dest_chat_id, dest_top_id in targets:
                     await self._send_comment(
                         runtime, source_peer_id, media, dest_chat_id, dest_top_id
@@ -1958,6 +2068,13 @@ class TenantWorker:
         (text-only comments are never synced). Offsets are always computed
         from the original group only -- comment ids live in the discussion
         group's id space and must never advance the channel offset.
+
+        Comment-destination fallback: when comments are on, the switch
+        says "comments", but a destination channel has no linked
+        discussion group, the comments (and bot-media resources) ride
+        with the post instead -- effective merge. If the discussion
+        thread still cannot be resolved at sync time, the media goes
+        straight to the channel rather than being silently dropped.
         """
         comments = task.comments
         post = next(
@@ -1977,7 +2094,7 @@ class TenantWorker:
                 )
                 disc_comments = []
         send_group = group
-        if comments.merge_comment_media and disc_comments:
+        if self._effective_merge(runtime) and disc_comments:
             cap = min(int(task.bot_media.recent_limit or 80), 100)
             media = [
                 m for m in disc_comments
@@ -2029,7 +2146,7 @@ class TenantWorker:
             )
             return False
         if (
-            not comments.merge_comment_media
+            not self._effective_merge(runtime)
             and comments.enabled
             and disc_comments
             and sent_count > 0

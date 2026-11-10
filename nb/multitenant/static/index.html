@@ -163,7 +163,12 @@
                   <label><input type="checkbox" id="commentsOnlyMedia"> 仅含媒体评论</label>
                   <label><input type="checkbox" id="commentsIncludeText" checked> 包含纯文本</label>
                   <label><input type="checkbox" id="commentsSkipBot"> 跳过机器人评论</label>
-                  <label><input type="checkbox" id="commentsMergeMedia"> 合并评论相册</label>
+                  <label style="font-size:0.8rem; font-weight:600;">评论资源去向
+                    <select id="commentsMergeMedia" class="pill-select">
+                      <option value="comments">发到帖子评论区</option>
+                      <option value="channel">随帖子发到频道</option>
+                    </select>
+                  </label>
                 </div>
               </div>
             </div>

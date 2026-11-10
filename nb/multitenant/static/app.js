@@ -188,7 +188,7 @@ function populateTaskForm(task) {
   document.querySelector('#commentsOnlyMedia').checked = Boolean(t.comments?.only_media);
   document.querySelector('#commentsIncludeText').checked = Boolean(t.comments?.include_text_comments ?? true);
   document.querySelector('#commentsSkipBot').checked = Boolean(t.comments?.skip_bot_comments);
-  document.querySelector('#commentsMergeMedia').checked = Boolean(t.comments?.merge_comment_media);
+  document.querySelector('#commentsMergeMedia').value = t.comments?.merge_comment_media ? 'channel' : 'comments';
 
   document.querySelector('#botMediaEnabled').checked = Boolean(t.bot_media?.enabled ?? true);
   document.querySelector('#botMediaPollInterval').value = String(t.bot_media?.poll_interval ?? 1.2);
@@ -535,7 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
         only_media: document.querySelector('#commentsOnlyMedia').checked,
         include_text_comments: document.querySelector('#commentsIncludeText').checked,
         skip_bot_comments: document.querySelector('#commentsSkipBot').checked,
-        merge_comment_media: document.querySelector('#commentsMergeMedia').checked
+        merge_comment_media: document.querySelector('#commentsMergeMedia').value === 'channel'
       },
       bot_media: {
         enabled: document.querySelector('#botMediaEnabled').checked,
