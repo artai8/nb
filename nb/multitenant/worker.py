@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import random
@@ -114,7 +115,7 @@ def _dedupe_messages(messages: list) -> list:
     return out
 
 from telethon import TelegramClient, events, utils as telethon_utils
-from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, UserAlreadyParticipantError
+from telethon.errors import AuthKeyUnregisteredError, FileReferenceExpiredError, FloodWaitError, UserAlreadyParticipantError
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, GetDiscussionMessageRequest
@@ -135,11 +136,27 @@ from .repository import LOG_BUFFER_MAX_LINES, MongoRepository
 from .security import SessionCipher, get_telegram_proxy
 from .settings import Settings
 
+# Module logger: __name__ is "nb.multitenant.worker", a child of the "nb"
+# logger, so records propagate to _TenantLogHandler and land in the
+# tenant's Mongo log ring (visible via /api/logs). Bare logging.* calls
+# use the root logger and do NOT reach the ring.
+logger = logging.getLogger(__name__)
+
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class TaskStopped(RuntimeError):
     pass
+
+
+class FileReferenceSendError(Exception):
+    """A media chunk whose file references stayed expired after both
+    fallbacks (refetch + download) in _send_templates.
+
+    Raised only for that one failure mode. _forward_and_save catches it
+    per group (past/schedule) so one stale group is skipped instead of
+    killing the whole job; every other error propagates as before.
+    """
 
 
 def _message_id(value) -> Optional[int]:
@@ -151,6 +168,33 @@ def _message_id(value) -> Optional[int]:
 def _chunks(values: list, size: int = 10):
     for index in range(0, len(values), size):
         yield values[index:index + size]
+
+
+def _is_file_reference_error(exc: BaseException) -> bool:
+    """True when an exception is an expired/invalid Telegram file reference.
+
+    Verified against the Telethon version in the worker container: the
+    bare form FILE_REFERENCE_EXPIRED maps to FileReferenceExpiredError,
+    but the indexed form Telegram actually sends for albums
+    (FILE_REFERENCE_0_EXPIRED, FILE_REFERENCE_2_EXPIRED, ...) maps to a
+    plain BadRequestError -- there is no regex for the indexed form. So
+    the class check alone misses the production error; the message
+    substring is the required fallback, not belt-and-braces.
+    """
+    if isinstance(exc, FileReferenceExpiredError):
+        return True
+    return "FILE_REFERENCE" in str(exc)
+
+
+def _peer_key(peer) -> tuple:
+    """Hashable grouping key for a Telethon peer (int id or Peer* object)."""
+    if isinstance(peer, int):
+        return ("int", peer)
+    for attr in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, attr, None)
+        if value is not None:
+            return (attr, int(value))
+    return ("obj", id(peer))
 
 
 @dataclass
@@ -1098,16 +1142,12 @@ class TenantWorker:
             if text_only and captions:
                 captions[0] = "\n\n".join(text_only + [captions[0]]) if captions[0] else "\n\n".join(text_only)
             for group in _chunks(media_templates):
-                files = [await self._file_for_send(t) for t in group]
                 group_captions = captions[:len(group)]
                 captions = captions[len(group):]
                 buttons = group[-1].reply_markup if buttons_on else None
-                result = await self.client.send_file(
-                    destination,
-                    files,
-                    caption=group_captions,
-                    reply_to=reply_to,
-                    buttons=buttons,
+                result = await self._send_files_with_reference_retry(
+                    destination, group, group_captions,
+                    reply_to=reply_to, buttons=buttons,
                 )
                 results = result if isinstance(result, list) else [result]
                 sent.extend(zip(group, results))
@@ -1136,11 +1176,19 @@ class TenantWorker:
         uploaded and wrapped in an InputMedia with spoiler=True when the
         template is spoiler-marked, because a bare path upload drops the flag.
         """
-        media = getattr(template.message, "media", None)
+        return await self._file_for_send_from(template, template.message)
+
+    async def _file_for_send_from(self, template, message):
+        """_file_for_send, but against an explicitly given message.
+
+        Used by the file-reference retry so a re-fetched message's fresh
+        media can be sent without rebuilding the template.
+        """
+        media = getattr(message, "media", None)
         spoiler = bool(media is not None and getattr(media, "spoiler", False))
         new_file = getattr(template, "new_file", None)
         if not new_file:
-            return template.message.media
+            return media
         if not spoiler:
             return new_file
         uploaded = await self.client.upload_file(new_file)
@@ -1153,6 +1201,128 @@ class TenantWorker:
             attributes=list(getattr(doc, "attributes", []) or []),
             spoiler=True,
         )
+
+    async def _refetch_group_messages(self, group: list):
+        """Re-fetch a chunk's source messages for fresh file references.
+
+        A chunk can mix peers (channel post + storage-bot messages + merged
+        comment media), so messages are re-fetched per peer. Returns the
+        fresh messages in group order, or None when any message has no
+        peer info, the re-fetch fails, or a message comes back without
+        media -- in all those cases the caller falls through to download.
+        """
+        assert self.client is not None
+        by_peer: dict = {}
+        for template in group:
+            message = getattr(template, "message", None)
+            peer = getattr(message, "peer_id", None) if message is not None else None
+            if peer is None:
+                return None
+            by_peer.setdefault(_peer_key(peer), (peer, []))[1].append(template)
+        fresh_by_id: dict = {}
+        try:
+            for peer, templates in by_peer.values():
+                ids = [int(t.message.id) for t in templates]
+                got = await self.client.get_messages(peer, ids=ids)
+                if not got:
+                    return None
+                if not isinstance(got, list):
+                    got = [got]
+                for message in got:
+                    if message is not None:
+                        fresh_by_id[int(message.id)] = message
+        except Exception:
+            logging.warning("refetch for file-reference retry failed", exc_info=True)
+            return None
+        fresh = [fresh_by_id.get(int(t.message.id)) for t in group]
+        if any(m is None or getattr(m, "media", None) is None for m in fresh):
+            return None
+        return fresh
+
+    async def _file_for_download(self, template, message):
+        """Bytes for re-upload: download the (fresh) source media.
+
+        Rewritten files (new_file) are local already -- keep them as-is
+        via _file_for_send_from. Returns a BytesIO the caller passes to
+        send_file; the uploaded bytes get a new file_unique_id, but the
+        content gets through.
+        """
+        if getattr(template, "new_file", None):
+            return await self._file_for_send_from(template, message)
+        assert self.client is not None
+        data = await self.client.download_media(message, file=io.BytesIO())
+        if data is None:
+            raise FileReferenceSendError(
+                f"download_media returned nothing for message {getattr(message, 'id', '?')}"
+            )
+        return data
+
+    async def _send_files_with_reference_retry(
+        self, destination: int, group: list, group_captions: list,
+        *, reply_to=None, buttons=None,
+    ):
+        """Send one media chunk, recovering from expired file references.
+
+        Telegram file references for old messages can go stale; the send
+        then fails with FILE_REFERENCE_{n}_EXPIRED. Two fallbacks, in
+        order: (1) re-fetch the source messages for fresh references and
+        resend; (2) download the media bytes and upload them. Raises
+        FileReferenceSendError only after both fallbacks fail -- any other
+        error (FloodWait included) propagates untouched, exactly as a
+        plain send_file would have raised it.
+        """
+        assert self.client is not None
+        files = [await self._file_for_send(t) for t in group]
+        try:
+            return await self.client.send_file(
+                destination, files, caption=group_captions,
+                reply_to=reply_to, buttons=buttons,
+            )
+        except Exception as exc:
+            if not _is_file_reference_error(exc):
+                raise
+            logging.warning(
+                "file reference expired, refetching %d source message(s)",
+                len(group),
+            )
+        fresh = await self._refetch_group_messages(group)
+        if fresh is not None:
+            files = [
+                await self._file_for_send_from(t, m)
+                for t, m in zip(group, fresh)
+            ]
+            try:
+                return await self.client.send_file(
+                    destination, files, caption=group_captions,
+                    reply_to=reply_to, buttons=buttons,
+                )
+            except Exception as exc:
+                if not _is_file_reference_error(exc):
+                    raise
+                logging.warning(
+                    "refetched file references also expired, downloading media"
+                )
+        else:
+            logging.warning(
+                "could not refetch source messages, downloading media"
+            )
+        download_from = fresh if fresh is not None else [t.message for t in group]
+        try:
+            files = [
+                await self._file_for_download(t, m)
+                for t, m in zip(group, download_from)
+            ]
+            return await self.client.send_file(
+                destination, files, caption=group_captions,
+                reply_to=reply_to, buttons=buttons,
+            )
+        except Exception as exc:
+            if _is_file_reference_error(exc):
+                raise FileReferenceSendError(
+                    "file reference expired after refetch + download for "
+                    f"{len(group)} message(s)"
+                ) from exc
+            raise
 
     async def _discussion_group_id(self, channel_id: int) -> Optional[int]:
         assert self.client is not None
@@ -1819,7 +1989,26 @@ class TenantWorker:
                     "past/schedule merge: task=%s post=%s main=%d comment_media=%d",
                     task.id, post.id, len(group), len(media),
                 )
-        sent_count = await self._forward_messages(runtime, source_id, send_group, live=False)
+        # Batch 9: a group whose media references stayed expired after the
+        # refetch + download fallbacks is SKIPPED, not fatal. The offset
+        # still advances past it and the next group runs -- one stale group
+        # must never kill a whole past/schedule job again. Only this one
+        # failure mode is caught: FloodWait, account/channel errors and
+        # anything else propagate exactly as before and still fail the job.
+        # The skip is logged through the nb.* module logger so it lands in
+        # the tenant's Mongo log ring (visible via /api/logs).
+        try:
+            sent_count = await self._forward_messages(runtime, source_id, send_group, live=False)
+        except FileReferenceSendError as exc:
+            post_ids = ",".join(
+                str(int(getattr(m, "id", 0) or 0)) for m in group
+            )
+            logger.warning(
+                "group skipped: file references expired after refetch + "
+                "download task=%s source=%s posts=%s error=%s",
+                task.id, source_id, post_ids, exc,
+            )
+            sent_count = 0
         max_id = max(int(getattr(m, "id", 0) or 0) for m in group)
         key = str(source_id)
         offsets[key] = max(int(offsets.get(key, 0) or 0), max_id)
