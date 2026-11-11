@@ -22,11 +22,20 @@ class Mode(str, Enum):
     WORKER = "worker"
 
 
+# Third-party libraries that log at DEBUG in normal operation; --loud is
+# meant for nb's own logs, not for their chatter (pymongo alone was
+# ~80% of the worker's json log, ~120 MB/hour). Keep them at WARNING
+# even when the root level is DEBUG.
+_NOISY_LOGGERS = ("pymongo", "telethon", "asyncio", "urllib3")
+
+
 def verbosity_callback(value: bool):
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         level=logging.DEBUG if value else logging.INFO,
     )
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     con.print(f"Running nb version {__version__}", style="bold cyan")
 
 

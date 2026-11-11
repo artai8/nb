@@ -6,9 +6,11 @@ import inspect
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+from telethon.errors import FileReferenceExpiredError
 from telethon.tl.types import (
     KeyboardButtonCallback,
     KeyboardButtonRow,
@@ -21,6 +23,35 @@ from nb.plugin_models import InlineButtonMode, PluginConfig, STYLE_CODES, Style
 from nb.utils import cleanup
 
 log = logging.getLogger(__name__)
+
+
+def _is_file_reference_error(exc: BaseException) -> bool:
+    """True for an expired/invalid Telegram file reference.
+
+    Same rule as the worker's send-path check: the bare form maps to
+    FileReferenceExpiredError, but the indexed form Telegram sends for
+    albums (FILE_REFERENCE_0_EXPIRED, ...) maps to a plain
+    BadRequestError, so the message substring is the required fallback.
+    The download path surfaces it as an AttributeError instead: Telethon
+    refetches internally, the refetch returns None, and downloads.py
+    takes .media on None -- the AttributeError is chained to the
+    FileReferenceExpiredError, so the exception chain is walked too.
+    """
+    seen: set = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, FileReferenceExpiredError):
+            return True
+        if "FILE_REFERENCE" in str(cur):
+            return True
+        if (
+            isinstance(cur, AttributeError)
+            and "'NoneType' object has no attribute 'media'" in str(cur)
+        ):
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
 
 
 class NbMessage:
@@ -60,9 +91,117 @@ class NbMessage:
         return "nofile"
 
     async def get_file(self) -> Optional[str]:
-        if hasattr(self.message, "download_media"):
+        """Download this message's media into the runtime temp dir.
+
+        Batch-9-style fallback for stale file references (the production
+        mark failures): a download of an old post can fail because the
+        file reference expired -- Telethon's internal refetch then returns
+        None and downloads.py raises AttributeError on None.media. On
+        such an error, re-fetch the source message once for a fresh
+        reference and retry the download once; if the refetch returns
+        nothing or the retry also fails, log a warning and return None
+        (the caller fails open on a falsy result). Any failed download
+        also removes the partial file it left behind, so residue never
+        accumulates in the runtime temp dir.
+        """
+        if not hasattr(self.message, "download_media"):
+            return None
+        before = self._snapshot_download_dir()
+        try:
             return await self.message.download_media(file=self.download_dir)
-        return None
+        except Exception as exc:
+            self._remove_download_residue(before)
+            if not _is_file_reference_error(exc):
+                raise
+            log.warning(
+                "get_file: file reference expired for message %s, refetching",
+                getattr(self.message, "id", "?"),
+            )
+            fresh = await self._refetch_message()
+            if fresh is None:
+                log.warning("get_file: refetch returned nothing, skipping download")
+                return None
+            before = self._snapshot_download_dir()
+            try:
+                return await fresh.download_media(file=self.download_dir)
+            except Exception as exc2:
+                self._remove_download_residue(before)
+                log.warning(
+                    "get_file: retry download failed for message %s: %s",
+                    getattr(self.message, "id", "?"),
+                    type(exc2).__name__,
+                )
+                return None
+
+    def _snapshot_download_dir(self) -> dict:
+        """{name: (size, mtime_ns)} of the download dir, for residue cleanup."""
+        snap: dict = {}
+        if not self.download_dir:
+            return snap
+        try:
+            names = os.listdir(self.download_dir)
+        except OSError:
+            return snap
+        for name in names:
+            try:
+                st = os.stat(os.path.join(self.download_dir, name))
+            except OSError:
+                continue
+            snap[name] = (st.st_size, st.st_mtime_ns)
+        return snap
+
+    def _remove_download_residue(self, before: dict) -> None:
+        """Delete files the failed download created or clobbered.
+
+        Telethon writes chunk by chunk, so a download that dies mid-way
+        leaves a partial file. Anything new since `before`, or whose
+        size/mtime changed, came from this download attempt.
+        """
+        if not self.download_dir:
+            return
+        try:
+            names = os.listdir(self.download_dir)
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(self.download_dir, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if before.get(name) == (st.st_size, st.st_mtime_ns):
+                continue
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.remove(path)
+            except OSError:
+                pass
+
+    async def _refetch_message(self):
+        """Re-fetch this message for a fresh file reference, or None."""
+        client = getattr(self.message, "client", None)
+        if client is None:
+            return None
+        msg_id = getattr(self.message, "id", None)
+        peer = (
+            getattr(self.message, "peer_id", None)
+            or getattr(self.message, "input_chat", None)
+            or getattr(self.message, "chat_id", None)
+        )
+        if msg_id is None or peer is None:
+            return None
+        try:
+            fresh = await client.get_messages(peer, ids=int(msg_id))
+        except Exception:
+            log.warning(
+                "get_file: refetch failed for message %s", msg_id, exc_info=True
+            )
+            return None
+        if fresh is None or getattr(fresh, "media", None) is None:
+            return None
+        return fresh
 
     def clear(self) -> None:
         if self.new_file and os.path.exists(self.new_file):

@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -971,79 +972,84 @@ class TenantWorker:
         # the tenant-wide 300s pause, giving up only after 1h (item 7 bound).
         call_started = time.monotonic()
         sent_count = 0
-        for destination in task.resolved_destinations:
-            delivery_key = f"{task.id}:{source_id}:{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
-            if not await self.db(
-                self.repo.claim_delivery,
-                delivery_key,
-                self.tenant_id,
-                task.id,
-                source_peer_id=source_id,
-                source_message_ids=[m.id for m in messages],
-                destination_peer_id=destination.peer_id,
-            ):
-                continue
-            try:
-                reply_to = await self._resolve_reply_to(
-                    runtime, source_id, messages, destination.peer_id
-                )
-                while True:
-                    # Shared 120-300s throttle (item 5): one window per send,
-                    # per tenant account — live, past, schedule and merge
-                    # flush all go through here.
-                    await self._throttle_send()
-                    try:
-                        sent = await self._send_templates(
-                            task, destination.peer_id, templates, reply_to=reply_to
-                        )
-                        break
-                    except FloodWaitError as exc:
-                        self._note_flood_wait(exc.seconds or 0)
-                        if time.monotonic() - call_started > ITEM_ABANDON_SECONDS:
-                            raise
-                        await self._wait_flood_pause()
-                sent_id = _message_id([m for _, m in sent])
-                # Note: message_map keys are the *source* ids only -- bot-media
-                # templates wrap the bot's messages, which must not pollute the
-                # mapping (a bot message id could collide with a source id).
-                source_idents = {id(m) for m in messages}
-                message_map = {
-                    str(t.message.id): int(m.id)
-                    for t, m in sent
-                    if id(t.message) in source_idents
-                    and getattr(t.message, "id", None) is not None
-                    and getattr(m, "id", None) is not None
-                }
-                await self.db(
-                    self.repo.mark_delivery_sent,
+        try:
+            for destination in task.resolved_destinations:
+                delivery_key = f"{task.id}:{source_id}:{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
+                if not await self.db(
+                    self.repo.claim_delivery,
                     delivery_key,
-                    sent_id,
-                    message_map=message_map,
-                )
-                if sent_id:
-                    sent_count += 1
-            except Exception:
-                await self.db(self.repo.release_delivery, delivery_key)
-                raise
-        if bot_messages and not self._bot_rides_with_post(runtime) and sent_count > 0:
-            # Destination switch is "comments": bot resources do not ride
-            # with the post. Send them to the destination post's discussion
-            # thread afterwards, same path as comment sync (media only).
-            # When the destination has no discussion group, that path's
-            # own fallback sends them straight to the channel instead.
-            try:
-                await self._forward_comments_to_dest(
-                    runtime, source_id, int(values[0].id), bot_messages,
-                    from_bot=True,
-                )
-            except FloodWaitError:
-                raise
-            except Exception:
-                logging.exception(
-                    "bot media thread sync failed task=%s", task.id,
-                )
-        for template in templates:
-            template.clear()
+                    self.tenant_id,
+                    task.id,
+                    source_peer_id=source_id,
+                    source_message_ids=[m.id for m in messages],
+                    destination_peer_id=destination.peer_id,
+                ):
+                    continue
+                try:
+                    reply_to = await self._resolve_reply_to(
+                        runtime, source_id, messages, destination.peer_id
+                    )
+                    while True:
+                        # Shared 120-300s throttle (item 5): one window per send,
+                        # per tenant account — live, past, schedule and merge
+                        # flush all go through here.
+                        await self._throttle_send()
+                        try:
+                            sent = await self._send_templates(
+                                task, destination.peer_id, templates, reply_to=reply_to
+                            )
+                            break
+                        except FloodWaitError as exc:
+                            self._note_flood_wait(exc.seconds or 0)
+                            if time.monotonic() - call_started > ITEM_ABANDON_SECONDS:
+                                raise
+                            await self._wait_flood_pause()
+                    sent_id = _message_id([m for _, m in sent])
+                    # Note: message_map keys are the *source* ids only -- bot-media
+                    # templates wrap the bot's messages, which must not pollute the
+                    # mapping (a bot message id could collide with a source id).
+                    source_idents = {id(m) for m in messages}
+                    message_map = {
+                        str(t.message.id): int(m.id)
+                        for t, m in sent
+                        if id(t.message) in source_idents
+                        and getattr(t.message, "id", None) is not None
+                        and getattr(m, "id", None) is not None
+                    }
+                    await self.db(
+                        self.repo.mark_delivery_sent,
+                        delivery_key,
+                        sent_id,
+                        message_map=message_map,
+                    )
+                    if sent_id:
+                        sent_count += 1
+                except Exception:
+                    await self.db(self.repo.release_delivery, delivery_key)
+                    raise
+            if bot_messages and not self._bot_rides_with_post(runtime) and sent_count > 0:
+                # Destination switch is "comments": bot resources do not ride
+                # with the post. Send them to the destination post's discussion
+                # thread afterwards, same path as comment sync (media only).
+                # When the destination has no discussion group, that path's
+                # own fallback sends them straight to the channel instead.
+                try:
+                    await self._forward_comments_to_dest(
+                        runtime, source_id, int(values[0].id), bot_messages,
+                        from_bot=True,
+                    )
+                except FloodWaitError:
+                    raise
+                except Exception:
+                    logging.exception(
+                        "bot media thread sync failed task=%s", task.id,
+                    )
+        finally:
+            # Rewritten files (new_file) are uploaded by now; delete them
+            # whether the send succeeded or failed, so a failed send never
+            # leaves .recode.* residue in the runtime temp dir.
+            for template in templates:
+                template.clear()
         return sent_count
 
     # -- comment-media merge mode (original's MergeContext) -------------
@@ -1760,6 +1766,12 @@ class TenantWorker:
         except Exception:
             await self.db(self.repo.release_delivery, delivery_key)
             raise
+        finally:
+            # Rewritten files (new_file) are uploaded by now; delete them
+            # whether the send succeeded or failed, so comment-media
+            # recodes never linger in the runtime temp dir.
+            for template in templates:
+                template.clear()
 
     async def _handle_edit(self, event) -> None:
         """Sync a source-post edit to its forwarded copies (live tasks only).
@@ -2332,40 +2344,84 @@ class Worker:
         self.settings = settings
         self.repo = repository
         self.runtimes: dict[int, asyncio.Task] = {}
+        self._stopped = asyncio.Event()
 
     async def run(self) -> None:
         await asyncio.to_thread(self.repo.ensure_indexes)
-        while True:
-            for tenant_id, task in list(self.runtimes.items()):
-                if task.done():
-                    await asyncio.gather(task, return_exceptions=True)
-                    self.runtimes.pop(tenant_id, None)
-            capacity = self.settings.worker_capacity - len(self.runtimes)
-            if capacity > 0:
-                candidates = await asyncio.to_thread(self.repo.claimable_tenant_ids)
-                for tenant_id in candidates:
-                    if capacity <= 0:
-                        break
-                    if tenant_id in self.runtimes:
-                        continue
-                    lease = await asyncio.to_thread(
-                        self.repo.claim_lease,
-                        tenant_id,
-                        self.settings.worker_id,
-                        self.settings.lease_seconds,
-                    )
-                    if lease is None:
-                        continue
-                    runtime = TenantRuntime(self.settings, self.repo, tenant_id, int(lease["epoch"]))
-                    self.runtimes[tenant_id] = asyncio.create_task(runtime.run())
-                    capacity -= 1
-            await asyncio.sleep(self.settings.poll_seconds)
+        try:
+            while not self._stopped.is_set():
+                for tenant_id, task in list(self.runtimes.items()):
+                    if task.done():
+                        await asyncio.gather(task, return_exceptions=True)
+                        self.runtimes.pop(tenant_id, None)
+                capacity = self.settings.worker_capacity - len(self.runtimes)
+                if capacity > 0:
+                    candidates = await asyncio.to_thread(self.repo.claimable_tenant_ids)
+                    for tenant_id in candidates:
+                        if capacity <= 0:
+                            break
+                        if tenant_id in self.runtimes:
+                            continue
+                        lease = await asyncio.to_thread(
+                            self.repo.claim_lease,
+                            tenant_id,
+                            self.settings.worker_id,
+                            self.settings.lease_seconds,
+                        )
+                        if lease is None:
+                            continue
+                        runtime = TenantRuntime(self.settings, self.repo, tenant_id, int(lease["epoch"]))
+                        self.runtimes[tenant_id] = asyncio.create_task(runtime.run())
+                        capacity -= 1
+                await asyncio.sleep(self.settings.poll_seconds)
+        finally:
+            # Stop every tenant worker; each one's finally runs its
+            # _cleanup(), which closes its TaskRuntime temp dir. Without
+            # this, a SIGTERM stop left orphan nb-tenant-* dirs behind.
+            for task in list(self.runtimes.values()):
+                task.cancel()
+            if self.runtimes:
+                await asyncio.gather(*self.runtimes.values(), return_exceptions=True)
+            self.runtimes.clear()
+
+
+def _cleanup_stale_temp_dirs() -> None:
+    """Remove nb-tenant-* temp dirs left by a previous worker process.
+
+    Runs once at worker startup, when no runtime exists in this process,
+    so every nb-tenant-* dir under the system temp dir is an orphan (a
+    clean stop removes its own dir via TaskRuntime.close()). Only the
+    worker creates dirs with this prefix (mkdtemp in _build_task_runtime).
+    """
+    tmp = Path(tempfile.gettempdir())
+    try:
+        entries = list(tmp.glob("nb-tenant-*"))
+    except OSError:
+        return
+    for path in entries:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+                logging.info("removed stale temp dir %s", path)
+        except OSError:
+            pass
 
 
 async def async_main() -> None:
     settings = Settings.for_worker()
     repository = MongoRepository(settings.mongo_uri, settings.mongo_db)
-    await Worker(settings, repository).run()
+    worker = Worker(settings, repository)
+    # Docker stops a container with SIGTERM; Python's default action kills
+    # the process outright, so _cleanup() (and TaskRuntime.close()) never
+    # ran and orphan temp dirs piled up. Set the stop flag instead and let
+    # run()'s finally shut the tenant workers down cleanly.
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, worker._stopped.set)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+    _cleanup_stale_temp_dirs()
+    await worker.run()
 
 
 def main() -> None:
