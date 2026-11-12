@@ -181,10 +181,28 @@ def _is_file_reference_error(exc: BaseException) -> bool:
     plain BadRequestError -- there is no regex for the indexed form. So
     the class check alone misses the production error; the message
     substring is the required fallback, not belt-and-braces.
+
+    The download path surfaces the same failure as an AttributeError
+    instead: Telethon refetches internally, the refetch returns None,
+    and downloads.py takes .media on None -- that AttributeError is
+    chained to the FileReferenceExpiredError, so the exception chain is
+    walked too. Same rule as the mark plugin's check.
     """
-    if isinstance(exc, FileReferenceExpiredError):
-        return True
-    return "FILE_REFERENCE" in str(exc)
+    seen: set = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, FileReferenceExpiredError):
+            return True
+        if "FILE_REFERENCE" in str(cur):
+            return True
+        if (
+            isinstance(cur, AttributeError)
+            and "'NoneType' object has no attribute 'media'" in str(cur)
+        ):
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
 
 
 def _peer_key(peer) -> tuple:
@@ -1205,7 +1223,14 @@ class TenantWorker:
                     reply_to=reply_to, buttons=buttons,
                 )
                 results = result if isinstance(result, list) else [result]
-                sent.extend(zip(group, results))
+                # The download fallback may skip items (None, aligned
+                # with the group); only pair the ones actually sent, so
+                # message_map never maps a source id to the wrong copy.
+                sent.extend(
+                    (template, message)
+                    for template, message in zip(group, results)
+                    if message is not None
+                )
                 reply_to = None
         else:
             for template in templates:
@@ -1294,6 +1319,35 @@ class TenantWorker:
             return None
         return fresh
 
+    async def _refetch_one_message(self, message):
+        """Re-fetch one source message for a fresh file reference, or None.
+
+        Same single-message refetch the mark plugin's get_file() uses:
+        get_messages(peer, ids=id); None when the message has no peer/id,
+        the refetch fails, or it comes back without media.
+        """
+        assert self.client is not None
+        msg_id = getattr(message, "id", None)
+        peer = (
+            getattr(message, "peer_id", None)
+            or getattr(message, "input_chat", None)
+            or getattr(message, "chat_id", None)
+        )
+        if msg_id is None or peer is None:
+            return None
+        try:
+            fresh = await self.client.get_messages(peer, ids=int(msg_id))
+        except Exception:
+            logging.warning(
+                "download refetch failed for message %s", msg_id, exc_info=True
+            )
+            return None
+        if isinstance(fresh, list):
+            fresh = fresh[0] if fresh else None
+        if fresh is None or getattr(fresh, "media", None) is None:
+            return None
+        return fresh
+
     async def _file_for_download(self, template, message):
         """Bytes for re-upload: download the (fresh) source media.
 
@@ -1301,14 +1355,49 @@ class TenantWorker:
         via _file_for_send_from. Returns a BytesIO the caller passes to
         send_file; the uploaded bytes get a new file_unique_id, but the
         content gets through.
+
+        Batch-9-style fallback for stale file references (the same failure
+        the mark plugin's get_file() already handles): a download of old
+        media can fail because the file reference expired -- Telethon's
+        internal refetch then returns None and downloads.py raises
+        AttributeError on None.media. On such an error, re-fetch the
+        source message once for a fresh reference and retry the download
+        once; if the refetch returns nothing or the retry also fails,
+        raise FileReferenceSendError so the caller can skip just this
+        item. A missing (None) message raises the same error instead of
+        leaking an AttributeError. Any other error propagates as-is.
         """
         if getattr(template, "new_file", None):
             return await self._file_for_send_from(template, message)
         assert self.client is not None
-        data = await self.client.download_media(message, file=io.BytesIO())
+        if message is None:
+            raise FileReferenceSendError("no source message to download")
+        msg_id = getattr(message, "id", "?")
+        try:
+            data = await self.client.download_media(message, file=io.BytesIO())
+        except Exception as exc:
+            if not _is_file_reference_error(exc):
+                raise
+            logging.warning(
+                "download_media: file reference expired for message %s, refetching",
+                msg_id,
+            )
+            fresh = await self._refetch_one_message(message)
+            if fresh is None:
+                raise FileReferenceSendError(
+                    f"refetch returned nothing for message {msg_id}"
+                ) from exc
+            try:
+                data = await self.client.download_media(fresh, file=io.BytesIO())
+            except Exception as exc2:
+                if _is_file_reference_error(exc2):
+                    raise FileReferenceSendError(
+                        f"retry download failed for message {msg_id}"
+                    ) from exc2
+                raise
         if data is None:
             raise FileReferenceSendError(
-                f"download_media returned nothing for message {getattr(message, 'id', '?')}"
+                f"download_media returned nothing for message {msg_id}"
             )
         return data
 
@@ -1325,6 +1414,11 @@ class TenantWorker:
         FileReferenceSendError only after both fallbacks fail -- any other
         error (FloodWait included) propagates untouched, exactly as a
         plain send_file would have raised it.
+
+        The download fallback is per-item: one stale reference skips
+        just that item (warning) instead of failing the whole chunk.
+        The return is aligned with the input group (None for skipped
+        items) so the caller can pair sent messages with templates.
         """
         assert self.client is not None
         files = [await self._file_for_send(t) for t in group]
@@ -1362,13 +1456,37 @@ class TenantWorker:
                 "could not refetch source messages, downloading media"
             )
         download_from = fresh if fresh is not None else [t.message for t in group]
+        # Per-item download: one stale reference must not sink the whole
+        # chunk. A failed item is skipped (warning with its message id)
+        # and the rest still send; only when every item fails does the
+        # chunk raise FileReferenceSendError. Any other error (FloodWait
+        # included) still propagates untouched.
+        kept: list[int] = []
+        files: list = []
+        kept_captions: list = []
+        for index, (template, message, caption) in enumerate(
+            zip(group, download_from, group_captions)
+        ):
+            try:
+                files.append(await self._file_for_download(template, message))
+            except FileReferenceSendError as exc:
+                logging.warning(
+                    "media download skipped: expired file reference "
+                    "message=%s error=%s",
+                    getattr(message, "id", "?") if message is not None else "?",
+                    exc,
+                )
+                continue
+            kept.append(index)
+            kept_captions.append(caption)
+        if not files:
+            raise FileReferenceSendError(
+                "file reference expired after refetch + download for "
+                f"{len(group)} message(s)"
+            )
         try:
-            files = [
-                await self._file_for_download(t, m)
-                for t, m in zip(group, download_from)
-            ]
-            return await self.client.send_file(
-                destination, files, caption=group_captions,
+            sent = await self.client.send_file(
+                destination, files, caption=kept_captions,
                 reply_to=reply_to, buttons=buttons,
             )
         except Exception as exc:
@@ -1378,6 +1496,15 @@ class TenantWorker:
                     f"{len(group)} message(s)"
                 ) from exc
             raise
+        if not isinstance(sent, list):
+            sent = [sent]
+        # Align with the input group so _send_templates can pair each
+        # sent message with its template; skipped items stay None and
+        # are filtered out there.
+        aligned: list = [None] * len(group)
+        for index, message in zip(kept, sent):
+            aligned[index] = message
+        return aligned
 
     def _effective_merge(self, runtime: TaskRuntime) -> bool:
         """Should comment media travel with the post as one album?
