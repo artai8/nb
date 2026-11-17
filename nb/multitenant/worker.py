@@ -44,6 +44,13 @@ FLOOD_PAUSE_SECONDS = 300.0
 ITEM_TIMEOUT_SECONDS = 600.0
 ITEM_ABANDON_SECONDS = 3600.0
 
+# Live-event enqueue: never block Telethon dispatch longer than this while
+# waiting for a free queue slot. Handlers are awaited inline by Telethon's
+# update loop, so a blocked enqueue stalls pts handling for every channel
+# and can silently lose updates (whole albums included). Past that, the
+# event is shed loudly instead (see _enqueue_event).
+QUEUE_PUT_TIMEOUT_SECONDS = 30.0
+
 # Comment albums (grouped_id) wait 2s for siblings, as in the original.
 COMMENT_GROUP_WAIT_SECONDS = 2.0
 
@@ -481,7 +488,17 @@ class TenantWorker:
     async def _enqueue_event(self, kind: str, event) -> None:
         if self.queue.full():
             logging.warning("Tenant queue applying backpressure tenant=%s kind=%s", self.tenant_id, kind)
-        await self.queue.put((kind, event))
+        try:
+            await asyncio.wait_for(
+                self.queue.put((kind, event)), timeout=QUEUE_PUT_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            # Shed loudly instead of stalling dispatch: the loss is visible
+            # in logs so a manual reconcile can pick the group up later.
+            logging.warning(
+                "Tenant queue full for %ss, dropping %s event tenant=%s qsize=%s",
+                QUEUE_PUT_TIMEOUT_SECONDS, kind, self.tenant_id, self.queue.qsize(),
+            )
 
     # -- shared send clock / flood pause / item timeout / logs -----------
 
@@ -933,6 +950,31 @@ class TenantWorker:
             lease_epoch=self.epoch,
         )
 
+    @staticmethod
+    def _delivery_key(task, source_id: int, messages: list, destination) -> str:
+        return (
+            f"{task.id}:{source_id}:"
+            f"{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
+        )
+
+    async def _all_destinations_claimed(
+        self, runtime: TaskRuntime, source_id: int, messages: list
+    ) -> bool:
+        """True when every destination already holds a claim for this group.
+
+        Mirrors the claim loop in _forward_messages: a group is claimed
+        when a delivery record exists for its key (a 'sent' record always
+        blocks; an expired 'sending' record does not).
+        """
+        destinations = runtime.task.resolved_destinations
+        if not destinations:
+            return False
+        for destination in destinations:
+            key = self._delivery_key(runtime.task, source_id, messages, destination)
+            if not await self.db(self.repo.delivery_claimed, key):
+                return False
+        return True
+
     async def _forward_messages(self, runtime: TaskRuntime, source_id: int, messages: list, *, live: bool, from_merge: bool = False) -> int:
         assert self.client is not None
         task = runtime.task
@@ -959,6 +1001,15 @@ class TenantWorker:
         # is unaffected -- only the destination of the fetched resources
         # changes. The merge flush skips this: the original's merge path
         # never did bot-media resolution either.
+        # Past mode: skip the expensive bot-media round-trip for groups the
+        # claim loop below would skip anyway. A backfill re-walks every
+        # already-delivered group; without this each one first does a full
+        # resource-bot conversation before being skipped. Read-only check:
+        # delivery_claimed never creates or extends a claim, and live mode
+        # is untouched (this gate only runs when live is False).
+        if not live and not from_merge and task.bot_media.enabled:
+            if await self._all_destinations_claimed(runtime, source_id, messages):
+                return 0
         bot_messages: list = []
         if task.bot_media.enabled and not from_merge:
             try:
@@ -992,7 +1043,7 @@ class TenantWorker:
         sent_count = 0
         try:
             for destination in task.resolved_destinations:
-                delivery_key = f"{task.id}:{source_id}:{','.join(str(m.id) for m in messages)}:{destination.peer_id}:new"
+                delivery_key = self._delivery_key(task, source_id, messages, destination)
                 if not await self.db(
                     self.repo.claim_delivery,
                     delivery_key,

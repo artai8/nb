@@ -1140,6 +1140,27 @@ class MongoRepository:
         except DuplicateKeyError:
             return False
 
+    def delivery_claimed(self, delivery_key: str) -> bool:
+        """True when a delivery record already reserves this key.
+
+        Mirrors claim_delivery without changing anything: a 'sent' record
+        always blocks; a 'sending' record blocks only while its 5-minute
+        claim window is still open (an expired one would be reclaimed by
+        the next claim_delivery call). Read-only.
+        """
+        now = utcnow()
+        doc = self.deliveries.find_one(
+            {"delivery_key": delivery_key},
+            projection={"state": 1, "claim_expires_at": 1},
+        )
+        if doc is None:
+            return False
+        if doc.get("state") == "sending":
+            expires = doc.get("claim_expires_at")
+            if expires is not None and expires <= now:
+                return False
+        return True
+
     def release_delivery(self, delivery_key: str) -> None:
         self.deliveries.delete_one({"delivery_key": delivery_key, "state": "sending"})
 
