@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     admin_ids: Set[int] = Field(default_factory=set)
     lease_seconds: int = 30
-    worker_capacity: int = 20
     poll_seconds: float = 3.0
     sync_interval_seconds: float = 5.0
     # 登录链接默认永久有效（create_magic_link 的 ttl_minutes=0），直到主动登出

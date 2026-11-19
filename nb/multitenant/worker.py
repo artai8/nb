@@ -36,13 +36,18 @@ SEND_INTERVAL_MAX_SECONDS = 300.0
 # Telegram asks for more — retry after 300s and re-check.
 FLOOD_PAUSE_SECONDS = 300.0
 
-# Per-item timeouts: the main loop waits at most 10 minutes for one forward
+# Per-item timeouts: the main loop waits at most 1 hour for one forward
 # item (one live group / one past-or-schedule group step); on timeout it
 # moves on while the stuck work keeps running in the background. A stuck
-# item that still cannot finish after 1 hour is cancelled and its error
-# recorded (job failed / task ERROR).
-ITEM_TIMEOUT_SECONDS = 600.0
-ITEM_ABANDON_SECONDS = 3600.0
+# item that still cannot finish after 4 more hours in the background is
+# cancelled and its error recorded (job failed / task ERROR).
+# 1 hour foreground covers a ~150MB download at ~100KB/s plus recode and
+# upload; the 4-hour background bound covers a ~1.4GB download the same
+# way. The runtime temp dir is kept while a task still has background
+# items (see _reload_tasks), so a timed-out download no longer loses its
+# temp files mid-flight.
+ITEM_TIMEOUT_SECONDS = 3600.0
+ITEM_ABANDON_SECONDS = 14400.0
 
 # Live-event enqueue: never block Telethon dispatch longer than this while
 # waiting for a free queue slot. Handlers are awaited inline by Telethon's
@@ -284,6 +289,11 @@ class TenantWorker:
         self._comment_group_buffers: dict[tuple, dict] = {}
         # Item 7: items that timed out and keep running in the background.
         self._background_items: dict[str, dict] = {}
+        # Retired runtimes: popped from self.tasks (task left ACTIVE/RUNNING)
+        # but NOT closed yet because a background item still uses their
+        # temp dir. Drained by _reload_tasks once their items finish, or by
+        # _cleanup at shutdown. Never routed or scheduled from here.
+        self._retired_runtimes: dict[str, TaskRuntime] = {}
         # Item 12: log ring buffer (drained to Mongo every sync cycle).
         self._log_buffer: deque = deque(maxlen=LOG_BUFFER_FLUSH_MAX)
         self._log_buffer_lock = threading.Lock()
@@ -316,6 +326,9 @@ class TenantWorker:
         for rt in list(self.tasks.values()):
             rt.close()
         self.tasks.clear()
+        for rt in list(self._retired_runtimes.values()):
+            rt.close()
+        self._retired_runtimes.clear()
         if self.client is not None:
             try:
                 await self.client.disconnect()
@@ -544,14 +557,17 @@ class TenantWorker:
         *,
         on_error: Optional[Callable] = None,
         description: str = "",
+        task_id: Optional[str] = None,
     ):
-        """Run one forward item with a 10-minute main-loop budget (item 7).
+        """Run one forward item with a 1-hour main-loop budget (item 7).
 
         Returns the coroutine's result when it finishes in time (exceptions
         propagate to the caller, as before). On timeout returns None and the
         work keeps running in the background; the reaper abandons it after
-        1 hour. ``on_error`` (async callable taking the exception) records
-        a late failure or an abandonment.
+        4 hours. ``on_error`` (async callable taking the exception) records
+        a late failure or an abandonment. ``task_id`` (when known) ties the
+        background item to its task so _reload_tasks will not delete the
+        task runtime's temp dir while the item is still running.
         """
         task = asyncio.create_task(coro)
         done, _pending = await asyncio.wait({task}, timeout=ITEM_TIMEOUT_SECONDS)
@@ -566,6 +582,7 @@ class TenantWorker:
             "started_at": time.monotonic(),
             "on_error": on_error,
             "description": description or key,
+            "task_id": task_id,
         }
         task.add_done_callback(lambda t, k=key: self._background_item_done(k, t))
         return None
@@ -597,7 +614,7 @@ class TenantWorker:
         )
 
     async def _reap_background_items(self) -> None:
-        """Cancel stuck background items older than 1h and record (item 7)."""
+        """Cancel stuck background items older than 4h and record (item 7)."""
         now = time.monotonic()
         for key, info in list(self._background_items.items()):
             task = info["task"]
@@ -612,7 +629,7 @@ class TenantWorker:
             task.cancel()
             self._background_items.pop(key, None)
             exc = TimeoutError(
-                f"item {key} stuck for over 1 hour, abandoned"
+                f"item {key} stuck for over 4 hours, abandoned"
             )
             on_error = info.get("on_error")
             if on_error is not None:
@@ -651,7 +668,7 @@ class TenantWorker:
 
         The whole-event retry matches the old _consume behaviour, but the
         wait is the tenant-wide 300s pause (item 3), not Telegram's
-        requested seconds. The 1-hour abandon bound comes from the _run_item
+        requested seconds. The 4-hour abandon bound comes from the _run_item
         wrapper that runs this coroutine (item 7).
         """
         while True:
@@ -701,6 +718,13 @@ class TenantWorker:
                 lease_epoch=self.epoch,
             )
 
+    def _task_has_background_items(self, task_id: str) -> bool:
+        """True while any background item still belongs to this task."""
+        return any(
+            info.get("task_id") == task_id
+            for info in self._background_items.values()
+        )
+
     async def _reload_tasks(self) -> None:
         await self.db(self.repo.fence_tenant_tasks, self.tenant_id, self.epoch)
         values = await self.db(self.repo.list_runtime_tasks, self.tenant_id)
@@ -713,6 +737,15 @@ class TenantWorker:
         keep = {task.id for task in values if task.status in {TaskStatus.ACTIVE, TaskStatus.RUNNING}}
         for task_id in list(self.tasks):
             if task_id not in keep:
+                if self._task_has_background_items(task_id):
+                    # Retire, do not close: a background item still uses
+                    # this runtime's temp dir (its download is in flight).
+                    # The runtime leaves self.tasks at once, so it is no
+                    # longer routed or scheduled; the temp dir is closed
+                    # by the drain pass below once the items finish.
+                    self._retired_runtimes[task_id] = self.tasks.pop(task_id)
+                    self._drop_merge_buffers(task_id)
+                    continue
                 self.tasks.pop(task_id).close()
                 self._drop_merge_buffers(task_id)
 
@@ -723,7 +756,13 @@ class TenantWorker:
             if existing and existing.task.revision == task.revision:
                 continue
             if existing:
-                existing.close()
+                if self._task_has_background_items(task.id):
+                    # Config changed while an item is still running under
+                    # the old runtime: retire the old one (its temp dir
+                    # stays alive for the item) and build fresh below.
+                    self._retired_runtimes[task.id] = self.tasks.pop(task.id)
+                else:
+                    existing.close()
             try:
                 self.tasks[task.id] = await self._build_task_runtime(task)
             except Exception as exc:
@@ -736,6 +775,13 @@ class TenantWorker:
                     expected_revision=task.revision,
                     lease_epoch=self.epoch,
                 )
+
+        # Drain retired runtimes whose background items have all finished
+        # (or were reaped): their temp dirs are no longer in use.
+        for task_id, rt in list(self._retired_runtimes.items()):
+            if not self._task_has_background_items(task_id):
+                rt.close()
+                del self._retired_runtimes[task_id]
 
         self.source_routes.clear()
         self.comment_routes.clear()
@@ -2358,7 +2404,7 @@ class TenantWorker:
     async def _forward_group_or_background(
         self, job, task, runtime, source_id: int, group: list, offsets: dict
     ):
-        """Send one job group with the 10-minute main-loop budget (item 7).
+        """Send one job group with the 1-hour main-loop budget (item 7).
 
         Returns True/False from _forward_and_save when it finishes in time
         (False = stop the job). Returns None on timeout: the group keeps
@@ -2371,6 +2417,7 @@ class TenantWorker:
             self._forward_and_save(job, task, runtime, source_id, group, offsets),
             on_error=lambda exc, jid=job["_id"]: self._finish_job_error(jid, exc),
             description=f"job group {source_id}:{first_id}",
+            task_id=task.id,
         )
 
     async def _execute_past_job(self, job) -> bool:
@@ -2532,25 +2579,24 @@ class Worker:
                     if task.done():
                         await asyncio.gather(task, return_exceptions=True)
                         self.runtimes.pop(tenant_id, None)
-                capacity = self.settings.worker_capacity - len(self.runtimes)
-                if capacity > 0:
-                    candidates = await asyncio.to_thread(self.repo.claimable_tenant_ids)
-                    for tenant_id in candidates:
-                        if capacity <= 0:
-                            break
-                        if tenant_id in self.runtimes:
-                            continue
-                        lease = await asyncio.to_thread(
-                            self.repo.claim_lease,
-                            tenant_id,
-                            self.settings.worker_id,
-                            self.settings.lease_seconds,
-                        )
-                        if lease is None:
-                            continue
-                        runtime = TenantRuntime(self.settings, self.repo, tenant_id, int(lease["epoch"]))
-                        self.runtimes[tenant_id] = asyncio.create_task(runtime.run())
-                        capacity -= 1
+                # No tenant cap: claim every claimable tenant. Each tenant
+                # gets its own runtime (own Telegram client and send
+                # throttle); plain forwarding is I/O-bound, so the worker
+                # scales with the tenant count instead of a fixed limit.
+                candidates = await asyncio.to_thread(self.repo.claimable_tenant_ids)
+                for tenant_id in candidates:
+                    if tenant_id in self.runtimes:
+                        continue
+                    lease = await asyncio.to_thread(
+                        self.repo.claim_lease,
+                        tenant_id,
+                        self.settings.worker_id,
+                        self.settings.lease_seconds,
+                    )
+                    if lease is None:
+                        continue
+                    runtime = TenantRuntime(self.settings, self.repo, tenant_id, int(lease["epoch"]))
+                    self.runtimes[tenant_id] = asyncio.create_task(runtime.run())
                 await asyncio.sleep(self.settings.poll_seconds)
         finally:
             # Stop every tenant worker; each one's finally runs its
