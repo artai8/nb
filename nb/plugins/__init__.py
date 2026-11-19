@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from telethon.errors import FileReferenceExpiredError
+from telethon.errors import FileReferenceExpiredError, MediaEmptyError
 from telethon.tl.types import (
     KeyboardButtonCallback,
     KeyboardButtonRow,
@@ -36,12 +36,18 @@ def _is_file_reference_error(exc: BaseException) -> bool:
     refetches internally, the refetch returns None, and downloads.py
     takes .media on None -- the AttributeError is chained to the
     FileReferenceExpiredError, so the exception chain is walked too.
+
+    MediaEmptyError is covered too, same rule as the worker's send-path
+    check: a by-reference multi-media send of an animated/gif document
+    is rejected with it instead of a FILE_REFERENCE_* error.
     """
     seen: set = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         if isinstance(cur, FileReferenceExpiredError):
+            return True
+        if isinstance(cur, MediaEmptyError):
             return True
         if "FILE_REFERENCE" in str(cur):
             return True

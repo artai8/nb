@@ -660,11 +660,21 @@ class MongoRepository:
         expected_revision: int,
         lease_epoch: Optional[int] = None,
     ) -> bool:
+        # Offsets are progress, not config: the write is guarded by
+        # revision (optimistic concurrency on the progress itself) and
+        # by the worker lease, but NOT by task status. A config edit
+        # mid-job moves the task to DRAFT/VALIDATING while its re-run is
+        # pending, and a pause lands while a group is still sending --
+        # in both cases the group was already sent, so its progress
+        # must still be recorded (round-2 retest 2026-11-19, P6/P6c:
+        # the old ACTIVE/RUNNING status filter turned every mid-job
+        # edit into a cancelled job). Whether the job continues or
+        # stops is the worker's decision (_save_task_offsets reads the
+        # fresh status); this method only records the progress.
         query: dict[str, Any] = {
             "_id": task_id,
             "tenant_id": tenant_id,
             "revision": expected_revision,
-            "status": {"$in": [TaskStatus.ACTIVE.value, TaskStatus.RUNNING.value]},
         }
         if lease_epoch is not None:
             query["runtime_epoch"] = lease_epoch

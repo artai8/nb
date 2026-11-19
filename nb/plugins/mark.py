@@ -37,7 +37,6 @@ from nb.plugins import NbMessage, NbPlugin
 
 logger = logging.getLogger(__name__)
 
-FFMPEG_TIMEOUT_SECONDS = 300
 WATERMARK_DOWNLOAD_TIMEOUT_SECONDS = 15
 WATERMARK_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024  # ~10 MB
 
@@ -158,7 +157,11 @@ def _apply_image_watermark(base_path: str, watermark_path: str, position: str) -
         ww, wh = wm_img.size
         xy = _watermark_xy(bw, bh, ww, wh, position)
         layer = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
-        layer.paste(wm_img, xy, wm_img)
+        # NB: no mask argument here. Passing the RGBA watermark as its
+        # own mask applies its alpha twice and the mark comes out almost
+        # invisible (5 red pixels in the 2026-11-19 round-1 test vs 641
+        # without the mask). paste() already honours the source alpha.
+        layer.paste(wm_img, xy)
         combined = Image.alpha_composite(base_img, layer)
         combined.save(out_path, format="PNG")
     return out_path
@@ -194,7 +197,9 @@ def _apply_gif_watermark(base_path: str, watermark_path: str, position: str) -> 
                         ww, wh = wm_img.size
                         xy = _watermark_xy(frame.width, frame.height, ww, wh, position)
                         layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-                        layer.paste(wm_img, xy, wm_img)
+                        # Same double-alpha trap as _apply_image_watermark:
+                        # no mask argument, paste() honours the alpha.
+                        layer.paste(wm_img, xy)
                         combined = Image.alpha_composite(frame, layer)
                     # GIFs are palette images; quantize the composited
                     # frame (opaque test/real-world GIFs keep their look;
@@ -202,13 +207,22 @@ def _apply_gif_watermark(base_path: str, watermark_path: str, position: str) -> 
                     frames.append(combined.convert("P", palette=Image.ADAPTIVE, colors=256))
         if not frames:
             return None
+        # Pillow only accepts a disposal LIST on the multi-frame path
+        # (_save_all); a single-frame GIF goes through _save, where
+        # int(disposal) raises TypeError on a list -- which used to kill
+        # every single-frame gif watermark (fail-open, sent unmarked).
+        # Pass one int when all frames agree, a list only when they differ.
+        if len(set(disposals)) <= 1:
+            disposal_arg: object = disposals[0] if disposals else 0
+        else:
+            disposal_arg = disposals
         save_kwargs: dict = {
             "format": "GIF",
             "save_all": True,
             "append_images": frames[1:],
             "duration": durations,
             "loop": loop,
-            "disposal": disposals,
+            "disposal": disposal_arg,
         }
         frames[0].save(out_path, **save_kwargs)
     except Exception as exc:
@@ -221,8 +235,12 @@ def _apply_gif_watermark(base_path: str, watermark_path: str, position: str) -> 
     return out_path
 
 
-def _run_ffmpeg(args: list[str], timeout: int = FFMPEG_TIMEOUT_SECONDS) -> bool:
-    """Run ffmpeg synchronously (called inside run_cpu). True on success."""
+def _run_ffmpeg(args: list[str]) -> bool:
+    """Run ffmpeg synchronously (called inside run_cpu). True on success.
+
+    No time limit: a long video takes as long as it takes; killing the
+    transcode mid-way would silently forward the original instead.
+    """
     if shutil.which("ffmpeg") is None:
         logger.warning("mark: ffmpeg not found, skipping")
         return False
@@ -231,7 +249,6 @@ def _run_ffmpeg(args: list[str], timeout: int = FFMPEG_TIMEOUT_SECONDS) -> bool:
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("mark: ffmpeg failed: %s", type(exc).__name__)

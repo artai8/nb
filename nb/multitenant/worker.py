@@ -128,7 +128,7 @@ def _dedupe_messages(messages: list) -> list:
     return out
 
 from telethon import TelegramClient, events, utils as telethon_utils
-from telethon.errors import AuthKeyUnregisteredError, FileReferenceExpiredError, FloodWaitError, UserAlreadyParticipantError
+from telethon.errors import AuthKeyUnregisteredError, FileReferenceExpiredError, FloodWaitError, MediaEmptyError, UserAlreadyParticipantError
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, GetDiscussionMessageRequest
@@ -199,12 +199,25 @@ def _is_file_reference_error(exc: BaseException) -> bool:
     and downloads.py takes .media on None -- that AttributeError is
     chained to the FileReferenceExpiredError, so the exception chain is
     walked too. Same rule as the mark plugin's check.
+
+    MediaEmptyError is covered too: Telegram returns it (instead of a
+    FILE_REFERENCE_* error) when a by-reference multi-media send of an
+    animated/gif document is rejected -- proven 2026-11-19 against the
+    ffmpeg test clip (DocumentAttributeAnimated, nosound): the video
+    failed every by-reference SendMultiMediaRequest (original and
+    refetched alike) while a single SendMediaRequest and a
+    download + re-upload both succeeded. So the refetch leg of the
+    fallback will not help such a clip, but the download leg will:
+    treating MediaEmptyError as a file-reference error is what lets
+    the existing refetch + download fallback run at all.
     """
     seen: set = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         if isinstance(cur, FileReferenceExpiredError):
+            return True
+        if isinstance(cur, MediaEmptyError):
             return True
         if "FILE_REFERENCE" in str(cur):
             return True
@@ -749,6 +762,7 @@ class TenantWorker:
                 self.tasks.pop(task_id).close()
                 self._drop_merge_buffers(task_id)
 
+        rebuilt_live = False
         for task in values:
             if task.status not in {TaskStatus.ACTIVE, TaskStatus.RUNNING}:
                 continue
@@ -765,6 +779,8 @@ class TenantWorker:
                     existing.close()
             try:
                 self.tasks[task.id] = await self._build_task_runtime(task)
+                if task.mode == TaskMode.LIVE:
+                    rebuilt_live = True
             except Exception as exc:
                 self.tasks.pop(task.id, None)
                 await self.db(
@@ -782,6 +798,28 @@ class TenantWorker:
             if not self._task_has_background_items(task_id):
                 rt.close()
                 del self._retired_runtimes[task_id]
+
+        if rebuilt_live and self.client is not None:
+            # Live channel tracking: Telethon only polls differences for
+            # channels in its MessageBox map, and the map is populated
+            # by get_dialogs -- a channel created after the worker
+            # started is never registered, so its posts never arrive
+            # even though the task routes exist (L1/L2/L3, 30+ min zero
+            # events while 455's long-tracked source still delivered;
+            # probe 2026-11-19: the map grew 34 -> 148 entries after a
+            # get_dialogs, test sources included). Refresh the dialog
+            # list whenever a live runtime was (re)built so new sources
+            # join the map; a worker restart rebuilds every runtime and
+            # refreshes too. Fail-open: a failed refresh must not break
+            # the sync cycle. This does not retroactively fetch posts
+            # missed while the channel was untracked -- restart + retest
+            # is still the verification step for L1/L2/L3.
+            try:
+                await self.client.get_dialogs()
+            except Exception:
+                logging.warning(
+                    "live channel tracking refresh failed", exc_info=True
+                )
 
         self.source_routes.clear()
         self.comment_routes.clear()
@@ -872,6 +910,55 @@ class TenantWorker:
             source_discussion_id=source_discussion_id,
             dest_without_discussion=dest_without_discussion,
         )
+
+    async def _refresh_runtime_if_revised(
+        self, runtime: TaskRuntime, task: ForwardTask
+    ) -> ForwardTask:
+        """Rebuild the runtime pipeline when the task was edited mid-job.
+
+        _reload_tasks only runs between jobs: _sync_and_reconcile awaits
+        _run_next_job inline, so while a past/schedule job is running
+        (throttled sends stretch it over minutes) the sync loop is
+        blocked inside the job and a config edit made in that window --
+        e.g. enabling spoiler on P3 after its job started -- never
+        reaches the runtime that is sending. The 2026-11-19 round-1
+        spoiler failure is exactly this: the pipeline itself sets
+        spoiler=True correctly (proven live against the real message),
+        but the job sent with a pipeline built before spoiler was on.
+
+        Called once per group in the past/schedule loops (one cheap
+        Mongo read per group). Only the pipeline is rebuilt, in place,
+        sharing the runtime's temp dir; GridFS-resolved mark asset
+        paths are carried over from the existing pipeline config, since
+        a fresh build would point mark.image at the unresolved value
+        (a changed watermark asset still needs a job restart -- noted,
+        not silently half-applied). Returns the task to use from here
+        on (fresh when refreshed, else the input). Note this only covers
+        the send itself: an edit landing DURING the send still leaves a
+        stale revision at offset-save time, so _save_task_offsets
+        re-reads the revision again after the send (P6/P6c, round 2).
+        """
+        fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
+        if fresh is None or fresh.revision == runtime.task.revision:
+            return task
+        cfg = fresh.plugins.model_copy(deep=True)
+        old = runtime.pipeline.config
+        if old is not None:
+            try:
+                cfg.mark.image = old.mark.image
+                for slot in ("intro", "midroll", "outro"):
+                    setattr(
+                        cfg.mark,
+                        f"ad_{slot}_path",
+                        getattr(old.mark, f"ad_{slot}_path", ""),
+                    )
+            except Exception:
+                pass
+        pipeline = PluginPipeline(cfg, download_dir=str(runtime.temp_dir))
+        await pipeline.initialize()
+        runtime.pipeline = pipeline
+        runtime.task = fresh
+        return fresh
 
     async def _validate_task(self, task: ForwardTask) -> None:
         validated = None
@@ -1450,8 +1537,8 @@ class TenantWorker:
 
         Rewritten files (new_file) are local already -- keep them as-is
         via _file_for_send_from. Returns a BytesIO the caller passes to
-        send_file; the uploaded bytes get a new file_unique_id, but the
-        content gets through.
+        send_file, rewound to position 0 (see below); the uploaded bytes
+        get a new file_unique_id, but the content gets through.
 
         Batch-9-style fallback for stale file references (the same failure
         the mark plugin's get_file() already handles): a download of old
@@ -1496,6 +1583,43 @@ class TenantWorker:
             raise FileReferenceSendError(
                 f"download_media returned nothing for message {msg_id}"
             )
+        # Round-2 retest (2026-11-19): download_media(file=BytesIO())
+        # leaves the buffer's cursor at the END (22,189-byte video came
+        # back with tell()==22189). Telethon's _FileStream measures the
+        # size then restores to the *current* position, so upload_file
+        # read 0 bytes and Telegram rejected the upload with
+        # FilePartEmptyError -- even though the download itself was
+        # complete. Rewind before returning, on both download branches
+        # above (this is the single return point for both). An empty
+        # download is the same failure mode, fail here with
+        # FileReferenceSendError instead of letting Telegram report it
+        # as an empty file part.
+        if isinstance(data, io.BytesIO):
+            if not data.getvalue():
+                raise FileReferenceSendError(
+                    f"download_media returned empty bytes for message {msg_id}"
+                )
+            data.seek(0)
+        elif hasattr(data, "seek"):
+            try:
+                data.seek(0)
+            except Exception:
+                pass
+        # Keep the source file name on the re-uploaded bytes when the
+        # source message carries one: Telethon derives the mime type and
+        # the video/document attributes from it, so a re-uploaded video
+        # still arrives as a video instead of a nameless octet-stream.
+        # Best-effort only -- a missing name keeps the old behaviour.
+        if isinstance(data, io.BytesIO):
+            try:
+                doc = getattr(getattr(message, "media", None), "document", None)
+                for attr in getattr(doc, "attributes", None) or []:
+                    name = getattr(attr, "file_name", None)
+                    if name:
+                        data.name = str(name)
+                        break
+            except Exception:
+                pass
         return data
 
     async def _send_files_with_reference_retry(
@@ -2284,10 +2408,65 @@ class TenantWorker:
             groups.append(current)
         return groups
 
+    @staticmethod
+    def _job_task_stopped(fresh) -> bool:
+        """True when a running job must end: task deleted, paused,
+        errored or completed. DRAFT/VALIDATING is NOT a stop -- that is
+        a config edit made mid-job, whose re-run is still pending (see
+        _save_task_offsets); the job keeps sending with the refreshed
+        pipeline instead of being cancelled for it."""
+        return fresh is None or fresh.status in {
+            TaskStatus.PAUSED,
+            TaskStatus.ERROR,
+            TaskStatus.COMPLETED,
+        }
+
+    async def _save_task_offsets(self, task, offsets: dict) -> bool:
+        """Save job progress, tolerating a config edit made mid-send.
+
+        Returns True when the job may continue, False when it must stop
+        (and the caller cancels the job). The offset write itself uses
+        the task's CURRENT revision, re-read just before saving: a send
+        can span minutes (tenant throttle 120-300s, background items),
+        and an edit in that window bumps the revision, so the revision
+        captured when the group started is stale by save time. The
+        round-2 retest (2026-11-19) hit exactly this twice (P6, P6c):
+        spoiler flipped mid-job -> save with the old revision failed ->
+        cancel_job, and the remaining photos were never sent.
+
+        Only an explicit stop ends the job: task deleted (fresh is
+        None), PAUSED, ERROR or COMPLETED. A config edit moves the
+        task to DRAFT/VALIDATING while its re-run is pending, and that
+        must NOT cancel the job -- the group was already sent, so its
+        progress is saved first and the job continues with the refreshed
+        pipeline (see _refresh_runtime_if_revised, called per group).
+        Saving first, then deciding, also preserves progress when the
+        user pauses mid-group instead of silently re-sending it later.
+        One retry covers a second edit landing between the re-read and
+        the write; a still-failing save (lease lost, revision churning)
+        stops the job as before.
+        """
+        for _ in range(2):
+            fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
+            if fresh is None:
+                return False
+            ok = await self.db(
+                self.repo.update_task_offsets,
+                self.tenant_id,
+                task.id,
+                dict(offsets),
+                expected_revision=fresh.revision,
+                lease_epoch=self.epoch,
+            )
+            if ok:
+                return not self._job_task_stopped(fresh)
+        return False
+
     async def _forward_and_save(
         self, job, task, runtime, source_id: int, group: list, offsets: dict
     ) -> bool:
-        """发一组消息并把进度写回任务；返回 False 表示任务中途被改/被停/租约丢了，调用方应中止。
+        """发一组消息并把进度写回任务；返回 False 表示任务中途被停/被删/租约丢了，调用方应中止。
+        中途改配置（revision 变、状态进 DRAFT/VALIDATING）不再返回 False，见 _save_task_offsets。
 
         Flood retries live inside _forward_messages (tenant-wide 300s pause,
         1h bound). The per-group delay is gone: the shared worker-level
@@ -2365,15 +2544,10 @@ class TenantWorker:
         max_id = max(int(getattr(m, "id", 0) or 0) for m in group)
         key = str(source_id)
         offsets[key] = max(int(offsets.get(key, 0) or 0), max_id)
-        ok = await self.db(
-            self.repo.update_task_offsets,
-            self.tenant_id,
-            task.id,
-            dict(offsets),
-            expected_revision=task.revision,
-            lease_epoch=self.epoch,
-        )
-        if not ok:
+        # Progress is saved against the CURRENT revision (re-read inside
+        # _save_task_offsets): a mid-send config edit must not cancel
+        # the job the way the stale task.revision used to (P6/P6c).
+        if not await self._save_task_offsets(task, offsets):
             await self.db(
                 self.repo.cancel_job,
                 job["_id"],
@@ -2449,7 +2623,12 @@ class TenantWorker:
         end = task.past.end
         for source in task.resolved_sources:
             fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
-            if fresh is None or fresh.status != TaskStatus.RUNNING:
+            # Same rule as _save_task_offsets: only an explicit stop
+            # (deleted / paused / error / completed) ends the job. A
+            # config edit moves the task to DRAFT/VALIDATING while its
+            # re-run is pending; cancelling here would drop the remaining
+            # sources for the same reason the offset save used to.
+            if self._job_task_stopped(fresh):
                 await self.db(
                     self.repo.cancel_job,
                     job["_id"],
@@ -2475,16 +2654,20 @@ class TenantWorker:
                 if key is not None and group and group_key == key:
                     group.append(message)
                 else:
-                    if group and await self._forward_group_or_background(
-                        job, task, runtime, source.peer_id, group, offsets
-                    ) is False:
-                        return True
+                    if group:
+                        task = await self._refresh_runtime_if_revised(runtime, task)
+                        if await self._forward_group_or_background(
+                            job, task, runtime, source.peer_id, group, offsets
+                        ) is False:
+                            return True
                     group = [message]
                     group_key = key
-            if group and await self._forward_group_or_background(
-                job, task, runtime, source.peer_id, group, offsets
-            ) is False:
-                return True
+            if group:
+                task = await self._refresh_runtime_if_revised(runtime, task)
+                if await self._forward_group_or_background(
+                    job, task, runtime, source.peer_id, group, offsets
+                ) is False:
+                    return True
         await self.db(
             self.repo.set_task_status,
             self.tenant_id,
@@ -2495,14 +2678,55 @@ class TenantWorker:
         )
         return False
 
+    async def _collect_schedule_messages(
+        self, source_peer_id: int, saved: int, remaining: int
+    ) -> list:
+        """Oldest-first source messages for one schedule run, up to budget.
+
+        Service messages (channel created, ...) are not forwardable and
+        must not consume the fetch window or the daily budget: S1
+        (daily_limit=2) ran iter_messages(limit=2) and got [1 (service),
+        2], so only message 2 was sent and message 3 never ran -- a real
+        bug, not throttle lag (the job completed normally). iter_messages
+        is lazy, so this walks without a limit and stops once `remaining`
+        sendable messages are collected (0 = unlimited, same as before);
+        an album is never split -- collection continues while the current
+        album's tail keeps coming. The send loop's own budget accounting
+        stays authoritative; anything collected past it simply waits for
+        the next run (its offset never advances).
+        """
+        assert self.client is not None
+        messages: list = []
+        last_group_key = None
+        async for message in self.client.iter_messages(
+            source_peer_id,
+            min_id=saved if saved else 0,
+            reverse=True,
+        ):
+            if message is None:
+                continue
+            mid = int(getattr(message, "id", 0) or 0)
+            if mid <= saved:
+                continue
+            if isinstance(message, MessageService):
+                continue
+            key = getattr(message, "grouped_id", None)
+            if remaining > 0 and len(messages) >= remaining:
+                if key is None or key != last_group_key:
+                    break
+            messages.append(message)
+            last_group_key = key
+        return messages
+
     async def _execute_schedule_job(self, job) -> bool:
         """执行定时推送：把各源自上次运行以来的新消息按时间正序推完。
 
         每日条数上限（daily_limit）是全任务跨源共享的预算，0 = 不限；
         首次运行没有进度时从最旧的消息开始搬（按上限封顶），而不是只取最
-        新的几条——否则更早的历史会被永久跳过。发送间隔由租户级共享节流
-        控制（120~300 秒随机，和实时/历史一致）。任务保持 ACTIVE。返回
-        True 表示 job 已由本方法关掉。"""
+        新的几条——否则更早的历史会被永久跳过。服务消息（建频道等）不算
+        预算也不占取数窗口（见 _collect_schedule_messages）。发送间隔由
+        租户级共享节流控制（120~300 秒随机，和实时/历史一致）。任务保持
+        ACTIVE。返回 True 表示 job 已由本方法关掉。"""
         assert self.client is not None
         task = await self.db(self.repo.get_task, self.tenant_id, job["task_id"])
         if task is None or task.status != TaskStatus.ACTIVE:
@@ -2527,7 +2751,10 @@ class TenantWorker:
         remaining = int(task.schedule.daily_limit or 0)  # 0 = unlimited, shared across sources
         for source in task.resolved_sources:
             fresh = await self.db(self.repo.get_task, self.tenant_id, task.id)
-            if fresh is None or fresh.status != TaskStatus.ACTIVE:
+            # Same rule as _save_task_offsets / _execute_past_job: only
+            # an explicit stop ends the job; a mid-job config edit
+            # (DRAFT/VALIDATING while its re-run is pending) does not.
+            if self._job_task_stopped(fresh):
                 await self.db(
                     self.repo.cancel_job,
                     job["_id"],
@@ -2536,20 +2763,11 @@ class TenantWorker:
                 )
                 return True
             saved = int(offsets.get(str(source.peer_id), 0) or 0)
-            messages: list = []
-            async for message in self.client.iter_messages(
-                source.peer_id,
-                min_id=saved if saved else 0,
-                reverse=True,
-                limit=remaining if remaining > 0 else None,
-            ):
-                if message is None:
-                    continue
-                mid = int(getattr(message, "id", 0) or 0)
-                if mid <= saved:
-                    continue
-                messages.append(message)
+            messages = await self._collect_schedule_messages(
+                source.peer_id, saved, remaining
+            )
             for group in self._group_messages(messages):
+                task = await self._refresh_runtime_if_revised(runtime, task)
                 if await self._forward_group_or_background(
                     job, task, runtime, source.peer_id, group, offsets
                 ) is False:

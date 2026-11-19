@@ -23,6 +23,7 @@ import time
 from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.messages import (
     GetBotCallbackAnswerRequest,
     GetDiscussionMessageRequest,
@@ -41,6 +42,9 @@ from nb.multitenant.models import BotMediaSettings
 logger = logging.getLogger("nb.bot_media")
 
 _START_LINK_CACHE_TTL_SECONDS = 120
+
+# How far back to scan the linked discussion group for a post's mirror.
+_MIRROR_SCAN_LIMIT = 100
 
 _NEXT_KEYWORDS = [
     "next", "more", "next page", "nextpage", "continue", "remaining",
@@ -214,6 +218,53 @@ async def get_discussion_message(client, channel_id, msg_id):
             "bot media: get discussion message failed (channel=%s, msg=%s): %s",
             channel_id, msg_id, e,
         )
+    # Fallback: the channel-peer query fails with MSG_ID_INVALID for
+    # some channels even when the post HAS a discussion mirror -- 455's
+    # source -1002112309458, proven 2026-11-19 (the same request
+    # succeeds on -1003763110632 but fails here for posts 19308/19310,
+    # while the linked group itself answers replies fine). Find the
+    # mirror in the linked group directly.
+    return await _find_discussion_mirror(client, channel_id, msg_id)
+
+
+async def _find_discussion_mirror(client, channel_id, msg_id,
+                                  limit: int = _MIRROR_SCAN_LIMIT):
+    """Mirror of a channel post in its linked discussion group, or None.
+
+    Resolves the linked group via GetFullChannel, then scans its recent
+    messages for the one whose fwd_from.channel_post is the post id.
+    Fail-open: any failure returns None, exactly like the old behaviour
+    of get_discussion_message (callers already treat None as "no
+    discussion"). The mirror's replies are then readable with the
+    normal reply_to path, which works on the linked peer where the
+    channel-peer GetRepliesRequest fails.
+    """
+    try:
+        full = await client(GetFullChannelRequest(channel_id))
+        linked = getattr(full.full_chat, "linked_chat_id", None)
+    except Exception as e:
+        logger.warning(
+            "bot media: linked-group lookup failed (channel=%s): %s",
+            channel_id, e,
+        )
+        return None
+    if not linked:
+        return None
+    try:
+        peer = await client.get_entity(linked)
+    except Exception:
+        peer = linked
+    try:
+        async for message in client.iter_messages(peer, limit=limit):
+            fwd = getattr(message, "fwd_from", None)
+            if fwd is not None and getattr(fwd, "channel_post", None) == msg_id:
+                return message
+    except Exception as e:
+        logger.warning(
+            "bot media: mirror scan failed (channel=%s, msg=%s): %s",
+            channel_id, msg_id, e,
+        )
+        return None
     return None
 
 
