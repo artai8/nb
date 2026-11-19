@@ -137,6 +137,7 @@ from telethon.tl.types import (
     ChatInviteAlready,
     InputMediaUploadedDocument,
     InputMediaUploadedPhoto,
+    MessageMediaDocument,
     MessageMediaPhoto,
     MessageService,
 )
@@ -1197,6 +1198,39 @@ class TenantWorker:
                         # flush all go through here.
                         await self._throttle_send()
                         try:
+                            # Round 4 (P7, 2026-11-19): a config edit landing
+                            # DURING the throttle sleep used to send with
+                            # templates built from the pre-edit pipeline --
+                            # the flip (14:34:00) fell between the claim
+                            # (14:32:44) and the send (14:37:22) and the
+                            # spoiler flag, baked into the templates at
+                            # build time, never took effect. Re-read the
+                            # task AFTER the wait, at the last moment before
+                            # sending, and rebuild the templates when the
+                            # revision changed, so the send uses the newest
+                            # config. The pre-throttle templates are
+                            # dropped first (clear() deletes their
+                            # rewritten files). No revision change -> the
+                            # refresh is a single cheap Mongo read and the
+                            # original templates are sent untouched.
+                            fresh_task = await self._refresh_runtime_if_revised(
+                                runtime, task
+                            )
+                            if fresh_task is not task:
+                                for _old in templates:
+                                    _old.clear()
+                                task = fresh_task
+                                templates = (
+                                    await runtime.pipeline.apply_group(values)
+                                    if len(values) > 1
+                                    else ([_t] if (_t := await runtime.pipeline.apply(values[0])) else [])
+                                )
+                            if not templates:
+                                # The mid-throttle edit filtered this group
+                                # out entirely (e.g. a blacklist added
+                                # mid-send); nothing to send for this
+                                # destination. The claim is released below.
+                                break
                             sent = await self._send_templates(
                                 task, destination.peer_id, templates, reply_to=reply_to
                             )
@@ -1206,6 +1240,9 @@ class TenantWorker:
                             if time.monotonic() - call_started > ITEM_ABANDON_SECONDS:
                                 raise
                             await self._wait_flood_pause()
+                    if not templates:
+                        await self.db(self.repo.release_delivery, delivery_key)
+                        continue
                     sent_id = _message_id([m for _, m in sent])
                     # Note: message_map keys are the *source* ids only -- bot-media
                     # templates wrap the bot's messages, which must not pollute the
@@ -1380,7 +1417,22 @@ class TenantWorker:
         can persist message_map for reply/edit/delete/comment lookups.
         """
         assert self.client is not None
-        media_templates = [template for template in templates if getattr(template.message, "media", None)]
+        # Only real file media goes down the send_file path. A link
+        # preview (MessageMediaWebPage: "check https://example.com
+        # link") has media set but no downloadable file: the old
+        # isinstance-free check sent it to _send_files_with_reference_retry,
+        # Telethon built InputSingleMedia with media=None and the job
+        # died with "TypeError: a TLObject was expected but found
+        # something else" (P2, 2026-11-19 round 3, offset stuck at 9).
+        # Such messages now fall through to the plain-text branch below.
+        media_templates = [
+            template
+            for template in templates
+            if isinstance(
+                getattr(template.message, "media", None),
+                (MessageMediaPhoto, MessageMediaDocument),
+            )
+        ]
         # Inline buttons are only sent when the inline plugin is on (its mode
         # already transformed or removed them); otherwise they are dropped,
         # as in the original (stale buttons cause send errors).
@@ -1390,12 +1442,24 @@ class TenantWorker:
             captions = [template.text or "" for template in media_templates]
             # A text-only source post (e.g. a bare start link) plus bot media
             # would otherwise lose its text entirely; fold it into the first
-            # caption, mirroring the original's combined_caption.
-            text_only = [
-                template.text
-                for template in templates
-                if not getattr(template.message, "media", None) and template.text
-            ]
+            # caption, mirroring the original's combined_caption. "Text-only"
+            # here means "no sendable file media": a link-preview message
+            # counts too (its text, or its URL when it has no caption).
+            text_only = []
+            for template in templates:
+                if isinstance(
+                    getattr(template.message, "media", None),
+                    (MessageMediaPhoto, MessageMediaDocument),
+                ):
+                    continue
+                text = template.text
+                if not text:
+                    web_page = getattr(
+                        getattr(template.message, "media", None), "web_page", None
+                    )
+                    text = getattr(web_page, "url", None) or ""
+                if text:
+                    text_only.append(text)
             if text_only and captions:
                 captions[0] = "\n\n".join(text_only + [captions[0]]) if captions[0] else "\n\n".join(text_only)
             for group in _chunks(media_templates):
@@ -1418,12 +1482,20 @@ class TenantWorker:
                 reply_to = None
         else:
             for template in templates:
-                if not template.text:
+                text = template.text
+                if not text:
+                    # A link-preview message with no caption would
+                    # otherwise vanish silently: send its URL as text.
+                    web_page = getattr(
+                        getattr(template.message, "media", None), "web_page", None
+                    )
+                    text = getattr(web_page, "url", None) or ""
+                if not text:
                     continue
                 buttons = template.reply_markup if buttons_on else None
                 result = await self.client.send_message(
                     destination,
-                    template.text,
+                    text,
                     reply_to=reply_to,
                     link_preview=False,
                     buttons=buttons,
@@ -1452,6 +1524,15 @@ class TenantWorker:
         spoiler = bool(media is not None and getattr(media, "spoiler", False))
         new_file = getattr(template, "new_file", None)
         if not new_file:
+            if media is not None and not isinstance(
+                media, (MessageMediaPhoto, MessageMediaDocument)
+            ):
+                # Not a sendable file (link preview, ...): _send_templates
+                # filters these out, but if one ever reaches the send path
+                # it must not become InputSingleMedia(media=None) -- the
+                # P2 TypeError. None marks it skipped; the retry wrapper
+                # drops such items instead of passing them to send_file.
+                return None
             return media
         if not spoiler:
             return new_file
@@ -1643,6 +1724,32 @@ class TenantWorker:
         """
         assert self.client is not None
         files = [await self._file_for_send(t) for t in group]
+        # Defence in depth for the P2 webpage crash: a template whose media
+        # is not a sendable file yields None above. Drop such items here
+        # (recursing on the sendable subset) instead of handing None to
+        # send_file, and keep the return aligned with the input group so
+        # _send_templates pairs the right messages.
+        sendable = [i for i, f in enumerate(files) if f is not None]
+        if not sendable:
+            logging.warning(
+                "media chunk has no sendable file, skipping %d item(s)",
+                len(group),
+            )
+            return [None] * len(group)
+        if len(sendable) != len(group):
+            sub_result = await self._send_files_with_reference_retry(
+                destination,
+                [group[i] for i in sendable],
+                [group_captions[i] for i in sendable],
+                reply_to=reply_to,
+                buttons=buttons,
+            )
+            if not isinstance(sub_result, list):
+                sub_result = [sub_result]
+            aligned: list = [None] * len(group)
+            for orig_i, res in zip(sendable, sub_result):
+                aligned[orig_i] = res
+            return aligned
         try:
             return await self.client.send_file(
                 destination, files, caption=group_captions,
@@ -1933,14 +2040,14 @@ class TenantWorker:
                 )
         if channel_post_id is None:
             return
-        # Merge mode: media comments join the buffered album for this post.
-        # Pure merge discards anything that cannot join (exactly like the
-        # original -- the post is not forwarded yet while buffered, so
-        # there is no destination post to reply to here). Fallback merge
-        # (destination switch on "comments" but no discussion group) joins
-        # while the buffer exists; once the post has been sent (buffer
-        # gone) it falls through to the sync path, whose own fallback
-        # sends the media straight to the channel.
+        # Merge mode: media comments join the buffered album for this post
+        # while the buffer exists. Once the post has been sent (buffer
+        # gone) the comment falls through to the sync path below, which
+        # replies to the already-forwarded destination post; if the source
+        # post was never forwarded here, the sync path skips it
+        # (find_sent_message returns None). The old early return here
+        # silently dropped out-of-window comments whenever merge was on,
+        # making comment sync and merge mutually exclusive.
         if cfg.merge_comment_media or self._fallback_merge(runtime):
             key = (task.id, source_peer_id, int(channel_post_id))
             buf = self._merge_buffers.get(key)
@@ -1953,8 +2060,6 @@ class TenantWorker:
                         "merge buffer: task=%s post=%s comment media +%d (total %d)",
                         task.id, channel_post_id, len(media), len(buf.comment_media),
                     )
-                return
-            if cfg.merge_comment_media:
                 return
         await self._forward_comments_to_dest(
             runtime, source_peer_id, int(channel_post_id), group

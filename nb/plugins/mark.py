@@ -600,17 +600,61 @@ class NbMark(NbPlugin):
                 _remove_quietly(wm_path)
         return tm
 
+    async def _recode_downloaded_video(self, tm: NbMessage, downloaded: str) -> NbMessage:
+        """Video recode (+ ads / + video_mark) for an already-downloaded file.
+
+        Shared by _recode_media (file_type "video") and _watermark_gif
+        (a Telegram "gif" that is really an mp4 on disk -- round 4).
+        Does NOT remove `downloaded`; the caller owns it.
+        """
+        try:
+            size = os.path.getsize(downloaded)
+        except OSError:
+            return tm
+        # No size cap: only skip when the temp disk cannot hold the work.
+        # Ads + watermark need up to ~4x the file size in temp copies.
+        has_ads = bool(
+            (getattr(self.data, "ad_intro", False) and getattr(self.data, "ad_intro_path", ""))
+            or (getattr(self.data, "ad_midroll", False) and getattr(self.data, "ad_midroll_path", ""))
+            or (getattr(self.data, "ad_outro", False) and getattr(self.data, "ad_outro_path", ""))
+        )
+        need = size * (4 if (has_ads or getattr(self.data, "video_mark", False)) else 2)
+        if not _disk_has_room(downloaded, need):
+            logger.warning("mark: temp disk too full, skipping recode")
+            return tm
+        out_path = f"{downloaded}.recode.mp4"
+        ok = await run_cpu(_process_video, downloaded, out_path, self.data)
+        if ok and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            tm.new_file = out_path
+        elif os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        return tm
+
     async def _watermark_gif(self, tm: NbMessage) -> NbMessage:
-        if not self.data.image:
-            return tm
-        if not _is_http_url(self.data.image) and not os.path.exists(self.data.image):
-            return tm
         downloaded = await tm.get_file()
         if not downloaded:
             return tm
         try:
             if not _is_gif(downloaded):
-                # Not actually a GIF despite the file_type: leave it alone.
+                # Round 4 (P8/P9/P10, 2026-11-19): an animated mp4 is a
+                # "gif" to Telegram (NbMessage.file_type) but an mp4 on
+                # disk. The old code returned here, so _recode_media
+                # (video_mark / ads / re-encode) never ran for it and the
+                # file went out byte-identical. When the bytes are really
+                # a video, fall through to the video recode path; anything
+                # else is left alone (fail open). Same recode gate as the
+                # video path: recode off means no processing at all.
+                if not getattr(self.data, "recode", True):
+                    return tm
+                if _probe_video(downloaded):
+                    return await self._recode_downloaded_video(tm, downloaded)
+                return tm
+            if not self.data.image:
+                return tm
+            if not _is_http_url(self.data.image) and not os.path.exists(self.data.image):
                 return tm
             try:
                 size = os.path.getsize(downloaded)
@@ -679,7 +723,10 @@ class NbMark(NbPlugin):
         out_path = f"{downloaded}{suffix}"
         try:
             if file_type == "video":
-                ok = await run_cpu(_process_video, downloaded, out_path, self.data)
+                # Shared with _watermark_gif (animated mp4s mis-typed as
+                # "gif"); the helper owns the disk guard + output naming.
+                # The outer finally still removes `downloaded`.
+                return await self._recode_downloaded_video(tm, downloaded)
             elif file_type == "document":
                 if _is_gif(downloaded):
                     # A GIF sent as a document: watermark it like a gif

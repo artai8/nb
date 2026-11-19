@@ -20,6 +20,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import timedelta
 from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -44,7 +45,13 @@ logger = logging.getLogger("nb.bot_media")
 _START_LINK_CACHE_TTL_SECONDS = 120
 
 # How far back to scan the linked discussion group for a post's mirror.
-_MIRROR_SCAN_LIMIT = 100
+_MIRROR_SCAN_LIMIT = 300
+
+# Date-window mirror search (round 4): mirrors are auto-forwarded within
+# seconds of the post, so when the recent-history scan misses (busy
+# groups push a mirror hundreds of messages back within the hour),
+# scan the window just after the post's date instead of from newest.
+_MIRROR_DATE_WINDOWS = ((timedelta(minutes=10), 500), (timedelta(hours=1), 1000))
 
 _NEXT_KEYWORDS = [
     "next", "more", "next page", "nextpage", "continue", "remaining",
@@ -206,6 +213,33 @@ def _extract_comment_keyword(text: str, settings: BotMediaSettings):
     return None
 
 
+async def _linked_group_id(client, channel_id):
+    """linked_chat_id of a channel, or None (no discussion group / error)."""
+    try:
+        full = await client(GetFullChannelRequest(channel_id))
+        return getattr(full.full_chat, "linked_chat_id", None)
+    except Exception as e:
+        logger.warning(
+            "bot media: linked-group lookup failed (channel=%s): %s",
+            channel_id, e,
+        )
+        return None
+
+
+def _linked_group_peer_id(linked_chat_id: int) -> int:
+    """Usable peer id for a linked discussion group.
+
+    GetFullChannel returns the BARE supergroup id (e.g. 2244996707);
+    Telethon resolves a bare positive int as a *user*, so a cold client
+    raises "Could not find the input entity for PeerUser" and the old
+    code fell back to the same bare int, which iter_messages then also
+    rejected -- the mirror scan silently found nothing. The -100 form
+    (-1002244996707) resolves as a channel/supergroup directly.
+    """
+    linked = int(linked_chat_id)
+    return linked if linked < 0 else int(f"-100{linked}")
+
+
 async def get_discussion_message(client, channel_id, msg_id):
     try:
         result = await client(GetDiscussionMessageRequest(
@@ -220,9 +254,9 @@ async def get_discussion_message(client, channel_id, msg_id):
         )
     # Fallback: the channel-peer query fails with MSG_ID_INVALID for
     # some channels even when the post HAS a discussion mirror -- 455's
-    # source -1002112309458, proven 2026-11-19 (the same request
-    # succeeds on -1003763110632 but fails here for posts 19308/19310,
-    # while the linked group itself answers replies fine). Find the
+    # source -1002112309458, proven 2026-11-19 (the same request fails
+    # for EVERY post there, text or album, in every peer form, while
+    # the linked group itself answers history reads fine). Find the
     # mirror in the linked group directly.
     return await _find_discussion_mirror(client, channel_id, msg_id)
 
@@ -231,29 +265,22 @@ async def _find_discussion_mirror(client, channel_id, msg_id,
                                   limit: int = _MIRROR_SCAN_LIMIT):
     """Mirror of a channel post in its linked discussion group, or None.
 
-    Resolves the linked group via GetFullChannel, then scans its recent
-    messages for the one whose fwd_from.channel_post is the post id.
-    Fail-open: any failure returns None, exactly like the old behaviour
-    of get_discussion_message (callers already treat None as "no
-    discussion"). The mirror's replies are then readable with the
-    normal reply_to path, which works on the linked peer where the
-    channel-peer GetRepliesRequest fails.
+    Fast path: scan the group's recent history. Slow path (round 4):
+    in a busy group the mirror is hundreds of messages back within the
+    hour, so scan the window just after the post's own date (mirrors
+    are auto-forwarded within seconds of the post). Fail-open: any
+    failure returns None, exactly like the old behaviour of
+    get_discussion_message (callers already treat None as "no
+    discussion").
     """
-    try:
-        full = await client(GetFullChannelRequest(channel_id))
-        linked = getattr(full.full_chat, "linked_chat_id", None)
-    except Exception as e:
-        logger.warning(
-            "bot media: linked-group lookup failed (channel=%s): %s",
-            channel_id, e,
-        )
-        return None
+    linked = await _linked_group_id(client, channel_id)
     if not linked:
         return None
+    peer_id = _linked_group_peer_id(linked)
     try:
-        peer = await client.get_entity(linked)
+        peer = await client.get_entity(peer_id)
     except Exception:
-        peer = linked
+        peer = peer_id
     try:
         async for message in client.iter_messages(peer, limit=limit):
             fwd = getattr(message, "fwd_from", None)
@@ -265,7 +292,74 @@ async def _find_discussion_mirror(client, channel_id, msg_id,
             channel_id, msg_id, e,
         )
         return None
+    # Date-window passes: the mirror sits just after the post's date.
+    post = None
+    try:
+        post = await client.get_messages(channel_id, ids=msg_id)
+    except Exception:
+        post = None
+    if isinstance(post, list):
+        post = post[0] if post else None
+    post_date = getattr(post, "date", None) if post is not None else None
+    if post_date is None:
+        return None
+    for window, scan_limit in _MIRROR_DATE_WINDOWS:
+        try:
+            async for message in client.iter_messages(
+                peer, offset_date=post_date + window, limit=scan_limit
+            ):
+                fwd = getattr(message, "fwd_from", None)
+                if fwd is not None and getattr(fwd, "channel_post", None) == msg_id:
+                    return message
+        except Exception as e:
+            logger.warning(
+                "bot media: mirror date-window scan failed "
+                "(channel=%s, msg=%s): %s",
+                channel_id, msg_id, e,
+            )
+            return None
     return None
+
+
+async def _discussion_thread_root(client, channel_id, post_id, mirror):
+    """Mirror whose replies form the post's comment thread.
+
+    Comments reply to the FIRST photo's mirror of an album post; any
+    other member's mirror raises MSG_ID_INVALID on GetReplies (proven
+    2026-11-19 on 455's source: the last photo's mirror fails, an older
+    single post's mirror reads fine). A single (non-album) post's own
+    mirror is already the root. Fail-open: any failure returns the
+    given mirror unchanged.
+    """
+    if mirror is None:
+        return None
+    if getattr(mirror, "grouped_id", None) is None:
+        return mirror
+    try:
+        post = await client.get_messages(channel_id, ids=post_id)
+    except Exception:
+        return mirror
+    if post is None or getattr(post, "grouped_id", None) is None:
+        return mirror
+    grouped = post.grouped_id
+    try:
+        siblings = await client.get_messages(
+            channel_id, ids=list(range(max(1, post_id - 9), post_id + 1))
+        )
+    except Exception:
+        return mirror
+    if not isinstance(siblings, list):
+        siblings = [siblings]
+    first_id = None
+    for sib in siblings:
+        if sib is not None and getattr(sib, "grouped_id", None) == grouped:
+            sid = int(getattr(sib, "id", 0) or 0)
+            if sid and (first_id is None or sid < first_id):
+                first_id = sid
+    if not first_id or first_id == post_id:
+        return mirror
+    root = await _find_discussion_mirror(client, channel_id, first_id)
+    return root if root is not None else mirror
 
 
 async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettings):
@@ -314,6 +408,12 @@ async def _collect_discussion_comments(client, channel_id, post_id, settings: Bo
     FIRST photo's mirror, so reading through the mirror can raise
     MSG_ID_INVALID and yield nothing. The mirror read is kept only as
     a fallback, used when the channel-peer read fails or finds nothing.
+    Round 4: the fallback now resolves the thread root explicitly
+    (_discussion_thread_root) instead of reading replies off whichever
+    album member's mirror came back, and tries the original mirror too
+    in case the root resolution misfired. A thread with no replies yet
+    raises MSG_ID_INVALID on GetReplies -- _read_comment_replies
+    already treats that as "no comments", not an error.
     """
     disc_msg = await get_discussion_message(client, channel_id, post_id)
     comments, keyword_hint = await _read_comment_replies(
@@ -323,10 +423,21 @@ async def _collect_discussion_comments(client, channel_id, post_id, settings: Bo
         return disc_msg, comments, keyword_hint
     if disc_msg is None:
         return None, [], None
-    comments, keyword_hint = await _read_comment_replies(
-        client, disc_msg.chat_id, disc_msg.id, settings
-    )
-    return disc_msg, comments, keyword_hint
+    root_msg = await _discussion_thread_root(client, channel_id, post_id, disc_msg)
+    tried = set()
+    for candidate in (root_msg, disc_msg):
+        if candidate is None:
+            continue
+        key = (getattr(candidate, "chat_id", None), getattr(candidate, "id", None))
+        if key in tried:
+            continue
+        tried.add(key)
+        comments, keyword_hint = await _read_comment_replies(
+            client, candidate.chat_id, candidate.id, settings
+        )
+        if comments:
+            return disc_msg, comments, keyword_hint
+    return disc_msg, [], None
 
 
 def _thread_root_msg_id(comments):

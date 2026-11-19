@@ -48,6 +48,7 @@ _stub("nb.multitenant.security", SessionCipher=object, get_telegram_proxy=lambda
 _stub("nb.plugins", PluginPipeline=object)
 
 from telethon.errors import FileReferenceExpiredError
+from telethon.tl.types import MessageMediaDocument
 
 from nb.multitenant.worker import (
     FileReferenceSendError,
@@ -56,8 +57,14 @@ from nb.multitenant.worker import (
 )
 
 
-class FakeMedia:
+class FakeMedia(MessageMediaDocument):
+    """A document media object (real TL type: _file_for_send_from only
+    treats MessageMediaPhoto/Document as sendable files)."""
+
     spoiler = False
+
+    def __init__(self):
+        super().__init__(document=None)
 
 
 class FakeMsg:
