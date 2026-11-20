@@ -110,6 +110,24 @@ class _TenantLogHandler(logging.Handler):
 # buffered post is flushed out instead of being dropped.
 _MAX_MERGE_BUFFERS = 100
 
+# Round 6: live merge/sync comment claims. A comment claimed for the
+# merge album must not also go out via the comment-sync path, and a
+# comment the sync path already claimed must not be merged in by a
+# flush re-read. Entries live 2h: discussion events lag 6-24 min and
+# the tenant throttle can hold either send for minutes more.
+_COMMENT_CLAIM_TTL_SECONDS = 2 * 3600
+_MAX_COMMENT_CLAIM_KEYS = 1000
+
+
+def _comment_ident(message) -> tuple:
+    """(chat_id, id) identity of a discussion comment.
+
+    Bare ids collide across chats (a comment id can equal a channel
+    post id), so the pair -- not the id alone -- is the dedup key for
+    merge/sync claims.
+    """
+    return (getattr(message, "chat_id", None), getattr(message, "id", None))
+
 
 def _random_send_interval() -> float:
     return random.uniform(SEND_INTERVAL_MIN_SECONDS, SEND_INTERVAL_MAX_SECONDS)
@@ -294,6 +312,14 @@ class TenantWorker:
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1000)
         self._bot_media = BotMediaResolver()
         self._merge_buffers: dict[tuple, MergeBuffer] = {}
+        # Round 6: per-post comment claims, key (task_id, source_peer_id,
+        # post_id) -> (claimed_at_monotonic, {(chat_id, msg_id)}).
+        # _merge_claimed_comments: media a flush claimed for the album;
+        # _sync_claimed_comments: media the sync path claimed for the
+        # destination thread. In-memory like the merge buffers -- a
+        # worker restart drops them (same class as buffer loss).
+        self._merge_claimed_comments: dict[tuple, tuple[float, set]] = {}
+        self._sync_claimed_comments: dict[tuple, tuple[float, set]] = {}
         # Item 5: ONE shared send clock for the whole tenant account.
         self._next_send_at: float = 0.0
         self._send_lock = asyncio.Lock()
@@ -1337,8 +1363,61 @@ class TenantWorker:
             return
         await self._flush_merge_buffer(key)
 
+    # -- round 6 merge/sync comment claims ------------------------------
+    # The merge flush and the comment-sync path run concurrently for the
+    # same post (a comment event can land while a flush re-read is in
+    # flight). Both sides check-then-register synchronously with no
+    # await in between, so a comment is claimed by exactly one side:
+    # whichever runs first wins; the other side sees the claim and
+    # stands down. Mongo delivery claims cannot do this -- the merge
+    # album and the sync reply use different delivery keys.
+    def _prune_comment_claims(self) -> None:
+        now = time.monotonic()
+        for store in (self._merge_claimed_comments, self._sync_claimed_comments):
+            for key in [
+                k for k, (ts, _) in store.items()
+                if now - ts > _COMMENT_CLAIM_TTL_SECONDS
+            ]:
+                del store[key]
+            while len(store) > _MAX_COMMENT_CLAIM_KEYS:
+                oldest = min(store, key=lambda k: store[k][0])
+                del store[oldest]
+
+    def _register_comment_claim(self, store: dict, key: tuple, idents) -> None:
+        idents = set(idents)
+        if not idents:
+            return
+        self._prune_comment_claims()
+        _ts, claimed = store.get(key, (time.monotonic(), set()))
+        claimed |= idents
+        store[key] = (time.monotonic(), claimed)
+
+    def _unregister_comment_claim(self, store: dict, key: tuple, idents) -> None:
+        entry = store.get(key)
+        if entry is None:
+            return
+        ts, claimed = entry
+        claimed -= set(idents)
+        if claimed:
+            store[key] = (ts, claimed)
+        else:
+            del store[key]
+
+    def _comment_claim_idents(self, store: dict, key: tuple) -> set:
+        entry = store.get(key)
+        return set(entry[1]) if entry else set()
+
     async def _flush_merge_buffer(self, key: tuple) -> None:
-        """Send a buffered post + its collected comment media as one album."""
+        """Send a buffered post + its collected comment media as one album.
+
+        Round 6: the 60s window only ever sees comment events that
+        arrive in time; discussion-group events lag 6-24 min, so a
+        comment posted seconds after the post is already on the server
+        at flush time even though its event has not arrived. The flush
+        therefore re-reads the source thread now and merges media that
+        is already there, on top of the buffered fast path. Fail-open:
+        any read failure falls back to the buffered media only.
+        """
         buf = self._merge_buffers.pop(key, None)
         if buf is None:
             return
@@ -1351,13 +1430,58 @@ class TenantWorker:
                 buf.task_id, buf.post_id,
             )
             return
+        thread_comments: list = []
+        try:
+            _disc, thread_comments, _hint = await _collect_discussion_comments(
+                self.client, buf.source_peer_id, buf.post_id,
+                runtime.task.bot_media, collect_all=True,
+            )
+        except Exception:
+            logging.warning(
+                "merge flush thread re-read failed task=%s post=%s",
+                buf.task_id, buf.post_id, exc_info=True,
+            )
+            thread_comments = []
+        # Synchronous claim block -- no await between the filter and the
+        # register, so a concurrent sync-path attempt cannot slip through
+        # in between: it either sees the merged claim (skips) or lands
+        # in the synced set first (excluded here). Never both, never
+        # neither.
+        claim_key = (buf.task_id, buf.source_peer_id, buf.post_id)
+        known = {_comment_ident(m) for m in buf.main_messages + buf.comment_media}
+        synced = self._comment_claim_idents(self._sync_claimed_comments, claim_key)
+        cap = min(int(getattr(runtime.task.bot_media, "recent_limit", 80) or 80), 100)
+        extra: list = []
+        for comment in thread_comments or []:
+            if isinstance(comment, MessageService):
+                continue
+            if getattr(getattr(comment, "fwd_from", None), "channel_post", None):
+                continue  # discussion mirror itself, not a comment
+            if not _msg_has_media(comment):
+                continue  # text-only comments are never merged
+            ident = _comment_ident(comment)
+            if ident in known or ident in synced:
+                continue
+            extra.append(comment)
+            known.add(ident)
+            if len(buf.comment_media) + len(extra) >= cap:
+                break
+        buffered_count = len(buf.comment_media)
+        if extra:
+            buf.comment_media.extend(extra)
+        self._register_comment_claim(
+            self._merge_claimed_comments,
+            claim_key,
+            [_comment_ident(m) for m in buf.comment_media],
+        )
         combined = _dedupe_messages(buf.main_messages + buf.comment_media)
         if not combined:
             return
         logging.info(
-            "merge flush: task=%s post=%s main=%d comment_media=%d",
+            "merge flush: task=%s post=%s main=%d comment_media=%d (buffered=%d thread=%d)",
             buf.task_id, buf.post_id,
             len(buf.main_messages), len(buf.comment_media),
+            buffered_count, len(extra),
         )
         # The send retries inside _forward_messages with the tenant-wide
         # 300s flood pause for up to 1h (items 3+7); reaching here with a
@@ -1697,7 +1821,20 @@ class TenantWorker:
                 for attr in getattr(doc, "attributes", None) or []:
                     name = getattr(attr, "file_name", None)
                     if name:
-                        data.name = str(name)
+                        # Do NOT keep a .webp file name: Telethon mimes the
+                        # re-upload as image/webp from it, and Telegram
+                        # rejects an image/webp document inside an album
+                        # (SendMultiMediaRequest) with MediaEmptyError --
+                        # proven 2026-11-20 against a live sticker-size
+                        # webp (reproduced twice; unnamed/.bin/.png names
+                        # and the single-send path all succeed). That error
+                        # is classified as a file-reference error, so the
+                        # whole group was skipped as "references expired"
+                        # even though the download itself had succeeded.
+                        # Leaving such bytes nameless sends them as a plain
+                        # octet-stream document, which the album accepts.
+                        if not str(name).lower().endswith(".webp"):
+                            data.name = str(name)
                         break
             except Exception:
                 pass
@@ -1819,9 +1956,15 @@ class TenantWorker:
             )
         except Exception as exc:
             if _is_file_reference_error(exc):
+                # Keep the original error visible: the re-upload leg can
+                # fail with a non-reference error that only _looks_ like
+                # one (e.g. MediaEmptyError for a .webp name in an album).
+                # Without this the group-skipped log blames the file
+                # reference and the real cause is lost (2026-11-19 post 9).
                 raise FileReferenceSendError(
                     "file reference expired after refetch + download for "
-                    f"{len(group)} message(s)"
+                    f"{len(group)} message(s) "
+                    f"(re-upload failed: {type(exc).__name__}: {exc})"
                 ) from exc
             raise
         if not isinstance(sent, list):
@@ -2104,12 +2247,38 @@ class TenantWorker:
             media = [m for m in group if _msg_has_media(m)]
             if not media:
                 continue  # text-only comments are never synced
+            claim_key = None
+            claim_idents: set = set()
+            if not from_bot:
+                # Round 6: skip media a merge flush already claimed for
+                # the destination album, and claim the rest for the sync
+                # path before any await below, so a concurrent flush
+                # re-read excludes them (see _flush_merge_buffer). The
+                # claim is registered before the skip-bot check; a bot
+                # comment skipped there is unregistered again so the
+                # merge can still pick it up.
+                claim_key = (task.id, source_peer_id, int(channel_post_id))
+                merged = self._comment_claim_idents(
+                    self._merge_claimed_comments, claim_key
+                )
+                if merged:
+                    media = [m for m in media if _comment_ident(m) not in merged]
+                    if not media:
+                        continue
+                claim_idents = {_comment_ident(m) for m in media}
+                self._register_comment_claim(
+                    self._sync_claimed_comments, claim_key, claim_idents
+                )
             if cfg.skip_bot_comments and not from_bot:
                 try:
                     sender = await media[0].get_sender()
                 except Exception:
                     sender = None
                 if sender is not None and getattr(sender, "bot", False):
+                    if claim_key is not None:
+                        self._unregister_comment_claim(
+                            self._sync_claimed_comments, claim_key, claim_idents
+                        )
                     continue
             for destination in task.resolved_destinations:
                 dest_post_id = await self.db(

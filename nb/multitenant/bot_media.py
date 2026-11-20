@@ -362,11 +362,17 @@ async def _discussion_thread_root(client, channel_id, post_id, mirror):
     return root if root is not None else mirror
 
 
-async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettings):
+async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettings,
+                              collect_all: bool = False):
     """Iterate replies to ``reply_to`` in ``peer``; return (comments, keyword_hint).
 
     keyword_hint is the first trimmed comment text whose count reaches 5
     (collection stops early once one does). Failures return ([], None).
+
+    With collect_all=True the early stop is disabled: every reply up to
+    recent_limit is returned (keyword_hint stays None). The merge flush
+    needs the full thread -- a run of 5 identical text comments must not
+    truncate media comments posted after them.
     """
     comments = []
     counts = {}
@@ -384,7 +390,7 @@ async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettin
             )
             if text:
                 counts[text] = counts.get(text, 0) + 1
-                if counts[text] >= 5:
+                if not collect_all and counts[text] >= 5:
                     keyword_hint = text
                     break
     except Exception as e:
@@ -396,11 +402,15 @@ async def _read_comment_replies(client, peer, reply_to, settings: BotMediaSettin
     return comments, keyword_hint
 
 
-async def _collect_discussion_comments(client, channel_id, post_id, settings: BotMediaSettings):
+async def _collect_discussion_comments(client, channel_id, post_id, settings: BotMediaSettings,
+                                     collect_all: bool = False):
     """Return (disc_msg, comments, keyword_hint).
 
     keyword_hint is the first trimmed comment text whose count reaches 5
-    (collection stops early once one does).
+    (collection stops early once one does). With collect_all=True the
+    early stop is disabled and every reply up to recent_limit is
+    returned (see _read_comment_replies) -- the merge flush needs the
+    full thread, not just the prefix before a repeated text.
 
     The channel post is read first (GetRepliesRequest on the channel
     peer): for album posts GetDiscussionMessageRequest returns the
@@ -417,7 +427,7 @@ async def _collect_discussion_comments(client, channel_id, post_id, settings: Bo
     """
     disc_msg = await get_discussion_message(client, channel_id, post_id)
     comments, keyword_hint = await _read_comment_replies(
-        client, channel_id, post_id, settings
+        client, channel_id, post_id, settings, collect_all=collect_all
     )
     if comments:
         return disc_msg, comments, keyword_hint
@@ -433,7 +443,8 @@ async def _collect_discussion_comments(client, channel_id, post_id, settings: Bo
             continue
         tried.add(key)
         comments, keyword_hint = await _read_comment_replies(
-            client, candidate.chat_id, candidate.id, settings
+            client, candidate.chat_id, candidate.id, settings,
+            collect_all=collect_all,
         )
         if comments:
             return disc_msg, comments, keyword_hint
